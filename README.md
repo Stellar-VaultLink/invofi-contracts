@@ -11,6 +11,14 @@ Soroban smart contracts for [InvoFi](https://invofi-five.vercel.app) — a decen
 
 ---
 
+## This repo vs. the main repo
+
+This is where **contract contributions happen** — fork it, open a PR here for anything touching Soroban/Rust code. It has its own CI and issue queue, scoped to just the contract.
+
+Production runs out of **[Stellar-VaultLink/invofi](https://github.com/Stellar-VaultLink/invofi)**, the integration monorepo that combines this contract with [invofi-frontend](https://github.com/Stellar-VaultLink/invofi-frontend) and is what Vercel actually deploys. Merged PRs here get pulled into that repo periodically. If you're looking for the full project (roadmap, deployed demo, both stacks together), start there instead.
+
+---
+
 ## Contracts
 
 ### `invofi-invoice-registry`
@@ -55,6 +63,13 @@ stellar contract deploy \
   --wasm target/wasm32v1-none/release/invofi_invoice_registry.wasm \
   --source invofi-deployer \
   --network testnet
+```
+
+Or use the scripts in `scripts/`:
+
+```bash
+bash scripts/fund-and-deploy.sh   # generate + fund a deployer key, then build + deploy
+bash scripts/deploy.sh            # build + deploy with an existing key
 ```
 
 ## Test
