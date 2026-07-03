@@ -5,6 +5,29 @@ use soroban_sdk::{contract, contractimpl, contracttype, symbol_short, token, Add
 /// Defaulted on an Overdue invoice. 7 days, in seconds.
 const GRACE_PERIOD_SECS: u64 = 604_800;
 
+// ─── Yield Rate Oracle ───────────────────────────────────────────────────────
+
+/// Risk tier for yield-rate lookups. A = low risk, C = high risk.
+#[contracttype]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[repr(u32)]
+pub enum RiskTier {
+    A = 0,
+    B = 1,
+    C = 2,
+}
+
+fn load_rates(env: &Env) -> Map<RiskTier, u32> {
+    env.storage()
+        .persistent()
+        .get(&symbol_short!("rates"))
+        .unwrap_or(Map::new(env))
+}
+
+fn save_rates(env: &Env, map: &Map<RiskTier, u32>) {
+    env.storage().persistent().set(&symbol_short!("rates"), map);
+}
+
 // ─── Invoice ─────────────────────────────────────────────────────────────────
 
 #[contracttype]
@@ -123,6 +146,52 @@ impl InvoiceRegistryContract {
             .instance()
             .get(&symbol_short!("token"))
             .unwrap_or_else(|| panic!("Not initialized"))
+    }
+
+    /// Transfers admin rights to a new address. Only the current admin can
+    /// call this.
+    pub fn transfer_admin(env: Env, admin: Address, new_admin: Address) {
+        admin.require_auth();
+        let current: Address = env
+            .storage()
+            .instance()
+            .get(&symbol_short!("admin"))
+            .unwrap_or_else(|| panic!("Not initialized"));
+        if current != admin {
+            panic!("Only the current admin can transfer admin rights");
+        }
+        env.storage().instance().set(&symbol_short!("admin"), &new_admin);
+    }
+
+    // ── Yield rate oracle functions ──────────────────────────────────────────
+
+    /// Sets the yield rate (in basis points, 0-10000) for a risk tier.
+    /// Admin only.
+    pub fn set_rate(env: Env, admin: Address, tier: RiskTier, rate_bps: u32) {
+        admin.require_auth();
+        let current: Address = env
+            .storage()
+            .instance()
+            .get(&symbol_short!("admin"))
+            .unwrap_or_else(|| panic!("Not initialized"));
+        if current != admin {
+            panic!("Only admin can set rates");
+        }
+        if rate_bps > 10_000 {
+            panic!("rate_bps must be between 0 and 10000");
+        }
+
+        let mut rates = load_rates(&env);
+        rates.set(tier, rate_bps);
+        save_rates(&env, &rates);
+    }
+
+    /// Returns the configured yield rate (basis points) for a risk tier.
+    /// Panics if that tier hasn't been set yet.
+    pub fn get_rate(env: Env, tier: RiskTier) -> u32 {
+        load_rates(&env)
+            .get(tier)
+            .unwrap_or_else(|| panic!("Rate not set for this tier"))
     }
 
     // ── Invoice functions ────────────────────────────────────────────────────

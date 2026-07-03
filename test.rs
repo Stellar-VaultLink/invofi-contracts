@@ -1,7 +1,7 @@
 #![cfg(test)]
 extern crate std;
 
-use super::{InvoiceRegistryContract, InvoiceStatus, OfferStatus};
+use super::{InvoiceRegistryContract, InvoiceStatus, OfferStatus, RiskTier};
 use soroban_sdk::{
     symbol_short,
     testutils::{Address as _, Ledger as _},
@@ -408,4 +408,106 @@ fn test_repay_unfinanced_invoice_panics() {
     );
     // Note: offer NOT accepted — invoice stays Pending
     client.repay_invoice(&invoice_id, &offer_id, &originator);
+}
+
+#[test]
+fn test_set_and_get_rate() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let contract_id = env.register(InvoiceRegistryContract, ());
+    let client = super::InvoiceRegistryContractClient::new(&env, &contract_id);
+
+    let admin = Address::generate(&env);
+    let token = Address::generate(&env);
+    client.initialize(&admin, &token);
+
+    client.set_rate(&admin, &RiskTier::A, &500u32);
+    client.set_rate(&admin, &RiskTier::B, &800u32);
+    client.set_rate(&admin, &RiskTier::C, &1200u32);
+
+    assert_eq!(client.get_rate(&RiskTier::A), 500);
+    assert_eq!(client.get_rate(&RiskTier::B), 800);
+    assert_eq!(client.get_rate(&RiskTier::C), 1200);
+}
+
+#[test]
+#[should_panic(expected = "rate_bps must be between 0 and 10000")]
+fn test_set_rate_out_of_range_panics() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let contract_id = env.register(InvoiceRegistryContract, ());
+    let client = super::InvoiceRegistryContractClient::new(&env, &contract_id);
+
+    let admin = Address::generate(&env);
+    let token = Address::generate(&env);
+    client.initialize(&admin, &token);
+
+    client.set_rate(&admin, &RiskTier::A, &10_001u32);
+}
+
+#[test]
+#[should_panic(expected = "Only admin can set rates")]
+fn test_set_rate_unauthorized_panics() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let contract_id = env.register(InvoiceRegistryContract, ());
+    let client = super::InvoiceRegistryContractClient::new(&env, &contract_id);
+
+    let admin = Address::generate(&env);
+    let not_admin = Address::generate(&env);
+    let token = Address::generate(&env);
+    client.initialize(&admin, &token);
+
+    client.set_rate(&not_admin, &RiskTier::A, &500u32);
+}
+
+#[test]
+#[should_panic(expected = "Rate not set for this tier")]
+fn test_get_unset_rate_panics() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let contract_id = env.register(InvoiceRegistryContract, ());
+    let client = super::InvoiceRegistryContractClient::new(&env, &contract_id);
+
+    let admin = Address::generate(&env);
+    let token = Address::generate(&env);
+    client.initialize(&admin, &token);
+
+    client.get_rate(&RiskTier::A);
+}
+
+#[test]
+fn test_transfer_admin() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let contract_id = env.register(InvoiceRegistryContract, ());
+    let client = super::InvoiceRegistryContractClient::new(&env, &contract_id);
+
+    let admin = Address::generate(&env);
+    let new_admin = Address::generate(&env);
+    let token = Address::generate(&env);
+    client.initialize(&admin, &token);
+
+    client.transfer_admin(&admin, &new_admin);
+    assert_eq!(client.get_admin(), new_admin);
+
+    // New admin can now set rates; old admin can't.
+    client.set_rate(&new_admin, &RiskTier::A, &500u32);
+}
+
+#[test]
+#[should_panic(expected = "Only the current admin can transfer admin rights")]
+fn test_transfer_admin_unauthorized_panics() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let contract_id = env.register(InvoiceRegistryContract, ());
+    let client = super::InvoiceRegistryContractClient::new(&env, &contract_id);
+
+    let admin = Address::generate(&env);
+    let not_admin = Address::generate(&env);
+    let new_admin = Address::generate(&env);
+    let token = Address::generate(&env);
+    client.initialize(&admin, &token);
+
+    client.transfer_admin(&not_admin, &new_admin);
 }
