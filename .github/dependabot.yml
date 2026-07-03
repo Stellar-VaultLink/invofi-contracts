@@ -5,6 +5,12 @@ updates:
     schedule:
       interval: "weekly"
     open-pull-requests-limit: 5
+    ignore:
+      # Major bumps to a deployed smart contract's SDK need a deliberate,
+      # reviewed migration (possible ABI/behavior changes), not an automated
+      # PR. Dependabot still proposes minor/patch updates.
+      - dependency-name: "*"
+        update-types: ["version-update:semver-major"]
 
   - package-ecosystem: "github-actions"
     directory: "/"
