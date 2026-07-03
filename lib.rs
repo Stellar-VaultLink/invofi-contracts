@@ -1,5 +1,32 @@
 #![no_std]
-use soroban_sdk::{contract, contractimpl, contracttype, symbol_short, Address, Env, Map, Symbol};
+use soroban_sdk::{contract, contractimpl, contracttype, symbol_short, token, Address, Env, Map, Symbol};
+
+/// Grace period after due_date before a lender can mark a Financed offer
+/// Defaulted on an Overdue invoice. 7 days, in seconds.
+const GRACE_PERIOD_SECS: u64 = 604_800;
+
+// ─── Yield Rate Oracle ───────────────────────────────────────────────────────
+
+/// Risk tier for yield-rate lookups. A = low risk, C = high risk.
+#[contracttype]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[repr(u32)]
+pub enum RiskTier {
+    A = 0,
+    B = 1,
+    C = 2,
+}
+
+fn load_rates(env: &Env) -> Map<RiskTier, u32> {
+    env.storage()
+        .persistent()
+        .get(&symbol_short!("rates"))
+        .unwrap_or(Map::new(env))
+}
+
+fn save_rates(env: &Env, map: &Map<RiskTier, u32>) {
+    env.storage().persistent().set(&symbol_short!("rates"), map);
+}
 
 // ─── Invoice ─────────────────────────────────────────────────────────────────
 
@@ -90,6 +117,83 @@ pub struct InvoiceRegistryContract;
 
 #[contractimpl]
 impl InvoiceRegistryContract {
+    // ── Admin / token setup ──────────────────────────────────────────────────
+
+    /// One-time setup. Sets the admin and the SEP-41 token contract used to
+    /// move funds on `accept_offer` and `repay_invoice`. Must be called once,
+    /// right after deployment, before any offer can be accepted.
+    pub fn initialize(env: Env, admin: Address, token: Address) {
+        admin.require_auth();
+        if env.storage().instance().has(&symbol_short!("admin")) {
+            panic!("Already initialized");
+        }
+        env.storage().instance().set(&symbol_short!("admin"), &admin);
+        env.storage().instance().set(&symbol_short!("token"), &token);
+    }
+
+    /// Returns the admin address. Panics if not yet initialized.
+    pub fn get_admin(env: Env) -> Address {
+        env.storage()
+            .instance()
+            .get(&symbol_short!("admin"))
+            .unwrap_or_else(|| panic!("Not initialized"))
+    }
+
+    /// Returns the SEP-41 token contract address used for fund movement.
+    /// Panics if not yet initialized.
+    pub fn get_token(env: Env) -> Address {
+        env.storage()
+            .instance()
+            .get(&symbol_short!("token"))
+            .unwrap_or_else(|| panic!("Not initialized"))
+    }
+
+    /// Transfers admin rights to a new address. Only the current admin can
+    /// call this.
+    pub fn transfer_admin(env: Env, admin: Address, new_admin: Address) {
+        admin.require_auth();
+        let current: Address = env
+            .storage()
+            .instance()
+            .get(&symbol_short!("admin"))
+            .unwrap_or_else(|| panic!("Not initialized"));
+        if current != admin {
+            panic!("Only the current admin can transfer admin rights");
+        }
+        env.storage().instance().set(&symbol_short!("admin"), &new_admin);
+    }
+
+    // ── Yield rate oracle functions ──────────────────────────────────────────
+
+    /// Sets the yield rate (in basis points, 0-10000) for a risk tier.
+    /// Admin only.
+    pub fn set_rate(env: Env, admin: Address, tier: RiskTier, rate_bps: u32) {
+        admin.require_auth();
+        let current: Address = env
+            .storage()
+            .instance()
+            .get(&symbol_short!("admin"))
+            .unwrap_or_else(|| panic!("Not initialized"));
+        if current != admin {
+            panic!("Only admin can set rates");
+        }
+        if rate_bps > 10_000 {
+            panic!("rate_bps must be between 0 and 10000");
+        }
+
+        let mut rates = load_rates(&env);
+        rates.set(tier, rate_bps);
+        save_rates(&env, &rates);
+    }
+
+    /// Returns the configured yield rate (basis points) for a risk tier.
+    /// Panics if that tier hasn't been set yet.
+    pub fn get_rate(env: Env, tier: RiskTier) -> u32 {
+        load_rates(&env)
+            .get(tier)
+            .unwrap_or_else(|| panic!("Rate not set for this tier"))
+    }
+
     // ── Invoice functions ────────────────────────────────────────────────────
 
     /// Register a new invoice. Only the originator can call this.
@@ -216,6 +320,24 @@ impl InvoiceRegistryContract {
             panic!("Invoice is not in Pending status");
         }
 
+        // Pull the lender's principal and pay it straight to the business —
+        // this is the "immediate liquidity" the protocol promises. The
+        // lender must have called token.approve(lender, <this contract>,
+        // offer.amount, ...) on the token contract before the offer is
+        // accepted, since the lender isn't a co-signer of this call.
+        let token_id: Address = env
+            .storage()
+            .instance()
+            .get(&symbol_short!("token"))
+            .unwrap_or_else(|| panic!("Not initialized"));
+        let token_client = token::TokenClient::new(&env, &token_id);
+        token_client.transfer_from(
+            &env.current_contract_address(),
+            &offer.lender,
+            &invoice.originator,
+            &offer.amount,
+        );
+
         offer.status = OfferStatus::Accepted;
         offer.funded_at = env.ledger().timestamp();
         offers.set(offer_id, offer.clone());
@@ -291,6 +413,19 @@ impl InvoiceRegistryContract {
             panic!("Offer must be Accepted before repayment");
         }
 
+        // Repay principal + yield directly to the lender. `repayer` already
+        // authorized this call above, so a direct transfer (not
+        // transfer_from) is sufficient — no prior approval needed.
+        let token_id: Address = env
+            .storage()
+            .instance()
+            .get(&symbol_short!("token"))
+            .unwrap_or_else(|| panic!("Not initialized"));
+        let token_client = token::TokenClient::new(&env, &token_id);
+        let yield_amount = offer.amount * (offer.interest_rate as i128) / 10_000;
+        let repay_amount = offer.amount + yield_amount;
+        token_client.transfer(&repayer, &offer.lender, &repay_amount);
+
         invoice.status = InvoiceStatus::Repaid;
         invoices.set(invoice_id, invoice.clone());
         save_invoices(&env, &invoices);
@@ -300,6 +435,49 @@ impl InvoiceRegistryContract {
         save_offers(&env, &offers);
 
         invoice
+    }
+
+    /// After an invoice has been marked Overdue (see `mark_overdue`) and the
+    /// grace period has elapsed, the financing lender can mark their offer
+    /// Defaulted. No funds move here — principal was already paid to the
+    /// business at `accept_offer` time, so this is an on-chain default
+    /// record for off-chain recovery, not a refund. There is nothing held
+    /// in escrow to reclaim under this protocol's unsecured-financing model.
+    pub fn reclaim_invoice(env: Env, invoice_id: Symbol, offer_id: Symbol, lender: Address) -> FinancingOffer {
+        lender.require_auth();
+
+        let invoices = load_invoices(&env);
+        let invoice = invoices
+            .get(invoice_id.clone())
+            .unwrap_or_else(|| panic!("Invoice not found"));
+
+        if invoice.status != InvoiceStatus::Overdue {
+            panic!("Invoice must be Overdue before reclaim");
+        }
+        if env.ledger().timestamp() < invoice.due_date + GRACE_PERIOD_SECS {
+            panic!("Grace period has not elapsed");
+        }
+
+        let mut offers = load_offers(&env);
+        let mut offer = offers
+            .get(offer_id.clone())
+            .unwrap_or_else(|| panic!("Offer not found"));
+
+        if offer.invoice_id != invoice_id {
+            panic!("Offer does not belong to this invoice");
+        }
+        if offer.lender != lender {
+            panic!("Only the financing lender can reclaim");
+        }
+        if offer.status != OfferStatus::Accepted {
+            panic!("Offer must be Accepted before reclaim");
+        }
+
+        offer.status = OfferStatus::Defaulted;
+        offers.set(offer_id, offer.clone());
+        save_offers(&env, &offers);
+
+        offer
     }
 
     /// Mark an invoice as overdue. Can be called by anyone after due_date has passed.
