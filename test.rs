@@ -1,8 +1,29 @@
 #![cfg(test)]
 extern crate std;
 
-use super::{InvoiceRegistryContract, InvoiceStatus, OfferStatus};
-use soroban_sdk::{symbol_short, testutils::Address as _, Address, Env};
+use super::{InvoiceRegistryContract, InvoiceStatus, OfferStatus, RiskTier};
+use soroban_sdk::{
+    symbol_short,
+    testutils::{Address as _, Ledger as _},
+    token, Address, Env,
+};
+
+/// Deploys a test SEP-41 token, mints `amount` to `lender`, and approves the
+/// given contract as spender for `amount` — the setup a real lender would do
+/// before their offer can be accepted.
+fn setup_token(env: &Env, contract_id: &Address, lender: &Address, amount: i128) -> Address {
+    let token_admin = Address::generate(env);
+    let sac = env.register_stellar_asset_contract_v2(token_admin);
+    let token_id = sac.address();
+
+    let asset_client = token::StellarAssetClient::new(env, &token_id);
+    asset_client.mint(lender, &amount);
+
+    let token_client = token::TokenClient::new(env, &token_id);
+    token_client.approve(lender, contract_id, &amount, &(env.ledger().sequence() + 1000));
+
+    token_id
+}
 
 #[test]
 fn test_register_and_get_invoice() {
@@ -134,15 +155,20 @@ fn test_accept_offer() {
     let contract_id = env.register(InvoiceRegistryContract, ());
     let client = super::InvoiceRegistryContractClient::new(&env, &contract_id);
 
+    let admin = Address::generate(&env);
     let originator = Address::generate(&env);
     let lender = Address::generate(&env);
     let invoice_id = symbol_short!("inv004");
     let offer_id = symbol_short!("off002");
+    let amount: i128 = 1_000_000_000;
+
+    let token_id = setup_token(&env, &contract_id, &lender, amount);
+    client.initialize(&admin, &token_id);
 
     client.register_invoice(
         &invoice_id,
         &originator,
-        &(1_000_000_000i128),
+        &amount,
         &symbol_short!("USDC"),
         &(1_735_689_600u64),
     );
@@ -150,7 +176,7 @@ fn test_accept_offer() {
         &offer_id,
         &invoice_id,
         &lender,
-        &(1_000_000_000i128),
+        &amount,
         &symbol_short!("USDC"),
         &300u32,
         &(1_296_000u64),
@@ -161,6 +187,29 @@ fn test_accept_offer() {
 
     let invoice = client.get_invoice(&invoice_id);
     assert_eq!(invoice.status, InvoiceStatus::Financed);
+
+    // Principal moved from lender to business immediately on acceptance.
+    let token_client = token::TokenClient::new(&env, &token_id);
+    assert_eq!(token_client.balance(&lender), 0);
+    assert_eq!(token_client.balance(&originator), amount);
+}
+
+#[test]
+fn test_initialize_twice_panics() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let contract_id = env.register(InvoiceRegistryContract, ());
+    let client = super::InvoiceRegistryContractClient::new(&env, &contract_id);
+
+    let admin = Address::generate(&env);
+    let token = Address::generate(&env);
+
+    client.initialize(&admin, &token);
+    assert_eq!(client.get_admin(), admin);
+    assert_eq!(client.get_token(), token);
+
+    let result = client.try_initialize(&admin, &token);
+    assert!(result.is_err());
 }
 
 #[test]
@@ -207,15 +256,21 @@ fn test_repay_invoice() {
     let contract_id = env.register(InvoiceRegistryContract, ());
     let client = super::InvoiceRegistryContractClient::new(&env, &contract_id);
 
+    let admin = Address::generate(&env);
     let originator = Address::generate(&env);
     let lender = Address::generate(&env);
     let invoice_id = symbol_short!("inv006");
     let offer_id = symbol_short!("off004");
+    let amount: i128 = 1_000_000_000;
+    let interest_rate: u32 = 500; // 5.00%
+
+    let token_id = setup_token(&env, &contract_id, &lender, amount);
+    client.initialize(&admin, &token_id);
 
     client.register_invoice(
         &invoice_id,
         &originator,
-        &(1_000_000_000i128),
+        &amount,
         &symbol_short!("USDC"),
         &(1_735_689_600u64),
     );
@@ -223,18 +278,103 @@ fn test_repay_invoice() {
         &offer_id,
         &invoice_id,
         &lender,
-        &(1_000_000_000i128),
+        &amount,
         &symbol_short!("USDC"),
-        &500u32,
+        &interest_rate,
         &(2_592_000u64),
     );
     client.accept_offer(&offer_id, &originator);
+
+    // Business needs principal + yield on hand to repay — mint them the
+    // yield portion (they already hold the principal from acceptance).
+    let yield_amount = amount * (interest_rate as i128) / 10_000;
+    let asset_client = token::StellarAssetClient::new(&env, &token_id);
+    asset_client.mint(&originator, &yield_amount);
 
     let repaid = client.repay_invoice(&invoice_id, &offer_id, &originator);
     assert_eq!(repaid.status, InvoiceStatus::Repaid);
 
     let offer = client.get_offer(&offer_id);
     assert_eq!(offer.status, OfferStatus::Repaid);
+
+    let token_client = token::TokenClient::new(&env, &token_id);
+    assert_eq!(token_client.balance(&lender), amount + yield_amount);
+    assert_eq!(token_client.balance(&originator), 0);
+}
+
+#[test]
+fn test_reclaim_invoice_after_grace_period() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let contract_id = env.register(InvoiceRegistryContract, ());
+    let client = super::InvoiceRegistryContractClient::new(&env, &contract_id);
+
+    let admin = Address::generate(&env);
+    let originator = Address::generate(&env);
+    let lender = Address::generate(&env);
+    let invoice_id = symbol_short!("inv008");
+    let offer_id = symbol_short!("off006");
+    let amount: i128 = 1_000_000_000;
+    let due_date: u64 = 1_735_689_600;
+
+    let token_id = setup_token(&env, &contract_id, &lender, amount);
+    client.initialize(&admin, &token_id);
+
+    client.register_invoice(&invoice_id, &originator, &amount, &symbol_short!("USDC"), &due_date);
+    client.create_offer(
+        &offer_id,
+        &invoice_id,
+        &lender,
+        &amount,
+        &symbol_short!("USDC"),
+        &500u32,
+        &(2_592_000u64),
+    );
+    client.accept_offer(&offer_id, &originator);
+
+    // Move past due_date + grace period.
+    env.ledger().set_timestamp(due_date + super::GRACE_PERIOD_SECS + 1);
+    client.mark_overdue(&invoice_id);
+
+    let reclaimed = client.reclaim_invoice(&invoice_id, &offer_id, &lender);
+    assert_eq!(reclaimed.status, OfferStatus::Defaulted);
+}
+
+#[test]
+#[should_panic(expected = "Grace period has not elapsed")]
+fn test_reclaim_before_grace_period_panics() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let contract_id = env.register(InvoiceRegistryContract, ());
+    let client = super::InvoiceRegistryContractClient::new(&env, &contract_id);
+
+    let admin = Address::generate(&env);
+    let originator = Address::generate(&env);
+    let lender = Address::generate(&env);
+    let invoice_id = symbol_short!("inv009");
+    let offer_id = symbol_short!("off007");
+    let amount: i128 = 1_000_000_000;
+    let due_date: u64 = 1_735_689_600;
+
+    let token_id = setup_token(&env, &contract_id, &lender, amount);
+    client.initialize(&admin, &token_id);
+
+    client.register_invoice(&invoice_id, &originator, &amount, &symbol_short!("USDC"), &due_date);
+    client.create_offer(
+        &offer_id,
+        &invoice_id,
+        &lender,
+        &amount,
+        &symbol_short!("USDC"),
+        &500u32,
+        &(2_592_000u64),
+    );
+    client.accept_offer(&offer_id, &originator);
+
+    // Just past due_date, but not past the grace period yet.
+    env.ledger().set_timestamp(due_date + 1);
+    client.mark_overdue(&invoice_id);
+    client.reclaim_invoice(&invoice_id, &offer_id, &lender);
 }
 
 #[test]
@@ -268,4 +408,106 @@ fn test_repay_unfinanced_invoice_panics() {
     );
     // Note: offer NOT accepted — invoice stays Pending
     client.repay_invoice(&invoice_id, &offer_id, &originator);
+}
+
+#[test]
+fn test_set_and_get_rate() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let contract_id = env.register(InvoiceRegistryContract, ());
+    let client = super::InvoiceRegistryContractClient::new(&env, &contract_id);
+
+    let admin = Address::generate(&env);
+    let token = Address::generate(&env);
+    client.initialize(&admin, &token);
+
+    client.set_rate(&admin, &RiskTier::A, &500u32);
+    client.set_rate(&admin, &RiskTier::B, &800u32);
+    client.set_rate(&admin, &RiskTier::C, &1200u32);
+
+    assert_eq!(client.get_rate(&RiskTier::A), 500);
+    assert_eq!(client.get_rate(&RiskTier::B), 800);
+    assert_eq!(client.get_rate(&RiskTier::C), 1200);
+}
+
+#[test]
+#[should_panic(expected = "rate_bps must be between 0 and 10000")]
+fn test_set_rate_out_of_range_panics() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let contract_id = env.register(InvoiceRegistryContract, ());
+    let client = super::InvoiceRegistryContractClient::new(&env, &contract_id);
+
+    let admin = Address::generate(&env);
+    let token = Address::generate(&env);
+    client.initialize(&admin, &token);
+
+    client.set_rate(&admin, &RiskTier::A, &10_001u32);
+}
+
+#[test]
+#[should_panic(expected = "Only admin can set rates")]
+fn test_set_rate_unauthorized_panics() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let contract_id = env.register(InvoiceRegistryContract, ());
+    let client = super::InvoiceRegistryContractClient::new(&env, &contract_id);
+
+    let admin = Address::generate(&env);
+    let not_admin = Address::generate(&env);
+    let token = Address::generate(&env);
+    client.initialize(&admin, &token);
+
+    client.set_rate(&not_admin, &RiskTier::A, &500u32);
+}
+
+#[test]
+#[should_panic(expected = "Rate not set for this tier")]
+fn test_get_unset_rate_panics() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let contract_id = env.register(InvoiceRegistryContract, ());
+    let client = super::InvoiceRegistryContractClient::new(&env, &contract_id);
+
+    let admin = Address::generate(&env);
+    let token = Address::generate(&env);
+    client.initialize(&admin, &token);
+
+    client.get_rate(&RiskTier::A);
+}
+
+#[test]
+fn test_transfer_admin() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let contract_id = env.register(InvoiceRegistryContract, ());
+    let client = super::InvoiceRegistryContractClient::new(&env, &contract_id);
+
+    let admin = Address::generate(&env);
+    let new_admin = Address::generate(&env);
+    let token = Address::generate(&env);
+    client.initialize(&admin, &token);
+
+    client.transfer_admin(&admin, &new_admin);
+    assert_eq!(client.get_admin(), new_admin);
+
+    // New admin can now set rates; old admin can't.
+    client.set_rate(&new_admin, &RiskTier::A, &500u32);
+}
+
+#[test]
+#[should_panic(expected = "Only the current admin can transfer admin rights")]
+fn test_transfer_admin_unauthorized_panics() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let contract_id = env.register(InvoiceRegistryContract, ());
+    let client = super::InvoiceRegistryContractClient::new(&env, &contract_id);
+
+    let admin = Address::generate(&env);
+    let not_admin = Address::generate(&env);
+    let new_admin = Address::generate(&env);
+    let token = Address::generate(&env);
+    client.initialize(&admin, &token);
+
+    client.transfer_admin(&not_admin, &new_admin);
 }
