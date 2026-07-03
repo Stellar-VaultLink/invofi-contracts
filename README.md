@@ -24,8 +24,12 @@ Production runs out of **[Stellar-VaultLink/invofi](https://github.com/Stellar-V
 ### `invofi-invoice-registry`
 The core protocol contract. Handles the full invoice financing lifecycle:
 - Register invoices on-chain
-- Accept and reject financing offers
-- Repay invoices and mark overdue
+- Accept and reject financing offers — accepting pulls the lender's approved principal (via a prior `token.approve`) and pays it directly to the business
+- Repay invoices — pays principal + yield directly to the lender
+- Mark overdue, and reclaim (mark Defaulted) after a 7-day grace period
+- Yield rate oracle: admin-configured rates per risk tier (A/B/C)
+
+Requires a one-time `initialize(admin, token)` call after deployment, setting the admin and the SEP-41 token used for fund movement. There is no collateral custody — if a business never repays, `reclaim_invoice` only produces an on-chain default record, since principal was already disbursed at acceptance.
 
 ### `invofi-core`
 Shared data types and storage helpers used by the registry contract.
@@ -65,6 +69,16 @@ stellar contract deploy \
   --network testnet
 ```
 
+After deploying, call `initialize` once before anything else — `accept_offer`/`repay_invoice` will panic with "Not initialized" until this runs:
+
+```bash
+stellar contract invoke \
+  --id <CONTRACT_ID> \
+  --source invofi-deployer \
+  --network testnet \
+  -- initialize --admin <ADMIN_ADDRESS> --token <SEP41_TOKEN_ADDRESS>
+```
+
 Or use the scripts in `scripts/`:
 
 ```bash
@@ -85,10 +99,21 @@ cargo test -- --nocapture
 | `test_get_non_existent_invoice` | Not-found panic |
 | `test_update_invoice_status` | Status mutation |
 | `test_create_and_get_offer` | Offer creation and retrieval |
-| `test_accept_offer` | Offer acceptance + invoice state change |
+| `test_accept_offer` | Offer acceptance + principal transferred to business |
 | `test_reject_offer` | Offer rejection |
-| `test_repay_invoice` | Full repayment flow |
+| `test_repay_invoice` | Full repayment flow, principal + yield transferred to lender |
 | `test_repay_unfinanced_invoice_panics` | Guard against premature repayment |
+| `test_initialize_twice_panics` | `initialize()` can only be called once |
+| `test_reclaim_invoice_after_grace_period` | Reclaim marks offer Defaulted after the grace period |
+| `test_reclaim_before_grace_period_panics` | Reclaim rejected before the grace period elapses |
+| `test_set_and_get_rate` | Yield rate set/read for all three risk tiers |
+| `test_set_rate_out_of_range_panics` | Rate validated to 0-10000 bps |
+| `test_set_rate_unauthorized_panics` | Only admin can set rates |
+| `test_get_unset_rate_panics` | Reading an unconfigured tier panics |
+| `test_transfer_admin` | Admin rotation, new admin can act |
+| `test_transfer_admin_unauthorized_panics` | Only the current admin can transfer admin rights |
+
+18 tests total.
 
 ## License
 
