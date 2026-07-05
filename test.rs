@@ -510,4 +510,52 @@ fn test_transfer_admin_unauthorized_panics() {
     client.initialize(&admin, &token);
 
     client.transfer_admin(&not_admin, &new_admin);
+
+    #[test]
+    #[should_panic(expected = "amount must be greater than zero")]
+    fn test_register_invoice_zero_amount() {
+        let env = Env::default();
+        let contract_id = env.register_contract(None, InvofiInvoiceRegistry);
+        let client = InvofiInvoiceRegistryClient::new(&env, &contract_id);
+
+        let debtor = Address::generate(&env);
+        let invoice_id = symbol_short!("inv1");
+
+        // due_date in the future
+        env.ledger().set_timestamp(1_000_000);
+        client.register_invoice(&invoice_id, &debtor, &0, &symbol_short!("USDC"), &2_000_000);
+    }
+
+    #[test]
+    #[should_panic(expected = "due_date must be in the future")]
+    fn test_register_invoice_past_due_date() {
+        let env = Env::default();
+        let contract_id = env.register_contract(None, InvofiInvoiceRegistry);
+        let client = InvofiInvoiceRegistryClient::new(&env, &contract_id);
+
+        let debtor = Address::generate(&env);
+        let invoice_id = symbol_short!("inv2");
+
+        env.ledger().set_timestamp(2_000_000);
+        // due_date is in the past
+        client.register_invoice(&invoice_id, &debtor, &1_000, &symbol_short!("USDC"), &1_000_000);
+    }
+
+    #[test]
+    #[should_panic(expected = "offer amount must be greater than zero")]
+    fn test_create_offer_zero_amount() {
+        let env = Env::default();
+        let contract_id = env.register_contract(None, InvofiInvoiceRegistry);
+        let client = InvofiInvoiceRegistryClient::new(&env, &contract_id);
+
+        let debtor = Address::generate(&env);
+        let lender = Address::generate(&env);
+        let invoice_id = symbol_short!("inv3");
+        let offer_id = symbol_short!("off1");
+
+        env.ledger().set_timestamp(1_000_000);
+        client.register_invoice(&invoice_id, &debtor, &5_000, &symbol_short!("USDC"), &3_000_000);
+        client.create_offer(&offer_id, &invoice_id, &lender, &0, &symbol_short!("USDC"), &500);
+    }
+
 }
