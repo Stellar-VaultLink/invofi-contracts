@@ -558,4 +558,40 @@ fn test_transfer_admin_unauthorized_panics() {
         client.create_offer(&offer_id, &invoice_id, &lender, &0, &symbol_short!("USDC"), &500);
     }
 
+
+    #[test]
+    fn test_get_invoices_by_status_empty() {
+        let env = Env::default();
+        let contract_id = env.register_contract(None, InvofiInvoiceRegistry);
+        let client = InvofiInvoiceRegistryClient::new(&env, &contract_id);
+
+        let result = client.get_invoices_by_status(&InvoiceStatus::Pending);
+        assert_eq!(result.len(), 0);
+    }
+
+    #[test]
+    fn test_get_invoices_by_status_matching() {
+        let env = Env::default();
+        let contract_id = env.register_contract(None, InvofiInvoiceRegistry);
+        let client = InvofiInvoiceRegistryClient::new(&env, &contract_id);
+
+        let debtor = Address::generate(&env);
+        env.ledger().set_timestamp(1_000_000);
+
+        client.register_invoice(
+            &symbol_short!("inv_a"),
+            &debtor, &1_000, &symbol_short!("USDC"), &3_000_000,
+        );
+        client.register_invoice(
+            &symbol_short!("inv_b"),
+            &debtor, &2_000, &symbol_short!("XLM"), &4_000_000,
+        );
+
+        let pending = client.get_invoices_by_status(&InvoiceStatus::Pending);
+        assert_eq!(pending.len(), 2);
+
+        let financed = client.get_invoices_by_status(&InvoiceStatus::Financed);
+        assert_eq!(financed.len(), 0);
+    }
+
 }
