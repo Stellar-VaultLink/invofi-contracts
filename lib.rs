@@ -1,5 +1,5 @@
 #![no_std]
-use soroban_sdk::{contract, contractimpl, contracttype, symbol_short, token, Address, Env, Map, Symbol};
+use soroban_sdk::{contract, contractimpl, contracttype, symbol_short, token, vec, Address, Env, Map, Symbol, Vec};
 
 /// Grace period after due_date before a lender can mark a Financed offer
 /// Defaulted on an Overdue invoice. 7 days, in seconds.
@@ -206,6 +206,11 @@ impl InvoiceRegistryContract {
         due_date: u64,
     ) -> Invoice {
         originator.require_auth();
+        assert!(amount > 0, "amount must be greater than zero");
+        assert!(
+            due_date > env.ledger().timestamp(),
+            "due_date must be in the future"
+        );
 
         let mut invoices = load_invoices(&env);
         if invoices.contains_key(id.clone()) {
@@ -258,6 +263,8 @@ impl InvoiceRegistryContract {
         duration: u64,
     ) -> FinancingOffer {
         lender.require_auth();
+        assert!(amount > 0, "offer amount must be greater than zero");
+        assert!(interest_rate > 0, "interest_rate must be greater than zero");
 
         // Invoice must exist
         let invoices = load_invoices(&env);
@@ -498,6 +505,18 @@ impl InvoiceRegistryContract {
         invoices.set(invoice_id, invoice.clone());
         save_invoices(&env, &invoices);
         invoice
+    }
+
+    /// Returns all invoices matching the given status.
+    pub fn get_invoices_by_status(env: Env, status: InvoiceStatus) -> Vec<Invoice> {
+        let invoices = load_invoices(&env);
+        let mut result: Vec<Invoice> = Vec::new(&env);
+        for (_id, inv) in invoices.iter() {
+            if inv.status == status {
+                result.push_back(inv);
+            }
+        }
+        result
     }
 }
 
