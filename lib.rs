@@ -268,11 +268,15 @@ impl InvoiceRegistryContract {
         assert!(interest_rate <= 10_000, "interest_rate must be at most 10000 bps");
         assert!(duration > 0, "duration must be greater than zero");
 
-        // Invoice must exist
+        // Invoice must exist, and the lender can't finance their own invoice.
         let invoices = load_invoices(&env);
-        if !invoices.contains_key(invoice_id.clone()) {
-            panic!("Invoice not found");
-        }
+        let invoice = invoices
+            .get(invoice_id.clone())
+            .unwrap_or_else(|| panic!("Invoice not found"));
+        assert!(
+            lender != invoice.originator,
+            "lender cannot finance their own invoice"
+        );
 
         let mut offers = load_offers(&env);
         if offers.contains_key(offer_id.clone()) {

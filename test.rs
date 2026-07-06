@@ -685,3 +685,31 @@ fn test_create_offer_zero_duration_panics() {
         &0u64, // zero duration — should panic
     );
 }
+
+#[test]
+#[should_panic(expected = "lender cannot finance their own invoice")]
+fn test_create_offer_self_dealing_panics() {
+    let env = Env::default();
+    env.mock_all_auths();
+    env.ledger().set_timestamp(1_000_000);
+    let contract_id = env.register(InvoiceRegistryContract, ());
+    let client = super::InvoiceRegistryContractClient::new(&env, &contract_id);
+
+    let originator = Address::generate(&env);
+    client.register_invoice(
+        &symbol_short!("inv_v6"),
+        &originator,
+        &1_000i128,
+        &symbol_short!("USDC"),
+        &3_000_000u64,
+    );
+    client.create_offer(
+        &symbol_short!("off_v4"),
+        &symbol_short!("inv_v6"),
+        &originator, // lender == originator — should panic
+        &1_000i128,
+        &symbol_short!("USDC"),
+        &500u32,
+        &86_400u64,
+    );
+}
