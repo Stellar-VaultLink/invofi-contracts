@@ -1,5 +1,5 @@
 #![no_std]
-use soroban_sdk::{contract, contractimpl, contracttype, symbol_short, token, vec, Address, Env, Map, Symbol, Vec};
+use soroban_sdk::{contract, contractimpl, contracttype, symbol_short, token, Address, Env, Map, Symbol, Vec};
 
 /// Grace period after due_date before a lender can mark a Financed offer
 /// Defaulted on an Overdue invoice. 7 days, in seconds.
