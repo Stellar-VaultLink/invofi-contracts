@@ -265,6 +265,8 @@ impl InvoiceRegistryContract {
         lender.require_auth();
         assert!(amount > 0, "offer amount must be greater than zero");
         assert!(interest_rate > 0, "interest_rate must be greater than zero");
+        assert!(interest_rate <= 10_000, "interest_rate must be at most 10000 bps");
+        assert!(duration > 0, "duration must be greater than zero");
 
         // Invoice must exist
         let invoices = load_invoices(&env);
