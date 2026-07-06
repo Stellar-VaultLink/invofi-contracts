@@ -510,118 +510,206 @@ fn test_transfer_admin_unauthorized_panics() {
     client.initialize(&admin, &token);
 
     client.transfer_admin(&not_admin, &new_admin);
+}
 
-    // ── Validation tests ────────────────────────────────────────────────────
+// ── Validation tests ────────────────────────────────────────────────────
 
-    #[test]
-    #[should_panic(expected = "amount must be greater than zero")]
-    fn test_register_invoice_zero_amount() {
-        let env = Env::default();
-        env.mock_all_auths();
-        env.ledger().set_timestamp(1_000_000);
-        let contract_id = env.register(InvoiceRegistryContract, ());
-        let client = super::InvoiceRegistryContractClient::new(&env, &contract_id);
+#[test]
+#[should_panic(expected = "amount must be greater than zero")]
+fn test_register_invoice_zero_amount() {
+    let env = Env::default();
+    env.mock_all_auths();
+    env.ledger().set_timestamp(1_000_000);
+    let contract_id = env.register(InvoiceRegistryContract, ());
+    let client = super::InvoiceRegistryContractClient::new(&env, &contract_id);
 
-        let originator = Address::generate(&env);
-        client.register_invoice(
-            &symbol_short!("inv_v1"),
-            &originator,
-            &0i128,
-            &symbol_short!("USDC"),
-            &3_000_000u64,
-        );
-    }
+    let originator = Address::generate(&env);
+    client.register_invoice(
+        &symbol_short!("inv_v1"),
+        &originator,
+        &0i128,
+        &symbol_short!("USDC"),
+        &3_000_000u64,
+    );
+}
 
-    #[test]
-    #[should_panic(expected = "due_date must be in the future")]
-    fn test_register_invoice_past_due_date() {
-        let env = Env::default();
-        env.mock_all_auths();
-        env.ledger().set_timestamp(5_000_000);
-        let contract_id = env.register(InvoiceRegistryContract, ());
-        let client = super::InvoiceRegistryContractClient::new(&env, &contract_id);
+#[test]
+#[should_panic(expected = "due_date must be in the future")]
+fn test_register_invoice_past_due_date() {
+    let env = Env::default();
+    env.mock_all_auths();
+    env.ledger().set_timestamp(5_000_000);
+    let contract_id = env.register(InvoiceRegistryContract, ());
+    let client = super::InvoiceRegistryContractClient::new(&env, &contract_id);
 
-        let originator = Address::generate(&env);
-        client.register_invoice(
-            &symbol_short!("inv_v2"),
-            &originator,
-            &1_000i128,
-            &symbol_short!("USDC"),
-            &1_000_000u64, // in the past relative to timestamp 5_000_000
-        );
-    }
+    let originator = Address::generate(&env);
+    client.register_invoice(
+        &symbol_short!("inv_v2"),
+        &originator,
+        &1_000i128,
+        &symbol_short!("USDC"),
+        &1_000_000u64, // in the past relative to timestamp 5_000_000
+    );
+}
 
-    #[test]
-    #[should_panic(expected = "offer amount must be greater than zero")]
-    fn test_create_offer_zero_amount() {
-        let env = Env::default();
-        env.mock_all_auths();
-        env.ledger().set_timestamp(1_000_000);
-        let contract_id = env.register(InvoiceRegistryContract, ());
-        let client = super::InvoiceRegistryContractClient::new(&env, &contract_id);
+#[test]
+#[should_panic(expected = "offer amount must be greater than zero")]
+fn test_create_offer_zero_amount() {
+    let env = Env::default();
+    env.mock_all_auths();
+    env.ledger().set_timestamp(1_000_000);
+    let contract_id = env.register(InvoiceRegistryContract, ());
+    let client = super::InvoiceRegistryContractClient::new(&env, &contract_id);
 
-        let originator = Address::generate(&env);
-        let lender = Address::generate(&env);
-        client.register_invoice(
-            &symbol_short!("inv_v3"),
-            &originator,
-            &5_000i128,
-            &symbol_short!("USDC"),
-            &3_000_000u64,
-        );
-        client.create_offer(
-            &symbol_short!("off_v1"),
-            &symbol_short!("inv_v3"),
-            &lender,
-            &0i128, // zero amount — should panic
-            &symbol_short!("USDC"),
-            &500u32,
-            &86_400u64,
-        );
-    }
+    let originator = Address::generate(&env);
+    let lender = Address::generate(&env);
+    client.register_invoice(
+        &symbol_short!("inv_v3"),
+        &originator,
+        &5_000i128,
+        &symbol_short!("USDC"),
+        &3_000_000u64,
+    );
+    client.create_offer(
+        &symbol_short!("off_v1"),
+        &symbol_short!("inv_v3"),
+        &lender,
+        &0i128, // zero amount — should panic
+        &symbol_short!("USDC"),
+        &500u32,
+        &86_400u64,
+    );
+}
 
-    // ── Query helper tests ───────────────────────────────────────────────────
+// ── Query helper tests ───────────────────────────────────────────────────
 
-    #[test]
-    fn test_get_invoices_by_status_empty() {
-        let env = Env::default();
-        env.mock_all_auths();
-        env.ledger().set_timestamp(1_000_000);
-        let contract_id = env.register(InvoiceRegistryContract, ());
-        let client = super::InvoiceRegistryContractClient::new(&env, &contract_id);
+#[test]
+fn test_get_invoices_by_status_empty() {
+    let env = Env::default();
+    env.mock_all_auths();
+    env.ledger().set_timestamp(1_000_000);
+    let contract_id = env.register(InvoiceRegistryContract, ());
+    let client = super::InvoiceRegistryContractClient::new(&env, &contract_id);
 
-        let result = client.get_invoices_by_status(&InvoiceStatus::Pending);
-        assert_eq!(result.len(), 0);
-    }
+    let result = client.get_invoices_by_status(&InvoiceStatus::Pending);
+    assert_eq!(result.len(), 0);
+}
 
-    #[test]
-    fn test_get_invoices_by_status_matching() {
-        let env = Env::default();
-        env.mock_all_auths();
-        env.ledger().set_timestamp(1_000_000);
-        let contract_id = env.register(InvoiceRegistryContract, ());
-        let client = super::InvoiceRegistryContractClient::new(&env, &contract_id);
+#[test]
+fn test_get_invoices_by_status_matching() {
+    let env = Env::default();
+    env.mock_all_auths();
+    env.ledger().set_timestamp(1_000_000);
+    let contract_id = env.register(InvoiceRegistryContract, ());
+    let client = super::InvoiceRegistryContractClient::new(&env, &contract_id);
 
-        let originator = Address::generate(&env);
-        client.register_invoice(
-            &symbol_short!("q_inv_a"),
-            &originator,
-            &1_000i128,
-            &symbol_short!("USDC"),
-            &3_000_000u64,
-        );
-        client.register_invoice(
-            &symbol_short!("q_inv_b"),
-            &originator,
-            &2_000i128,
-            &symbol_short!("XLM"),
-            &4_000_000u64,
-        );
+    let originator = Address::generate(&env);
+    client.register_invoice(
+        &symbol_short!("q_inv_a"),
+        &originator,
+        &1_000i128,
+        &symbol_short!("USDC"),
+        &3_000_000u64,
+    );
+    client.register_invoice(
+        &symbol_short!("q_inv_b"),
+        &originator,
+        &2_000i128,
+        &symbol_short!("XLM"),
+        &4_000_000u64,
+    );
 
-        let pending = client.get_invoices_by_status(&InvoiceStatus::Pending);
-        assert_eq!(pending.len(), 2);
+    let pending = client.get_invoices_by_status(&InvoiceStatus::Pending);
+    assert_eq!(pending.len(), 2);
 
-        let financed = client.get_invoices_by_status(&InvoiceStatus::Financed);
-        assert_eq!(financed.len(), 0);
-    }
+    let financed = client.get_invoices_by_status(&InvoiceStatus::Financed);
+    assert_eq!(financed.len(), 0);
+}
+
+// ── create_offer bounds tests ────────────────────────────────────────────────
+
+#[test]
+#[should_panic(expected = "interest_rate must be at most 10000 bps")]
+fn test_create_offer_interest_rate_too_high_panics() {
+    let env = Env::default();
+    env.mock_all_auths();
+    env.ledger().set_timestamp(1_000_000);
+    let contract_id = env.register(InvoiceRegistryContract, ());
+    let client = super::InvoiceRegistryContractClient::new(&env, &contract_id);
+
+    let originator = Address::generate(&env);
+    let lender = Address::generate(&env);
+    client.register_invoice(
+        &symbol_short!("inv_v4"),
+        &originator,
+        &1_000i128,
+        &symbol_short!("USDC"),
+        &3_000_000u64,
+    );
+    client.create_offer(
+        &symbol_short!("off_v2"),
+        &symbol_short!("inv_v4"),
+        &lender,
+        &1_000i128,
+        &symbol_short!("USDC"),
+        &10_001u32, // over 100%
+        &86_400u64,
+    );
+}
+
+#[test]
+#[should_panic(expected = "duration must be greater than zero")]
+fn test_create_offer_zero_duration_panics() {
+    let env = Env::default();
+    env.mock_all_auths();
+    env.ledger().set_timestamp(1_000_000);
+    let contract_id = env.register(InvoiceRegistryContract, ());
+    let client = super::InvoiceRegistryContractClient::new(&env, &contract_id);
+
+    let originator = Address::generate(&env);
+    let lender = Address::generate(&env);
+    client.register_invoice(
+        &symbol_short!("inv_v5"),
+        &originator,
+        &1_000i128,
+        &symbol_short!("USDC"),
+        &3_000_000u64,
+    );
+    client.create_offer(
+        &symbol_short!("off_v3"),
+        &symbol_short!("inv_v5"),
+        &lender,
+        &1_000i128,
+        &symbol_short!("USDC"),
+        &500u32,
+        &0u64, // zero duration — should panic
+    );
+}
+
+#[test]
+#[should_panic(expected = "lender cannot finance their own invoice")]
+fn test_create_offer_self_dealing_panics() {
+    let env = Env::default();
+    env.mock_all_auths();
+    env.ledger().set_timestamp(1_000_000);
+    let contract_id = env.register(InvoiceRegistryContract, ());
+    let client = super::InvoiceRegistryContractClient::new(&env, &contract_id);
+
+    let originator = Address::generate(&env);
+    client.register_invoice(
+        &symbol_short!("inv_v6"),
+        &originator,
+        &1_000i128,
+        &symbol_short!("USDC"),
+        &3_000_000u64,
+    );
+    client.create_offer(
+        &symbol_short!("off_v4"),
+        &symbol_short!("inv_v6"),
+        &originator, // lender == originator — should panic
+        &1_000i128,
+        &symbol_short!("USDC"),
+        &500u32,
+        &86_400u64,
+    );
 }
