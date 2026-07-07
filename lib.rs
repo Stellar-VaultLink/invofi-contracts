@@ -69,6 +69,8 @@ pub struct FinancingOffer {
     pub status: OfferStatus,
     /// Unix timestamp when the offer was accepted; 0 if not yet accepted
     pub funded_at: u64,
+    /// Running total of repayments made against the financing obligation
+    pub amount_repaid: i128,
 }
 
 #[contracttype]
@@ -78,8 +80,9 @@ pub enum OfferStatus {
     Pending   = 0,
     Accepted  = 1,
     Rejected  = 2,
-    Repaid    = 3,
-    Defaulted = 4,
+    Financed  = 3,
+    Repaid    = 4,
+    Defaulted = 5,
 }
 
 // ─── Storage helpers ─────────────────────────────────────────────────────────
@@ -293,6 +296,7 @@ impl InvoiceRegistryContract {
             duration,
             status: OfferStatus::Pending,
             funded_at: 0,
+            amount_repaid: 0,
         };
         offers.set(offer_id, offer.clone());
         save_offers(&env, &offers);
@@ -392,13 +396,15 @@ impl InvoiceRegistryContract {
         offer
     }
 
-    /// Mark an invoice as repaid. Only the invoice originator (debtor) can call this.
-    /// Sets the invoice to Repaid and the linked offer to Repaid.
+    /// Mark part or all of an invoice as repaid. Only the invoice originator
+    /// (debtor) can call this. Partial payments keep the invoice/offer in
+    /// Financed status until the outstanding balance is fully cleared.
     pub fn repay_invoice(
         env: Env,
         invoice_id: Symbol,
         offer_id: Symbol,
         repayer: Address,
+        amount: i128,
     ) -> Invoice {
         repayer.require_auth();
 
@@ -422,9 +428,10 @@ impl InvoiceRegistryContract {
         if offer.invoice_id != invoice_id {
             panic!("Offer does not belong to this invoice");
         }
-        if offer.status != OfferStatus::Accepted {
-            panic!("Offer must be Accepted before repayment");
+        if offer.status != OfferStatus::Accepted && offer.status != OfferStatus::Financed {
+            panic!("Offer must be Accepted or Financed before repayment");
         }
+        assert!(amount > 0, "repayment amount must be greater than zero");
 
         // Repay principal + yield directly to the lender. `repayer` already
         // authorized this call above, so a direct transfer (not
@@ -436,14 +443,26 @@ impl InvoiceRegistryContract {
             .unwrap_or_else(|| panic!("Not initialized"));
         let token_client = token::TokenClient::new(&env, &token_id);
         let yield_amount = offer.amount * (offer.interest_rate as i128) / 10_000;
-        let repay_amount = offer.amount + yield_amount;
-        token_client.transfer(&repayer, &offer.lender, &repay_amount);
+        let total_due = offer.amount + yield_amount;
+        let remaining_balance = total_due - offer.amount_repaid;
+        assert!(
+            amount <= remaining_balance,
+            "Repayment amount exceeds remaining balance"
+        );
+        token_client.transfer(&repayer, &offer.lender, &amount);
 
-        invoice.status = InvoiceStatus::Repaid;
+        offer.amount_repaid += amount;
+        if offer.amount_repaid >= total_due {
+            invoice.status = InvoiceStatus::Repaid;
+            offer.status = OfferStatus::Repaid;
+        } else {
+            invoice.status = InvoiceStatus::Financed;
+            offer.status = OfferStatus::Financed;
+        }
+
         invoices.set(invoice_id, invoice.clone());
         save_invoices(&env, &invoices);
 
-        offer.status = OfferStatus::Repaid;
         offers.set(offer_id, offer);
         save_offers(&env, &offers);
 
@@ -482,8 +501,8 @@ impl InvoiceRegistryContract {
         if offer.lender != lender {
             panic!("Only the financing lender can reclaim");
         }
-        if offer.status != OfferStatus::Accepted {
-            panic!("Offer must be Accepted before reclaim");
+        if offer.status != OfferStatus::Accepted && offer.status != OfferStatus::Financed {
+            panic!("Offer must be Accepted or Financed before reclaim");
         }
 
         offer.status = OfferStatus::Defaulted;
