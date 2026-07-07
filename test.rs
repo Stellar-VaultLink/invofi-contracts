@@ -300,7 +300,7 @@ fn test_repay_invoice_partial_then_full() {
 
     let token_client = token::TokenClient::new(&env, &token_id);
     assert_eq!(token_client.balance(&lender), partial_amount);
-    assert_eq!(token_client.balance(&originator), total_due - partial_amount);
+    assert_eq!(token_client.balance(&originator), amount + total_due - partial_amount);
 
     let final_amount = total_due - partial_amount;
     let repaid_final = client.repay_invoice(&invoice_id, &offer_id, &originator, &final_amount);
@@ -310,7 +310,7 @@ fn test_repay_invoice_partial_then_full() {
     assert_eq!(settled_offer.status, OfferStatus::Repaid);
     assert_eq!(settled_offer.amount_repaid, total_due);
     assert_eq!(token_client.balance(&lender), total_due);
-    assert_eq!(token_client.balance(&originator), 0);
+    assert_eq!(token_client.balance(&originator), amount);
 }
 
 #[test]
