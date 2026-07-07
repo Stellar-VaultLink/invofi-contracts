@@ -250,7 +250,7 @@ fn test_reject_offer() {
 }
 
 #[test]
-fn test_repay_invoice() {
+fn test_repay_invoice_partial_then_full() {
     let env = Env::default();
     env.mock_all_auths();
     let contract_id = env.register(InvoiceRegistryContract, ());
@@ -263,6 +263,8 @@ fn test_repay_invoice() {
     let offer_id = symbol_short!("off004");
     let amount: i128 = 1_000_000_000;
     let interest_rate: u32 = 500; // 5.00%
+    let yield_amount = amount * (interest_rate as i128) / 10_000;
+    let total_due = amount + yield_amount;
 
     let token_id = setup_token(&env, &contract_id, &lender, amount);
     client.initialize(&admin, &token_id);
@@ -285,21 +287,75 @@ fn test_repay_invoice() {
     );
     client.accept_offer(&offer_id, &originator);
 
-    // Business needs principal + yield on hand to repay — mint them the
-    // yield portion (they already hold the principal from acceptance).
-    let yield_amount = amount * (interest_rate as i128) / 10_000;
     let asset_client = token::StellarAssetClient::new(&env, &token_id);
-    asset_client.mint(&originator, &yield_amount);
+    asset_client.mint(&originator, &total_due);
 
-    let repaid = client.repay_invoice(&invoice_id, &offer_id, &originator);
-    assert_eq!(repaid.status, InvoiceStatus::Repaid);
+    let partial_amount = amount / 2;
+    let repaid = client.repay_invoice(&invoice_id, &offer_id, &originator, &partial_amount);
+    assert_eq!(repaid.status, InvoiceStatus::Financed);
 
     let offer = client.get_offer(&offer_id);
-    assert_eq!(offer.status, OfferStatus::Repaid);
+    assert_eq!(offer.status, OfferStatus::Financed);
+    assert_eq!(offer.amount_repaid, partial_amount);
 
     let token_client = token::TokenClient::new(&env, &token_id);
-    assert_eq!(token_client.balance(&lender), amount + yield_amount);
+    assert_eq!(token_client.balance(&lender), partial_amount);
+    assert_eq!(token_client.balance(&originator), total_due - partial_amount);
+
+    let final_amount = total_due - partial_amount;
+    let repaid_final = client.repay_invoice(&invoice_id, &offer_id, &originator, &final_amount);
+    assert_eq!(repaid_final.status, InvoiceStatus::Repaid);
+
+    let settled_offer = client.get_offer(&offer_id);
+    assert_eq!(settled_offer.status, OfferStatus::Repaid);
+    assert_eq!(settled_offer.amount_repaid, total_due);
+    assert_eq!(token_client.balance(&lender), total_due);
     assert_eq!(token_client.balance(&originator), 0);
+}
+
+#[test]
+#[should_panic(expected = "Repayment amount exceeds remaining balance")]
+fn test_repay_invoice_overpayment_panics() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let contract_id = env.register(InvoiceRegistryContract, ());
+    let client = super::InvoiceRegistryContractClient::new(&env, &contract_id);
+
+    let admin = Address::generate(&env);
+    let originator = Address::generate(&env);
+    let lender = Address::generate(&env);
+    let invoice_id = symbol_short!("inv010");
+    let offer_id = symbol_short!("off008");
+    let amount: i128 = 1_000_000_000;
+    let interest_rate: u32 = 500;
+    let yield_amount = amount * (interest_rate as i128) / 10_000;
+    let total_due = amount + yield_amount;
+
+    let token_id = setup_token(&env, &contract_id, &lender, amount);
+    client.initialize(&admin, &token_id);
+
+    client.register_invoice(
+        &invoice_id,
+        &originator,
+        &amount,
+        &symbol_short!("USDC"),
+        &(1_735_689_600u64),
+    );
+    client.create_offer(
+        &offer_id,
+        &invoice_id,
+        &lender,
+        &amount,
+        &symbol_short!("USDC"),
+        &interest_rate,
+        &(2_592_000u64),
+    );
+    client.accept_offer(&offer_id, &originator);
+
+    let asset_client = token::StellarAssetClient::new(&env, &token_id);
+    asset_client.mint(&originator, &total_due);
+
+    client.repay_invoice(&invoice_id, &offer_id, &originator, &(total_due + 1));
 }
 
 #[test]
@@ -407,7 +463,7 @@ fn test_repay_unfinanced_invoice_panics() {
         &(2_592_000u64),
     );
     // Note: offer NOT accepted — invoice stays Pending
-    client.repay_invoice(&invoice_id, &offer_id, &originator);
+    client.repay_invoice(&invoice_id, &offer_id, &originator, &1);
 }
 
 #[test]
