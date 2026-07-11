@@ -251,6 +251,34 @@ impl InvoiceRegistryContract {
             .unwrap_or_else(|| panic!("Rate not set for this tier"))
     }
 
+    // ── Protocol fee ────────────────────────────────────────────────────────
+
+    /// Set the protocol fee in basis points (max 500 = 5%). Admin only.
+    /// Fee is deducted from each repayment and sent to the admin address.
+    pub fn set_fee(env: Env, admin: Address, fee_bps: u32) {
+        admin.require_auth();
+        let current: Address = env
+            .storage()
+            .instance()
+            .get(&symbol_short!("admin"))
+            .unwrap_or_else(|| panic!("Not initialized"));
+        if current != admin {
+            panic!("Only admin can set fee");
+        }
+        if fee_bps > 500 {
+            panic!("fee_bps must be at most 500 (5%)");
+        }
+        env.storage().instance().set(&symbol_short!("feebps"), &fee_bps);
+    }
+
+    /// Returns the configured protocol fee in basis points (default 0).
+    pub fn get_fee(env: Env) -> u32 {
+        env.storage()
+            .instance()
+            .get(&symbol_short!("feebps"))
+            .unwrap_or(0)
+    }
+
     // ── Invoice functions ────────────────────────────────────────────────────
 
     /// Register a new invoice. Only the originator can call this.
