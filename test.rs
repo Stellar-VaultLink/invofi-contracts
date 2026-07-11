@@ -714,8 +714,8 @@ fn test_create_offer_interest_rate_too_high_panics() {
 }
 
 #[test]
-#[should_panic(expected = "duration must be greater than zero")]
-fn test_create_offer_zero_duration_panics() {
+#[should_panic(expected = "duration must be at least 1 day (86400 seconds)")]
+fn test_create_offer_short_duration_panics() {
     let env = Env::default();
     env.mock_all_auths();
     env.ledger().set_timestamp(1_000_000);
@@ -738,7 +738,7 @@ fn test_create_offer_zero_duration_panics() {
         &1_000i128,
         &symbol_short!("USDC"),
         &500u32,
-        &0u64, // zero duration — should panic
+        &3_600u64, // 1 hour — below MIN_OFFER_DURATION_SECS, should panic
     );
 }
 
@@ -768,4 +768,179 @@ fn test_create_offer_self_dealing_panics() {
         &500u32,
         &86_400u64,
     );
+}
+
+#[test]
+fn test_cancel_invoice() {
+    let env = Env::default();
+    env.mock_all_auths();
+    env.ledger().set_timestamp(1_000_000);
+    let contract_id = env.register(InvoiceRegistryContract, ());
+    let client = super::InvoiceRegistryContractClient::new(&env, &contract_id);
+
+    let originator = Address::generate(&env);
+    client.register_invoice(
+        &symbol_short!("inv_c1"),
+        &originator,
+        &1_000i128,
+        &symbol_short!("XLM"),
+        &3_000_000u64,
+    );
+
+    let cancelled = client.cancel_invoice(&symbol_short!("inv_c1"), &originator);
+    assert_eq!(cancelled.status, InvoiceStatus::Cancelled);
+}
+
+#[test]
+#[should_panic(expected = "Only Pending invoices can be cancelled")]
+fn test_cancel_non_pending_panics() {
+    let env = Env::default();
+    env.mock_all_auths();
+    env.ledger().set_timestamp(1_000_000);
+    let contract_id = env.register(InvoiceRegistryContract, ());
+    let client = super::InvoiceRegistryContractClient::new(&env, &contract_id);
+
+    let originator = Address::generate(&env);
+    let lender = Address::generate(&env);
+    let token_id = setup_token(&env, &contract_id, &lender, 2_000i128);
+    client.initialize(&originator, &token_id); // use originator as admin for simplicity
+
+    client.register_invoice(
+        &symbol_short!("inv_c2"),
+        &originator,
+        &1_000i128,
+        &symbol_short!("XLM"),
+        &3_000_000u64,
+    );
+    client.create_offer(
+        &symbol_short!("off_c2"),
+        &symbol_short!("inv_c2"),
+        &lender,
+        &1_000i128,
+        &symbol_short!("XLM"),
+        &500u32,
+        &86_400u64,
+    );
+    client.accept_offer(&symbol_short!("off_c2"), &originator);
+    // Invoice is now Financed — cancel should panic
+    client.cancel_invoice(&symbol_short!("inv_c2"), &originator);
+}
+
+#[test]
+fn test_get_offers_by_invoice() {
+    let env = Env::default();
+    env.mock_all_auths();
+    env.ledger().set_timestamp(1_000_000);
+    let contract_id = env.register(InvoiceRegistryContract, ());
+    let client = super::InvoiceRegistryContractClient::new(&env, &contract_id);
+
+    let originator = Address::generate(&env);
+    let lender = Address::generate(&env);
+    client.register_invoice(
+        &symbol_short!("inv_g1"),
+        &originator,
+        &5_000i128,
+        &symbol_short!("USDC"),
+        &3_000_000u64,
+    );
+    client.create_offer(
+        &symbol_short!("off_g1a"),
+        &symbol_short!("inv_g1"),
+        &lender,
+        &5_000i128,
+        &symbol_short!("USDC"),
+        &300u32,
+        &86_400u64,
+    );
+    client.create_offer(
+        &symbol_short!("off_g1b"),
+        &symbol_short!("inv_g1"),
+        &lender,
+        &5_000i128,
+        &symbol_short!("USDC"),
+        &400u32,
+        &86_400u64,
+    );
+
+    let offers = client.get_offers_by_invoice(&symbol_short!("inv_g1"));
+    assert_eq!(offers.len(), 2);
+}
+
+#[test]
+fn test_get_offers_by_lender() {
+    let env = Env::default();
+    env.mock_all_auths();
+    env.ledger().set_timestamp(1_000_000);
+    let contract_id = env.register(InvoiceRegistryContract, ());
+    let client = super::InvoiceRegistryContractClient::new(&env, &contract_id);
+
+    let originator = Address::generate(&env);
+    let lender = Address::generate(&env);
+    let other = Address::generate(&env);
+
+    client.register_invoice(
+        &symbol_short!("inv_l1"),
+        &originator,
+        &1_000i128,
+        &symbol_short!("XLM"),
+        &3_000_000u64,
+    );
+    client.create_offer(
+        &symbol_short!("off_l1"),
+        &symbol_short!("inv_l1"),
+        &lender,
+        &1_000i128,
+        &symbol_short!("XLM"),
+        &200u32,
+        &86_400u64,
+    );
+    client.create_offer(
+        &symbol_short!("off_l2"),
+        &symbol_short!("inv_l1"),
+        &other,
+        &1_000i128,
+        &symbol_short!("XLM"),
+        &300u32,
+        &86_400u64,
+    );
+
+    let lender_offers = client.get_offers_by_lender(&lender);
+    assert_eq!(lender_offers.len(), 1);
+    assert_eq!(lender_offers.get(0).unwrap().lender, lender);
+}
+
+#[test]
+fn test_calculate_total_due() {
+    let env = Env::default();
+    env.mock_all_auths();
+    env.ledger().set_timestamp(1_000_000);
+    let contract_id = env.register(InvoiceRegistryContract, ());
+    let client = super::InvoiceRegistryContractClient::new(&env, &contract_id);
+
+    let originator = Address::generate(&env);
+    let lender = Address::generate(&env);
+    let token_id = setup_token(&env, &contract_id, &lender, 10_000i128);
+    client.initialize(&originator, &token_id);
+
+    client.register_invoice(
+        &symbol_short!("inv_d1"),
+        &originator,
+        &10_000i128,
+        &symbol_short!("XLM"),
+        &3_000_000u64,
+    );
+    client.create_offer(
+        &symbol_short!("off_d1"),
+        &symbol_short!("inv_d1"),
+        &lender,
+        &10_000i128,
+        &symbol_short!("XLM"),
+        &1_000u32, // 10%
+        &86_400u64,
+    );
+    client.accept_offer(&symbol_short!("off_d1"), &originator);
+
+    // principal=10000, yield=10000*1000/10000=1000, total_due=11000, repaid=0
+    let due = client.calculate_total_due(&symbol_short!("off_d1"));
+    assert_eq!(due, 11_000i128);
 }

@@ -5,6 +5,9 @@ use soroban_sdk::{contract, contractimpl, contracttype, symbol_short, token, Add
 /// Defaulted on an Overdue invoice. 7 days, in seconds.
 const GRACE_PERIOD_SECS: u64 = 604_800;
 
+/// Minimum allowed financing duration in create_offer. 1 day, in seconds.
+pub const MIN_OFFER_DURATION_SECS: u64 = 86_400;
+
 // ─── Yield Rate Oracle ───────────────────────────────────────────────────────
 
 /// Risk tier for yield-rate lookups. A = low risk, C = high risk.
@@ -269,7 +272,7 @@ impl InvoiceRegistryContract {
         assert!(amount > 0, "offer amount must be greater than zero");
         assert!(interest_rate > 0, "interest_rate must be greater than zero");
         assert!(interest_rate <= 10_000, "interest_rate must be at most 10000 bps");
-        assert!(duration > 0, "duration must be greater than zero");
+        assert!(duration >= MIN_OFFER_DURATION_SECS, "duration must be at least 1 day (86400 seconds)");
 
         // Invoice must exist, and the lender can't finance their own invoice.
         let invoices = load_invoices(&env);
@@ -542,6 +545,71 @@ impl InvoiceRegistryContract {
             }
         }
         result
+    }
+
+    /// Cancel a Pending invoice. Only the originator can call this.
+    /// Transitions the invoice from Pending → Cancelled. Any pending offers
+    /// attached to the invoice remain in Pending status (they were never funded).
+    pub fn cancel_invoice(env: Env, invoice_id: Symbol, originator: Address) -> Invoice {
+        originator.require_auth();
+
+        let mut invoices = load_invoices(&env);
+        let mut invoice = invoices
+            .get(invoice_id.clone())
+            .unwrap_or_else(|| panic!("Invoice not found"));
+
+        if invoice.originator != originator {
+            panic!("Only the invoice originator can cancel");
+        }
+        if invoice.status != InvoiceStatus::Pending {
+            panic!("Only Pending invoices can be cancelled");
+        }
+
+        invoice.status = InvoiceStatus::Cancelled;
+        invoices.set(invoice_id, invoice.clone());
+        save_invoices(&env, &invoices);
+        invoice
+    }
+
+    /// Return all financing offers attached to a given invoice.
+    pub fn get_offers_by_invoice(env: Env, invoice_id: Symbol) -> Vec<FinancingOffer> {
+        let offers = load_offers(&env);
+        let mut result: Vec<FinancingOffer> = Vec::new(&env);
+        for (_id, offer) in offers.iter() {
+            if offer.invoice_id == invoice_id {
+                result.push_back(offer);
+            }
+        }
+        result
+    }
+
+    /// Return all financing offers submitted by a given lender address.
+    pub fn get_offers_by_lender(env: Env, lender: Address) -> Vec<FinancingOffer> {
+        let offers = load_offers(&env);
+        let mut result: Vec<FinancingOffer> = Vec::new(&env);
+        for (_id, offer) in offers.iter() {
+            if offer.lender == lender {
+                result.push_back(offer);
+            }
+        }
+        result
+    }
+
+    /// Return the remaining amount due (principal + yield − already repaid) for
+    /// a given offer. Returns 0 if the offer is already Repaid or Defaulted.
+    pub fn calculate_total_due(env: Env, offer_id: Symbol) -> i128 {
+        let offers = load_offers(&env);
+        let offer = offers
+            .get(offer_id)
+            .unwrap_or_else(|| panic!("Offer not found"));
+
+        if offer.status == OfferStatus::Repaid || offer.status == OfferStatus::Defaulted {
+            return 0;
+        }
+
+        let yield_amount = offer.amount * (offer.interest_rate as i128) / 10_000;
+        let total_due = offer.amount + yield_amount;
+        (total_due - offer.amount_repaid).max(0)
     }
 }
 
