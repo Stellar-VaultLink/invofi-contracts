@@ -676,6 +676,61 @@ impl InvoiceRegistryContract {
         result
     }
 
+    /// Withdraw a pending offer. Only the lender who created the offer can call this.
+    /// Transitions the offer from Pending → Rejected (lender-initiated withdrawal).
+    pub fn withdraw_offer(env: Env, offer_id: Symbol, lender: Address) -> FinancingOffer {
+        lender.require_auth();
+
+        let mut offers = load_offers(&env);
+        let mut offer = offers
+            .get(offer_id.clone())
+            .unwrap_or_else(|| panic!("Offer not found"));
+
+        if offer.lender != lender {
+            panic!("Only the offer lender can withdraw");
+        }
+        if offer.status != OfferStatus::Pending {
+            panic!("Only Pending offers can be withdrawn");
+        }
+
+        offer.status = OfferStatus::Rejected;
+        offers.set(offer_id, offer.clone());
+        save_offers(&env, &offers);
+        offer
+    }
+
+    /// Return all invoices registered by a given originator address.
+    pub fn get_invoices_by_originator(env: Env, originator: Address) -> Vec<Invoice> {
+        let invoices = load_invoices(&env);
+        let mut result: Vec<Invoice> = Vec::new(&env);
+        for (_id, inv) in invoices.iter() {
+            if inv.originator == originator {
+                result.push_back(inv);
+            }
+        }
+        result
+    }
+
+    /// Return all registered invoices regardless of status. Useful for admin analytics.
+    pub fn get_all_invoices(env: Env) -> Vec<Invoice> {
+        let invoices = load_invoices(&env);
+        let mut result: Vec<Invoice> = Vec::new(&env);
+        for (_id, inv) in invoices.iter() {
+            result.push_back(inv);
+        }
+        result
+    }
+
+    /// Return all financing offers regardless of status. Useful for admin analytics.
+    pub fn get_all_offers(env: Env) -> Vec<FinancingOffer> {
+        let offers = load_offers(&env);
+        let mut result: Vec<FinancingOffer> = Vec::new(&env);
+        for (_id, offer) in offers.iter() {
+            result.push_back(offer);
+        }
+        result
+    }
+
     /// Return the remaining amount due (principal + yield − already repaid) for
     /// a given offer. Returns 0 if the offer is already Repaid or Defaulted.
     pub fn calculate_total_due(env: Env, offer_id: Symbol) -> i128 {
