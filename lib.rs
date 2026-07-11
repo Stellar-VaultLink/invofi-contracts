@@ -88,6 +88,19 @@ pub enum OfferStatus {
     Defaulted = 5,
 }
 
+// ─── Pause guard ────────────────────────────────────────────────────────────
+
+fn assert_not_paused(env: &Env) {
+    let paused: bool = env
+        .storage()
+        .instance()
+        .get(&symbol_short!("paused"))
+        .unwrap_or(false);
+    if paused {
+        panic!("Contract is paused");
+    }
+}
+
 // ─── Storage helpers ─────────────────────────────────────────────────────────
 
 fn load_invoices(env: &Env) -> Map<Symbol, Invoice> {
@@ -169,6 +182,44 @@ impl InvoiceRegistryContract {
         env.storage().instance().set(&symbol_short!("admin"), &new_admin);
     }
 
+    // ── Pause / unpause ──────────────────────────────────────────────────────
+
+    /// Halt all state-mutating operations. Admin only.
+    pub fn pause(env: Env, admin: Address) {
+        admin.require_auth();
+        let current: Address = env
+            .storage()
+            .instance()
+            .get(&symbol_short!("admin"))
+            .unwrap_or_else(|| panic!("Not initialized"));
+        if current != admin {
+            panic!("Only admin can pause");
+        }
+        env.storage().instance().set(&symbol_short!("paused"), &true);
+    }
+
+    /// Resume operations after a pause. Admin only.
+    pub fn unpause(env: Env, admin: Address) {
+        admin.require_auth();
+        let current: Address = env
+            .storage()
+            .instance()
+            .get(&symbol_short!("admin"))
+            .unwrap_or_else(|| panic!("Not initialized"));
+        if current != admin {
+            panic!("Only admin can unpause");
+        }
+        env.storage().instance().set(&symbol_short!("paused"), &false);
+    }
+
+    /// Returns true if the contract is currently paused.
+    pub fn contract_is_paused(env: Env) -> bool {
+        env.storage()
+            .instance()
+            .get(&symbol_short!("paused"))
+            .unwrap_or(false)
+    }
+
     // ── Yield rate oracle functions ──────────────────────────────────────────
 
     /// Sets the yield rate (in basis points, 0-10000) for a risk tier.
@@ -211,6 +262,7 @@ impl InvoiceRegistryContract {
         currency: Symbol,
         due_date: u64,
     ) -> Invoice {
+        assert_not_paused(&env);
         originator.require_auth();
         assert!(amount > 0, "amount must be greater than zero");
         assert!(
@@ -316,6 +368,7 @@ impl InvoiceRegistryContract {
     /// Accept a financing offer. Only the invoice originator can call this.
     /// Marks the offer Accepted and the invoice Financed.
     pub fn accept_offer(env: Env, offer_id: Symbol, invoice_originator: Address) -> FinancingOffer {
+        assert_not_paused(&env);
         invoice_originator.require_auth();
 
         let mut offers = load_offers(&env);
