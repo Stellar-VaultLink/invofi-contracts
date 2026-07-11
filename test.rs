@@ -944,3 +944,253 @@ fn test_calculate_total_due() {
     let due = client.calculate_total_due(&symbol_short!("off_d1"));
     assert_eq!(due, 11_000i128);
 }
+
+// ── Pause tests ──────────────────────────────────────────────────────────────
+
+#[test]
+fn test_pause_and_unpause() {
+    let env = Env::default();
+    env.mock_all_auths();
+    env.ledger().set_timestamp(1_000_000);
+    let contract_id = env.register(InvoiceRegistryContract, ());
+    let client = super::InvoiceRegistryContractClient::new(&env, &contract_id);
+
+    let admin = Address::generate(&env);
+    let token = Address::generate(&env);
+    client.initialize(&admin, &token);
+
+    assert!(!client.contract_is_paused());
+    client.pause(&admin);
+    assert!(client.contract_is_paused());
+    client.unpause(&admin);
+    assert!(!client.contract_is_paused());
+}
+
+#[test]
+#[should_panic(expected = "Contract is paused")]
+fn test_register_invoice_while_paused_panics() {
+    let env = Env::default();
+    env.mock_all_auths();
+    env.ledger().set_timestamp(1_000_000);
+    let contract_id = env.register(InvoiceRegistryContract, ());
+    let client = super::InvoiceRegistryContractClient::new(&env, &contract_id);
+
+    let admin = Address::generate(&env);
+    let originator = Address::generate(&env);
+    let token = Address::generate(&env);
+    client.initialize(&admin, &token);
+
+    client.pause(&admin);
+    client.register_invoice(
+        &symbol_short!("inv_p1"),
+        &originator,
+        &1_000i128,
+        &symbol_short!("XLM"),
+        &3_000_000u64,
+    );
+}
+
+#[test]
+#[should_panic(expected = "Only admin can pause")]
+fn test_pause_unauthorized_panics() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let contract_id = env.register(InvoiceRegistryContract, ());
+    let client = super::InvoiceRegistryContractClient::new(&env, &contract_id);
+
+    let admin = Address::generate(&env);
+    let not_admin = Address::generate(&env);
+    let token = Address::generate(&env);
+    client.initialize(&admin, &token);
+
+    client.pause(&not_admin);
+}
+
+// ── Protocol fee tests ───────────────────────────────────────────────────────
+
+#[test]
+fn test_set_and_get_fee() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let contract_id = env.register(InvoiceRegistryContract, ());
+    let client = super::InvoiceRegistryContractClient::new(&env, &contract_id);
+
+    let admin = Address::generate(&env);
+    let token = Address::generate(&env);
+    client.initialize(&admin, &token);
+
+    assert_eq!(client.get_fee(), 0);
+    client.set_fee(&admin, &200u32); // 2%
+    assert_eq!(client.get_fee(), 200);
+}
+
+#[test]
+#[should_panic(expected = "fee_bps must be at most 500")]
+fn test_set_fee_too_high_panics() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let contract_id = env.register(InvoiceRegistryContract, ());
+    let client = super::InvoiceRegistryContractClient::new(&env, &contract_id);
+
+    let admin = Address::generate(&env);
+    let token = Address::generate(&env);
+    client.initialize(&admin, &token);
+
+    client.set_fee(&admin, &600u32); // over 5% max
+}
+
+// ── withdraw_offer tests ────────────────────────────────────────────────────
+
+#[test]
+fn test_withdraw_offer() {
+    let env = Env::default();
+    env.mock_all_auths();
+    env.ledger().set_timestamp(1_000_000);
+    let contract_id = env.register(InvoiceRegistryContract, ());
+    let client = super::InvoiceRegistryContractClient::new(&env, &contract_id);
+
+    let originator = Address::generate(&env);
+    let lender = Address::generate(&env);
+    client.register_invoice(
+        &symbol_short!("inv_w1"),
+        &originator,
+        &5_000i128,
+        &symbol_short!("USDC"),
+        &3_000_000u64,
+    );
+    client.create_offer(
+        &symbol_short!("off_w1"),
+        &symbol_short!("inv_w1"),
+        &lender,
+        &5_000i128,
+        &symbol_short!("USDC"),
+        &300u32,
+        &86_400u64,
+    );
+
+    let withdrawn = client.withdraw_offer(&symbol_short!("off_w1"), &lender);
+    assert_eq!(withdrawn.status, OfferStatus::Rejected);
+}
+
+#[test]
+#[should_panic(expected = "Only the offer lender can withdraw")]
+fn test_withdraw_offer_wrong_lender_panics() {
+    let env = Env::default();
+    env.mock_all_auths();
+    env.ledger().set_timestamp(1_000_000);
+    let contract_id = env.register(InvoiceRegistryContract, ());
+    let client = super::InvoiceRegistryContractClient::new(&env, &contract_id);
+
+    let originator = Address::generate(&env);
+    let lender = Address::generate(&env);
+    let other = Address::generate(&env);
+    client.register_invoice(
+        &symbol_short!("inv_w2"),
+        &originator,
+        &5_000i128,
+        &symbol_short!("USDC"),
+        &3_000_000u64,
+    );
+    client.create_offer(
+        &symbol_short!("off_w2"),
+        &symbol_short!("inv_w2"),
+        &lender,
+        &5_000i128,
+        &symbol_short!("USDC"),
+        &300u32,
+        &86_400u64,
+    );
+    client.withdraw_offer(&symbol_short!("off_w2"), &other);
+}
+
+// ── get_invoices_by_originator / get_all_invoices / get_all_offers tests ─────
+
+#[test]
+fn test_get_invoices_by_originator() {
+    let env = Env::default();
+    env.mock_all_auths();
+    env.ledger().set_timestamp(1_000_000);
+    let contract_id = env.register(InvoiceRegistryContract, ());
+    let client = super::InvoiceRegistryContractClient::new(&env, &contract_id);
+
+    let orig_a = Address::generate(&env);
+    let orig_b = Address::generate(&env);
+
+    client.register_invoice(&symbol_short!("inv_oa1"), &orig_a, &1_000i128, &symbol_short!("XLM"), &3_000_000u64);
+    client.register_invoice(&symbol_short!("inv_oa2"), &orig_a, &2_000i128, &symbol_short!("XLM"), &3_000_000u64);
+    client.register_invoice(&symbol_short!("inv_ob1"), &orig_b, &3_000i128, &symbol_short!("XLM"), &3_000_000u64);
+
+    let a_invoices = client.get_invoices_by_originator(&orig_a);
+    assert_eq!(a_invoices.len(), 2);
+
+    let b_invoices = client.get_invoices_by_originator(&orig_b);
+    assert_eq!(b_invoices.len(), 1);
+}
+
+#[test]
+fn test_get_all_invoices_and_offers() {
+    let env = Env::default();
+    env.mock_all_auths();
+    env.ledger().set_timestamp(1_000_000);
+    let contract_id = env.register(InvoiceRegistryContract, ());
+    let client = super::InvoiceRegistryContractClient::new(&env, &contract_id);
+
+    let orig = Address::generate(&env);
+    let lender = Address::generate(&env);
+
+    client.register_invoice(&symbol_short!("inv_all1"), &orig, &1_000i128, &symbol_short!("XLM"), &3_000_000u64);
+    client.register_invoice(&symbol_short!("inv_all2"), &orig, &2_000i128, &symbol_short!("XLM"), &3_000_000u64);
+    client.create_offer(&symbol_short!("off_all1"), &symbol_short!("inv_all1"), &lender, &1_000i128, &symbol_short!("XLM"), &200u32, &86_400u64);
+
+    assert_eq!(client.get_all_invoices().len(), 2);
+    assert_eq!(client.get_all_offers().len(), 1);
+}
+
+// ── update_invoice_amount tests ──────────────────────────────────────────────
+
+#[test]
+fn test_update_invoice_amount() {
+    let env = Env::default();
+    env.mock_all_auths();
+    env.ledger().set_timestamp(1_000_000);
+    let contract_id = env.register(InvoiceRegistryContract, ());
+    let client = super::InvoiceRegistryContractClient::new(&env, &contract_id);
+
+    let originator = Address::generate(&env);
+    client.register_invoice(
+        &symbol_short!("inv_ua1"),
+        &originator,
+        &1_000i128,
+        &symbol_short!("XLM"),
+        &3_000_000u64,
+    );
+
+    let updated = client.update_invoice_amount(&symbol_short!("inv_ua1"), &originator, &2_500i128);
+    assert_eq!(updated.amount, 2_500i128);
+
+    // Verify persistence
+    let fetched = client.get_invoice(&symbol_short!("inv_ua1"));
+    assert_eq!(fetched.amount, 2_500i128);
+}
+
+#[test]
+#[should_panic(expected = "Only Pending invoices can have their amount updated")]
+fn test_update_amount_on_financed_panics() {
+    let env = Env::default();
+    env.mock_all_auths();
+    env.ledger().set_timestamp(1_000_000);
+    let contract_id = env.register(InvoiceRegistryContract, ());
+    let client = super::InvoiceRegistryContractClient::new(&env, &contract_id);
+
+    let originator = Address::generate(&env);
+    let lender = Address::generate(&env);
+    let token_id = setup_token(&env, &contract_id, &lender, 5_000i128);
+    client.initialize(&originator, &token_id);
+
+    client.register_invoice(&symbol_short!("inv_ua2"), &originator, &5_000i128, &symbol_short!("XLM"), &3_000_000u64);
+    client.create_offer(&symbol_short!("off_ua2"), &symbol_short!("inv_ua2"), &lender, &5_000i128, &symbol_short!("XLM"), &300u32, &86_400u64);
+    client.accept_offer(&symbol_short!("off_ua2"), &originator);
+
+    // Invoice is now Financed — amount update should panic
+    client.update_invoice_amount(&symbol_short!("inv_ua2"), &originator, &1_000i128);
+}
