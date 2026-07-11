@@ -628,6 +628,35 @@ impl InvoiceRegistryContract {
         result
     }
 
+    /// Update the face amount of a Pending invoice. Only the originator can call this.
+    /// Useful to correct a mis-entered amount before the invoice attracts offers.
+    pub fn update_invoice_amount(
+        env: Env,
+        invoice_id: Symbol,
+        originator: Address,
+        new_amount: i128,
+    ) -> Invoice {
+        originator.require_auth();
+
+        let mut invoices = load_invoices(&env);
+        let mut invoice = invoices
+            .get(invoice_id.clone())
+            .unwrap_or_else(|| panic!("Invoice not found"));
+
+        if invoice.originator != originator {
+            panic!("Only the invoice originator can update the amount");
+        }
+        if invoice.status != InvoiceStatus::Pending {
+            panic!("Only Pending invoices can have their amount updated");
+        }
+        assert!(new_amount > 0, "new_amount must be greater than zero");
+
+        invoice.amount = new_amount;
+        invoices.set(invoice_id, invoice.clone());
+        save_invoices(&env, &invoices);
+        invoice
+    }
+
     /// Cancel a Pending invoice. Only the originator can call this.
     /// Transitions the invoice from Pending → Cancelled. Any pending offers
     /// attached to the invoice remain in Pending status (they were never funded).
