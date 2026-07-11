@@ -517,9 +517,9 @@ impl InvoiceRegistryContract {
         }
         assert!(amount > 0, "repayment amount must be greater than zero");
 
-        // Repay principal + yield directly to the lender. `repayer` already
-        // authorized this call above, so a direct transfer (not
-        // transfer_from) is sufficient — no prior approval needed.
+        // Repay principal + yield directly to the lender, minus protocol fee.
+        // `repayer` already authorized this call, so a direct transfer
+        // (not transfer_from) is sufficient.
         let token_id: Address = env
             .storage()
             .instance()
@@ -533,7 +533,24 @@ impl InvoiceRegistryContract {
             amount <= remaining_balance,
             "Repayment amount exceeds remaining balance"
         );
-        token_client.transfer(&repayer, &offer.lender, &amount);
+
+        // Deduct protocol fee and send remainder to lender.
+        let fee_bps: u32 = env
+            .storage()
+            .instance()
+            .get(&symbol_short!("feebps"))
+            .unwrap_or(0);
+        let fee_amount = amount * (fee_bps as i128) / 10_000;
+        let lender_amount = amount - fee_amount;
+        token_client.transfer(&repayer, &offer.lender, &lender_amount);
+        if fee_amount > 0 {
+            let admin: Address = env
+                .storage()
+                .instance()
+                .get(&symbol_short!("admin"))
+                .unwrap_or_else(|| panic!("Not initialized"));
+            token_client.transfer(&repayer, &admin, &fee_amount);
+        }
 
         offer.amount_repaid += amount;
         if offer.amount_repaid >= total_due {
