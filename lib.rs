@@ -8,6 +8,13 @@ const GRACE_PERIOD_SECS: u64 = 604_800;
 /// Minimum allowed financing duration in create_offer. 1 day, in seconds.
 pub const MIN_OFFER_DURATION_SECS: u64 = 86_400;
 
+/// Maximum allowed financing duration in create_offer. 365 days, in seconds.
+pub const MAX_OFFER_DURATION_SECS: u64 = 31_536_000;
+
+/// Minimum invoice amount in stroops (1 XLM = 10_000_000 stroops).
+/// Prevents dust invoices that would cost more in fees than they're worth.
+pub const MIN_INVOICE_AMOUNT: i128 = 10_000_000;
+
 // ─── Yield Rate Oracle ───────────────────────────────────────────────────────
 
 /// Risk tier for yield-rate lookups. A = low risk, C = high risk.
@@ -410,6 +417,7 @@ impl InvoiceRegistryContract {
         assert!(interest_rate > 0, "interest_rate must be greater than zero");
         assert!(interest_rate <= 10_000, "interest_rate must be at most 10000 bps");
         assert!(duration >= MIN_OFFER_DURATION_SECS, "duration must be at least 1 day (86400 seconds)");
+        assert!(duration <= MAX_OFFER_DURATION_SECS, "duration must be at most 365 days");
 
         // Invoice must exist, and the lender can't finance their own invoice.
         let invoices = load_invoices(&env);
