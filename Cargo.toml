@@ -1,6 +1,6 @@
 [package]
 name = "invofi-invoice-registry"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2021"
 description = "Soroban contract for InvoFi invoice registry"
 license = "MIT"
