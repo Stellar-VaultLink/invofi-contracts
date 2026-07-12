@@ -1,42 +1,56 @@
 # Contributing to InvoFi Contracts
 
-## Prerequisites
+Thank you for your interest! InvoFi Contracts is a Soroban smart contract for invoice financing on Stellar.
 
-- Rust 1.70+ with `wasm32-unknown-unknown` target
-- Stellar CLI: `cargo install --locked stellar-cli`
+## Getting started
 
-## Setup
+### Prerequisites
+- Rust (stable toolchain) + `wasm32v1-none` target
+- [Stellar CLI](https://developers.stellar.org/docs/tools/cli) (`cargo install stellar-cli`)
 
 ```bash
-git clone https://github.com/Stellar-VaultLink/invofi-contracts.git
-cd invofi-contracts
+rustup target add wasm32v1-none
+cargo install stellar-cli --locked
+```
+
+### Build
+
+```bash
+stellar contract build
+```
+
+### Test
+
+```bash
 cargo test
 ```
 
-## Workflow
+### Lint
 
-1. Fork and create a branch: `git checkout -b feat/your-change`
-2. Make changes to `lib.rs` or `invofi-core/src/`
-3. Add or update tests in `test.rs`
-4. Run `cargo test` — all tests must pass
-5. Run `stellar contract build` — WASM must compile
-6. Open a pull request against `master`
-
-## Commit Convention
-
-```
-feat(contracts): add thing
-fix(contracts): correct thing
-test(contracts): add test for thing
-chore: update deps
+```bash
+cargo clippy -- -D warnings
 ```
 
-## Code Standards
+### Check contract size
 
-- No `unwrap()` in contract logic — use `panic!` with a descriptive message
-- All public functions must have a matching test
-- Data types live in `invofi-core`, contract logic in `lib.rs`
+```bash
+stellar contract build
+bash scripts/check-size.sh
+```
 
-## License
+## Deployment
 
-MIT © 2026 InvoFi Contributors
+To deploy to testnet, run:
+
+```bash
+bash scripts/fund-and-deploy.sh invofi-deployer testnet
+```
+
+Then copy the printed `CONTRACT_ID` into your Vercel environment variables as `NEXT_PUBLIC_CONTRACT_ID`.
+
+## Code style
+
+- Follow Rust idioms; run `cargo fmt` before committing
+- Every new public function requires at least one test in `test.rs`
+- Document all panicking conditions in the function doc comment
+- Keep CHANGELOG.md updated for every new feature
