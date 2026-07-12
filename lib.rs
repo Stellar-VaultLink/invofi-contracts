@@ -1032,6 +1032,76 @@ impl InvoiceRegistryContract {
         env!("CARGO_PKG_VERSION")
     }
 
+    // ─── Dispute management ─────────────────────────────────────────────────
+
+    /// Mark a Financed invoice as Disputed. Only the invoice originator can
+    /// call this — it signals a disagreement with the lender and freezes
+    /// further state transitions (repayment is still possible). Admin
+    /// resolves via resolve_dispute.
+    pub fn raise_dispute(env: Env, invoice_id: Symbol, originator: Address) -> Invoice {
+        assert_not_paused(&env);
+        originator.require_auth();
+
+        let mut invoices = load_invoices(&env);
+        let mut invoice = invoices
+            .get(invoice_id.clone())
+            .unwrap_or_else(|| panic!("Invoice not found"));
+
+        if invoice.originator != originator {
+            panic!("Only the invoice originator can raise a dispute");
+        }
+        if invoice.status != InvoiceStatus::Financed {
+            panic!("Only Financed invoices can be disputed");
+        }
+
+        invoice.status = InvoiceStatus::Disputed;
+        invoices.set(invoice_id, invoice.clone());
+        save_invoices(&env, &invoices);
+        invoice
+    }
+
+    /// Resolve a Disputed invoice. Admin only. Accepts a target_status
+    /// parameter — typically Financed (dispute withdrawn) or Cancelled
+    /// (dispute upheld). Panics if invoice is not Disputed.
+    pub fn resolve_dispute(
+        env: Env,
+        admin: Address,
+        invoice_id: Symbol,
+        target_status: InvoiceStatus,
+    ) -> Invoice {
+        admin.require_auth();
+        let current_admin: Address = env
+            .storage()
+            .instance()
+            .get(&symbol_short!("admin"))
+            .unwrap_or_else(|| panic!("Not initialized"));
+        if current_admin != admin {
+            panic!("Only admin can resolve disputes");
+        }
+
+        let mut invoices = load_invoices(&env);
+        let mut invoice = invoices
+            .get(invoice_id.clone())
+            .unwrap_or_else(|| panic!("Invoice not found"));
+
+        if invoice.status != InvoiceStatus::Disputed {
+            panic!("Invoice is not in Disputed status");
+        }
+        if target_status == InvoiceStatus::Disputed {
+            panic!("Cannot resolve to Disputed status");
+        }
+
+        invoice.status = target_status;
+        invoices.set(invoice_id, invoice.clone());
+        save_invoices(&env, &invoices);
+        invoice
+    }
+
+    /// Return the aggregated stats for a specific lender address.
+    pub fn get_lender_stats(env: Env, lender: Address) -> LenderStats {
+        load_lender_stats(&env, &lender)
+    }
+
 }
 
 #[cfg(test)]
