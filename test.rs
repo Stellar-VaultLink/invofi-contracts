@@ -1688,7 +1688,7 @@ fn test_get_invoices_paginated() {
 
     // Register 5 invoices
     for i in 0u32..5 {
-        let id = soroban_sdk::symbol_short!(match i {
+        let id = soroban_sdk::Symbol::new(&env, match i {
             0 => "i0", 1 => "i1", 2 => "i2", 3 => "i3", _ => "i4",
         });
         client.register_invoice(&id, &originator, &amount, &currency, &due_date);
@@ -1719,7 +1719,7 @@ fn test_get_offers_paginated() {
 
     // Create 4 offers
     for (id, rate) in [("o1", 100u32), ("o2", 200), ("o3", 300), ("o4", 400)] {
-        let sym = soroban_sdk::symbol_short!(id);
+        let sym = soroban_sdk::Symbol::new(&env, id);
         client.create_offer(
             &sym,
             &symbol_short!("inv1"),
@@ -1884,7 +1884,6 @@ fn test_full_invoice_financing_lifecycle() {
     let token_id = setup_token(&env, &contract_id, &lender_a, offer_a_amount + offer_b_amount);
     client.initialize(&admin, &token_id);
     // Also mint to lender_b
-    let token_admin = Address::generate(&env);
     let asset_client = token::StellarAssetClient::new(&env, &token_id);
     asset_client.mint(&lender_b, &offer_b_amount);
     let token_client = token::TokenClient::new(&env, &token_id);
