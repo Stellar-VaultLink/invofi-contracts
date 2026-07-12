@@ -1116,9 +1116,9 @@ fn test_get_invoices_by_originator() {
     let orig_a = Address::generate(&env);
     let orig_b = Address::generate(&env);
 
-    client.register_invoice(&symbol_short!("inv_oa1"), &orig_a, &1_000i128, &symbol_short!("XLM"), &3_000_000u64);
-    client.register_invoice(&symbol_short!("inv_oa2"), &orig_a, &2_000i128, &symbol_short!("XLM"), &3_000_000u64);
-    client.register_invoice(&symbol_short!("inv_ob1"), &orig_b, &3_000i128, &symbol_short!("XLM"), &3_000_000u64);
+    client.register_invoice(&symbol_short!("inv_oa1"), &orig_a, &10_000_000i128, &symbol_short!("XLM"), &3_000_000u64);
+    client.register_invoice(&symbol_short!("inv_oa2"), &orig_a, &20_000_000i128, &symbol_short!("XLM"), &3_000_000u64);
+    client.register_invoice(&symbol_short!("inv_ob1"), &orig_b, &30_000_000i128, &symbol_short!("XLM"), &3_000_000u64);
 
     let a_invoices = client.get_invoices_by_originator(&orig_a);
     assert_eq!(a_invoices.len(), 2);
@@ -1138,8 +1138,8 @@ fn test_get_all_invoices_and_offers() {
     let orig = Address::generate(&env);
     let lender = Address::generate(&env);
 
-    client.register_invoice(&symbol_short!("inv_all1"), &orig, &1_000i128, &symbol_short!("XLM"), &3_000_000u64);
-    client.register_invoice(&symbol_short!("inv_all2"), &orig, &2_000i128, &symbol_short!("XLM"), &3_000_000u64);
+    client.register_invoice(&symbol_short!("inv_all1"), &orig, &10_000_000i128, &symbol_short!("XLM"), &3_000_000u64);
+    client.register_invoice(&symbol_short!("inv_all2"), &orig, &20_000_000i128, &symbol_short!("XLM"), &3_000_000u64);
     client.create_offer(&symbol_short!("off_all1"), &symbol_short!("inv_all1"), &lender, &1_000i128, &symbol_short!("XLM"), &200u32, &86_400u64);
 
     assert_eq!(client.get_all_invoices().len(), 2);
@@ -1160,7 +1160,7 @@ fn test_update_invoice_amount() {
     client.register_invoice(
         &symbol_short!("inv_ua1"),
         &originator,
-        &1_000i128,
+        &10_000_000i128,
         &symbol_short!("XLM"),
         &3_000_000u64,
     );
@@ -1187,7 +1187,7 @@ fn test_update_amount_on_financed_panics() {
     let token_id = setup_token(&env, &contract_id, &lender, 5_000i128);
     client.initialize(&originator, &token_id);
 
-    client.register_invoice(&symbol_short!("inv_ua2"), &originator, &5_000i128, &symbol_short!("XLM"), &3_000_000u64);
+    client.register_invoice(&symbol_short!("inv_ua2"), &originator, &50_000_000i128, &symbol_short!("XLM"), &3_000_000u64);
     client.create_offer(&symbol_short!("off_ua2"), &symbol_short!("inv_ua2"), &lender, &5_000i128, &symbol_short!("XLM"), &300u32, &86_400u64);
     client.accept_offer(&symbol_short!("off_ua2"), &originator);
 
@@ -1205,15 +1205,15 @@ fn test_stats_increment_on_register_invoice() {
     let contract_id = env.register(InvoiceRegistryContract, ());
     let client = super::InvoiceRegistryContractClient::new(&env, &contract_id);
     let admin = Address::generate(&env);
-    let token_id = env.register(token::StellarAssetContract, ());
+    let token_id = env.register_stellar_asset_contract_v2(Address::generate(&env)).address();
     client.initialize(&admin, &token_id);
 
     let stats_before = client.get_stats();
     assert_eq!(stats_before.total_invoices, 0);
     assert_eq!(stats_before.total_offers, 0);
 
-    client.register_invoice(&symbol_short!("si1"), &admin, &1_000i128, &symbol_short!("XLM"), &2_000_000u64);
-    client.register_invoice(&symbol_short!("si2"), &admin, &2_000i128, &symbol_short!("XLM"), &2_000_000u64);
+    client.register_invoice(&symbol_short!("si1"), &admin, &10_000_000i128, &symbol_short!("XLM"), &2_000_000u64);
+    client.register_invoice(&symbol_short!("si2"), &admin, &20_000_000i128, &symbol_short!("XLM"), &2_000_000u64);
 
     let stats_after = client.get_stats();
     assert_eq!(stats_after.total_invoices, 2);
@@ -1232,7 +1232,7 @@ fn test_stats_increment_on_create_offer() {
     let token_id = setup_token(&env, &contract_id, &lender, 5_000i128);
     client.initialize(&admin, &token_id);
 
-    client.register_invoice(&symbol_short!("so1"), &admin, &1_000i128, &symbol_short!("XLM"), &2_000_000u64);
+    client.register_invoice(&symbol_short!("so1"), &admin, &10_000_000i128, &symbol_short!("XLM"), &2_000_000u64);
     client.create_offer(&symbol_short!("off_so1"), &symbol_short!("so1"), &lender, &1_000i128, &symbol_short!("XLM"), &200u32, &86_400u64);
 
     let stats = client.get_stats();
@@ -1250,7 +1250,7 @@ fn test_blacklist_and_unblacklist() {
     let contract_id = env.register(InvoiceRegistryContract, ());
     let client = super::InvoiceRegistryContractClient::new(&env, &contract_id);
     let admin = Address::generate(&env);
-    let token_id = env.register(token::StellarAssetContract, ());
+    let token_id = env.register_stellar_asset_contract_v2(Address::generate(&env)).address();
     let bad_actor = Address::generate(&env);
     client.initialize(&admin, &token_id);
 
@@ -1283,13 +1283,13 @@ fn test_blacklisted_cannot_register_invoice() {
     let contract_id = env.register(InvoiceRegistryContract, ());
     let client = super::InvoiceRegistryContractClient::new(&env, &contract_id);
     let admin = Address::generate(&env);
-    let token_id = env.register(token::StellarAssetContract, ());
+    let token_id = env.register_stellar_asset_contract_v2(Address::generate(&env)).address();
     let bad_actor = Address::generate(&env);
     client.initialize(&admin, &token_id);
 
     client.blacklist_address(&admin, &bad_actor);
     // Should panic
-    client.register_invoice(&symbol_short!("bl1"), &bad_actor, &1_000i128, &symbol_short!("XLM"), &2_000_000u64);
+    client.register_invoice(&symbol_short!("bl1"), &bad_actor, &10_000_000i128, &symbol_short!("XLM"), &2_000_000u64);
 }
 
 #[test]
@@ -1305,7 +1305,7 @@ fn test_blacklisted_cannot_create_offer() {
     let token_id = setup_token(&env, &contract_id, &lender, 5_000i128);
     client.initialize(&admin, &token_id);
 
-    client.register_invoice(&symbol_short!("bl2"), &admin, &1_000i128, &symbol_short!("XLM"), &2_000_000u64);
+    client.register_invoice(&symbol_short!("bl2"), &admin, &10_000_000i128, &symbol_short!("XLM"), &2_000_000u64);
     client.blacklist_address(&admin, &lender);
     // Should panic
     client.create_offer(&symbol_short!("off_bl2"), &symbol_short!("bl2"), &lender, &1_000i128, &symbol_short!("XLM"), &200u32, &86_400u64);
@@ -1320,7 +1320,7 @@ fn test_blacklist_non_admin_panics() {
     let contract_id = env.register(InvoiceRegistryContract, ());
     let client = super::InvoiceRegistryContractClient::new(&env, &contract_id);
     let admin = Address::generate(&env);
-    let token_id = env.register(token::StellarAssetContract, ());
+    let token_id = env.register_stellar_asset_contract_v2(Address::generate(&env)).address();
     let non_admin = Address::generate(&env);
     let victim = Address::generate(&env);
     client.initialize(&admin, &token_id);
