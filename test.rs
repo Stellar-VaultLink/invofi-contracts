@@ -1194,3 +1194,137 @@ fn test_update_amount_on_financed_panics() {
     // Invoice is now Financed — amount update should panic
     client.update_invoice_amount(&symbol_short!("inv_ua2"), &originator, &1_000i128);
 }
+
+// ── ProtocolStats tests ───────────────────────────────────────────────────────
+
+#[test]
+fn test_stats_increment_on_register_invoice() {
+    let env = Env::default();
+    env.mock_all_auths();
+    env.ledger().set_timestamp(1_000_000);
+    let contract_id = env.register(InvoiceRegistryContract, ());
+    let client = super::InvoiceRegistryContractClient::new(&env, &contract_id);
+    let admin = Address::generate(&env);
+    let token_id = env.register(token::StellarAssetContract, ());
+    client.initialize(&admin, &token_id);
+
+    let stats_before = client.get_stats();
+    assert_eq!(stats_before.total_invoices, 0);
+    assert_eq!(stats_before.total_offers, 0);
+
+    client.register_invoice(&symbol_short!("si1"), &admin, &1_000i128, &symbol_short!("XLM"), &2_000_000u64);
+    client.register_invoice(&symbol_short!("si2"), &admin, &2_000i128, &symbol_short!("XLM"), &2_000_000u64);
+
+    let stats_after = client.get_stats();
+    assert_eq!(stats_after.total_invoices, 2);
+    assert_eq!(stats_after.total_offers, 0);
+}
+
+#[test]
+fn test_stats_increment_on_create_offer() {
+    let env = Env::default();
+    env.mock_all_auths();
+    env.ledger().set_timestamp(1_000_000);
+    let contract_id = env.register(InvoiceRegistryContract, ());
+    let client = super::InvoiceRegistryContractClient::new(&env, &contract_id);
+    let admin = Address::generate(&env);
+    let lender = Address::generate(&env);
+    let token_id = setup_token(&env, &contract_id, &lender, 5_000i128);
+    client.initialize(&admin, &token_id);
+
+    client.register_invoice(&symbol_short!("so1"), &admin, &1_000i128, &symbol_short!("XLM"), &2_000_000u64);
+    client.create_offer(&symbol_short!("off_so1"), &symbol_short!("so1"), &lender, &1_000i128, &symbol_short!("XLM"), &200u32, &86_400u64);
+
+    let stats = client.get_stats();
+    assert_eq!(stats.total_invoices, 1);
+    assert_eq!(stats.total_offers, 1);
+}
+
+// ── Blacklist tests ───────────────────────────────────────────────────────────
+
+#[test]
+fn test_blacklist_and_unblacklist() {
+    let env = Env::default();
+    env.mock_all_auths();
+    env.ledger().set_timestamp(1_000_000);
+    let contract_id = env.register(InvoiceRegistryContract, ());
+    let client = super::InvoiceRegistryContractClient::new(&env, &contract_id);
+    let admin = Address::generate(&env);
+    let token_id = env.register(token::StellarAssetContract, ());
+    let bad_actor = Address::generate(&env);
+    client.initialize(&admin, &token_id);
+
+    // Not blacklisted initially
+    assert!(!client.is_blacklisted(&bad_actor));
+
+    // Blacklist
+    client.blacklist_address(&admin, &bad_actor);
+    assert!(client.is_blacklisted(&bad_actor));
+
+    let list = client.get_blacklist();
+    assert_eq!(list.len(), 1);
+
+    // Idempotent — blacklisting again doesn't duplicate
+    client.blacklist_address(&admin, &bad_actor);
+    assert_eq!(client.get_blacklist().len(), 1);
+
+    // Unblacklist
+    client.unblacklist_address(&admin, &bad_actor);
+    assert!(!client.is_blacklisted(&bad_actor));
+    assert_eq!(client.get_blacklist().len(), 0);
+}
+
+#[test]
+#[should_panic(expected = "Address is blacklisted")]
+fn test_blacklisted_cannot_register_invoice() {
+    let env = Env::default();
+    env.mock_all_auths();
+    env.ledger().set_timestamp(1_000_000);
+    let contract_id = env.register(InvoiceRegistryContract, ());
+    let client = super::InvoiceRegistryContractClient::new(&env, &contract_id);
+    let admin = Address::generate(&env);
+    let token_id = env.register(token::StellarAssetContract, ());
+    let bad_actor = Address::generate(&env);
+    client.initialize(&admin, &token_id);
+
+    client.blacklist_address(&admin, &bad_actor);
+    // Should panic
+    client.register_invoice(&symbol_short!("bl1"), &bad_actor, &1_000i128, &symbol_short!("XLM"), &2_000_000u64);
+}
+
+#[test]
+#[should_panic(expected = "Address is blacklisted")]
+fn test_blacklisted_cannot_create_offer() {
+    let env = Env::default();
+    env.mock_all_auths();
+    env.ledger().set_timestamp(1_000_000);
+    let contract_id = env.register(InvoiceRegistryContract, ());
+    let client = super::InvoiceRegistryContractClient::new(&env, &contract_id);
+    let admin = Address::generate(&env);
+    let lender = Address::generate(&env);
+    let token_id = setup_token(&env, &contract_id, &lender, 5_000i128);
+    client.initialize(&admin, &token_id);
+
+    client.register_invoice(&symbol_short!("bl2"), &admin, &1_000i128, &symbol_short!("XLM"), &2_000_000u64);
+    client.blacklist_address(&admin, &lender);
+    // Should panic
+    client.create_offer(&symbol_short!("off_bl2"), &symbol_short!("bl2"), &lender, &1_000i128, &symbol_short!("XLM"), &200u32, &86_400u64);
+}
+
+#[test]
+#[should_panic(expected = "Only admin can blacklist")]
+fn test_blacklist_non_admin_panics() {
+    let env = Env::default();
+    env.mock_all_auths();
+    env.ledger().set_timestamp(1_000_000);
+    let contract_id = env.register(InvoiceRegistryContract, ());
+    let client = super::InvoiceRegistryContractClient::new(&env, &contract_id);
+    let admin = Address::generate(&env);
+    let token_id = env.register(token::StellarAssetContract, ());
+    let non_admin = Address::generate(&env);
+    let victim = Address::generate(&env);
+    client.initialize(&admin, &token_id);
+
+    // non_admin tries to blacklist — should panic
+    client.blacklist_address(&non_admin, &victim);
+}
