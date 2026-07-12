@@ -1953,3 +1953,92 @@ fn test_full_invoice_financing_lifecycle() {
     assert_eq!(stats.total_invoices, 1);
     assert_eq!(stats.total_offers, 2);
 }
+
+
+// ─── Blacklist and stats interaction tests ───────────────────────────────────
+
+#[test]
+fn test_stats_increment_in_full_lifecycle() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let contract_id = env.register(InvoiceRegistryContract, ());
+    let client = super::InvoiceRegistryContractClient::new(&env, &contract_id);
+
+    let originator = Address::generate(&env);
+    let lender = Address::generate(&env);
+    let currency = symbol_short!("USDC");
+    let amount: i128 = 1_000_000_000;
+    let due_date: u64 = 1_735_689_600;
+
+    let stats0 = client.get_stats();
+    assert_eq!(stats0.total_invoices, 0);
+    assert_eq!(stats0.total_offers, 0);
+
+    client.register_invoice(&symbol_short!("i1"), &originator, &amount, &currency, &due_date);
+    client.register_invoice(&symbol_short!("i2"), &originator, &amount, &currency, &due_date);
+
+    let stats1 = client.get_stats();
+    assert_eq!(stats1.total_invoices, 2);
+
+    client.create_offer(
+        &symbol_short!("o1"),
+        &symbol_short!("i1"),
+        &lender,
+        &500_000_000_i128,
+        &currency,
+        &300_u32,
+        &86_400_u64,
+    );
+    client.create_offer(
+        &symbol_short!("o2"),
+        &symbol_short!("i2"),
+        &lender,
+        &500_000_000_i128,
+        &currency,
+        &300_u32,
+        &86_400_u64,
+    );
+
+    let stats2 = client.get_stats();
+    assert_eq!(stats2.total_invoices, 2);
+    assert_eq!(stats2.total_offers, 2);
+}
+
+#[test]
+fn test_blacklisted_cannot_raise_dispute() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let contract_id = env.register(InvoiceRegistryContract, ());
+    let client = super::InvoiceRegistryContractClient::new(&env, &contract_id);
+
+    let admin = Address::generate(&env);
+    let originator = Address::generate(&env);
+    let lender = Address::generate(&env);
+    let currency = symbol_short!("USDC");
+
+    client.register_invoice(&symbol_short!("inv1"), &originator, &1_000_000_000_i128, &currency, &1_735_689_600_u64);
+    client.create_offer(
+        &symbol_short!("off1"),
+        &symbol_short!("inv1"),
+        &lender,
+        &500_000_000_i128,
+        &currency,
+        &300_u32,
+        &86_400_u64,
+    );
+    let token_id = setup_token(&env, &contract_id, &lender, 500_000_000_i128);
+    client.initialize(&admin, &token_id);
+    client.accept_offer(&symbol_short!("off1"), &originator);
+
+    // Blacklist the originator and verify is_blacklisted
+    client.blacklist_address(&admin, &originator);
+    assert!(client.is_blacklisted(&originator));
+
+    // Unblacklist and verify removed
+    client.unblacklist_address(&admin, &originator);
+    assert!(!client.is_blacklisted(&originator));
+
+    // Now the originator can dispute again (no longer blacklisted)
+    let disputed = client.raise_dispute(&symbol_short!("inv1"), &originator);
+    assert_eq!(disputed.status, super::InvoiceStatus::Disputed);
+}
