@@ -571,7 +571,7 @@ fn test_transfer_admin_unauthorized_panics() {
 // ── Validation tests ────────────────────────────────────────────────────
 
 #[test]
-#[should_panic(expected = "amount must be greater than zero")]
+#[should_panic(expected = "amount must be at least MIN_INVOICE_AMOUNT stroops")]
 fn test_register_invoice_zero_amount() {
     let env = Env::default();
     env.mock_all_auths();
@@ -602,7 +602,7 @@ fn test_register_invoice_past_due_date() {
     client.register_invoice(
         &symbol_short!("inv_v2"),
         &originator,
-        &1_000i128,
+        &10_000_000i128,
         &symbol_short!("USDC"),
         &1_000_000u64, // in the past relative to timestamp 5_000_000
     );
@@ -622,7 +622,7 @@ fn test_create_offer_zero_amount() {
     client.register_invoice(
         &symbol_short!("inv_v3"),
         &originator,
-        &5_000i128,
+        &50_000_000i128,
         &symbol_short!("USDC"),
         &3_000_000u64,
     );
@@ -663,14 +663,14 @@ fn test_get_invoices_by_status_matching() {
     client.register_invoice(
         &symbol_short!("q_inv_a"),
         &originator,
-        &1_000i128,
+        &10_000_000i128,
         &symbol_short!("USDC"),
         &3_000_000u64,
     );
     client.register_invoice(
         &symbol_short!("q_inv_b"),
         &originator,
-        &2_000i128,
+        &20_000_000i128,
         &symbol_short!("XLM"),
         &4_000_000u64,
     );
@@ -698,7 +698,7 @@ fn test_create_offer_interest_rate_too_high_panics() {
     client.register_invoice(
         &symbol_short!("inv_v4"),
         &originator,
-        &1_000i128,
+        &10_000_000i128,
         &symbol_short!("USDC"),
         &3_000_000u64,
     );
@@ -727,7 +727,7 @@ fn test_create_offer_short_duration_panics() {
     client.register_invoice(
         &symbol_short!("inv_v5"),
         &originator,
-        &1_000i128,
+        &10_000_000i128,
         &symbol_short!("USDC"),
         &3_000_000u64,
     );
@@ -755,7 +755,7 @@ fn test_create_offer_self_dealing_panics() {
     client.register_invoice(
         &symbol_short!("inv_v6"),
         &originator,
-        &1_000i128,
+        &10_000_000i128,
         &symbol_short!("USDC"),
         &3_000_000u64,
     );
@@ -782,7 +782,7 @@ fn test_cancel_invoice() {
     client.register_invoice(
         &symbol_short!("inv_c1"),
         &originator,
-        &1_000i128,
+        &10_000_000i128,
         &symbol_short!("XLM"),
         &3_000_000u64,
     );
@@ -808,7 +808,7 @@ fn test_cancel_non_pending_panics() {
     client.register_invoice(
         &symbol_short!("inv_c2"),
         &originator,
-        &1_000i128,
+        &10_000_000i128,
         &symbol_short!("XLM"),
         &3_000_000u64,
     );
@@ -839,7 +839,7 @@ fn test_get_offers_by_invoice() {
     client.register_invoice(
         &symbol_short!("inv_g1"),
         &originator,
-        &5_000i128,
+        &50_000_000i128,
         &symbol_short!("USDC"),
         &3_000_000u64,
     );
@@ -881,7 +881,7 @@ fn test_get_offers_by_lender() {
     client.register_invoice(
         &symbol_short!("inv_l1"),
         &originator,
-        &1_000i128,
+        &10_000_000i128,
         &symbol_short!("XLM"),
         &3_000_000u64,
     );
@@ -925,7 +925,7 @@ fn test_calculate_total_due() {
     client.register_invoice(
         &symbol_short!("inv_d1"),
         &originator,
-        &10_000i128,
+        &100_000_000i128,
         &symbol_short!("XLM"),
         &3_000_000u64,
     );
@@ -984,7 +984,7 @@ fn test_register_invoice_while_paused_panics() {
     client.register_invoice(
         &symbol_short!("inv_p1"),
         &originator,
-        &1_000i128,
+        &10_000_000i128,
         &symbol_short!("XLM"),
         &3_000_000u64,
     );
@@ -1054,7 +1054,7 @@ fn test_withdraw_offer() {
     client.register_invoice(
         &symbol_short!("inv_w1"),
         &originator,
-        &5_000i128,
+        &50_000_000i128,
         &symbol_short!("USDC"),
         &3_000_000u64,
     );
@@ -1087,7 +1087,7 @@ fn test_withdraw_offer_wrong_lender_panics() {
     client.register_invoice(
         &symbol_short!("inv_w2"),
         &originator,
-        &5_000i128,
+        &50_000_000i128,
         &symbol_short!("USDC"),
         &3_000_000u64,
     );
@@ -1343,7 +1343,7 @@ fn test_min_invoice_amount_rejected() {
     client.register_invoice(
         &symbol_short!("tiny"),
         &originator,
-        &1_i128,
+        &10_000i128,
         &symbol_short!("USDC"),
         &1_735_689_600_u64,
     );
