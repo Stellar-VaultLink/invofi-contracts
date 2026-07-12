@@ -571,7 +571,7 @@ fn test_transfer_admin_unauthorized_panics() {
 // ── Validation tests ────────────────────────────────────────────────────
 
 #[test]
-#[should_panic(expected = "amount must be greater than zero")]
+#[should_panic(expected = "amount must be at least MIN_INVOICE_AMOUNT stroops")]
 fn test_register_invoice_zero_amount() {
     let env = Env::default();
     env.mock_all_auths();
@@ -602,7 +602,7 @@ fn test_register_invoice_past_due_date() {
     client.register_invoice(
         &symbol_short!("inv_v2"),
         &originator,
-        &1_000i128,
+        &10_000_000i128,
         &symbol_short!("USDC"),
         &1_000_000u64, // in the past relative to timestamp 5_000_000
     );
@@ -622,7 +622,7 @@ fn test_create_offer_zero_amount() {
     client.register_invoice(
         &symbol_short!("inv_v3"),
         &originator,
-        &5_000i128,
+        &50_000_000i128,
         &symbol_short!("USDC"),
         &3_000_000u64,
     );
@@ -663,14 +663,14 @@ fn test_get_invoices_by_status_matching() {
     client.register_invoice(
         &symbol_short!("q_inv_a"),
         &originator,
-        &1_000i128,
+        &10_000_000i128,
         &symbol_short!("USDC"),
         &3_000_000u64,
     );
     client.register_invoice(
         &symbol_short!("q_inv_b"),
         &originator,
-        &2_000i128,
+        &20_000_000i128,
         &symbol_short!("XLM"),
         &4_000_000u64,
     );
@@ -698,7 +698,7 @@ fn test_create_offer_interest_rate_too_high_panics() {
     client.register_invoice(
         &symbol_short!("inv_v4"),
         &originator,
-        &1_000i128,
+        &10_000_000i128,
         &symbol_short!("USDC"),
         &3_000_000u64,
     );
@@ -727,7 +727,7 @@ fn test_create_offer_short_duration_panics() {
     client.register_invoice(
         &symbol_short!("inv_v5"),
         &originator,
-        &1_000i128,
+        &10_000_000i128,
         &symbol_short!("USDC"),
         &3_000_000u64,
     );
@@ -755,7 +755,7 @@ fn test_create_offer_self_dealing_panics() {
     client.register_invoice(
         &symbol_short!("inv_v6"),
         &originator,
-        &1_000i128,
+        &10_000_000i128,
         &symbol_short!("USDC"),
         &3_000_000u64,
     );
@@ -782,7 +782,7 @@ fn test_cancel_invoice() {
     client.register_invoice(
         &symbol_short!("inv_c1"),
         &originator,
-        &1_000i128,
+        &10_000_000i128,
         &symbol_short!("XLM"),
         &3_000_000u64,
     );
@@ -808,7 +808,7 @@ fn test_cancel_non_pending_panics() {
     client.register_invoice(
         &symbol_short!("inv_c2"),
         &originator,
-        &1_000i128,
+        &10_000_000i128,
         &symbol_short!("XLM"),
         &3_000_000u64,
     );
@@ -839,7 +839,7 @@ fn test_get_offers_by_invoice() {
     client.register_invoice(
         &symbol_short!("inv_g1"),
         &originator,
-        &5_000i128,
+        &50_000_000i128,
         &symbol_short!("USDC"),
         &3_000_000u64,
     );
@@ -881,7 +881,7 @@ fn test_get_offers_by_lender() {
     client.register_invoice(
         &symbol_short!("inv_l1"),
         &originator,
-        &1_000i128,
+        &10_000_000i128,
         &symbol_short!("XLM"),
         &3_000_000u64,
     );
@@ -925,7 +925,7 @@ fn test_calculate_total_due() {
     client.register_invoice(
         &symbol_short!("inv_d1"),
         &originator,
-        &10_000i128,
+        &100_000_000i128,
         &symbol_short!("XLM"),
         &3_000_000u64,
     );
@@ -984,7 +984,7 @@ fn test_register_invoice_while_paused_panics() {
     client.register_invoice(
         &symbol_short!("inv_p1"),
         &originator,
-        &1_000i128,
+        &10_000_000i128,
         &symbol_short!("XLM"),
         &3_000_000u64,
     );
@@ -1054,7 +1054,7 @@ fn test_withdraw_offer() {
     client.register_invoice(
         &symbol_short!("inv_w1"),
         &originator,
-        &5_000i128,
+        &50_000_000i128,
         &symbol_short!("USDC"),
         &3_000_000u64,
     );
@@ -1087,7 +1087,7 @@ fn test_withdraw_offer_wrong_lender_panics() {
     client.register_invoice(
         &symbol_short!("inv_w2"),
         &originator,
-        &5_000i128,
+        &50_000_000i128,
         &symbol_short!("USDC"),
         &3_000_000u64,
     );
@@ -1343,7 +1343,7 @@ fn test_min_invoice_amount_rejected() {
     client.register_invoice(
         &symbol_short!("tiny"),
         &originator,
-        &1_i128,
+        &10_000i128,
         &symbol_short!("USDC"),
         &1_735_689_600_u64,
     );
@@ -1688,7 +1688,7 @@ fn test_get_invoices_paginated() {
 
     // Register 5 invoices
     for i in 0u32..5 {
-        let id = soroban_sdk::symbol_short!(match i {
+        let id = soroban_sdk::Symbol::new(&env, match i {
             0 => "i0", 1 => "i1", 2 => "i2", 3 => "i3", _ => "i4",
         });
         client.register_invoice(&id, &originator, &amount, &currency, &due_date);
@@ -1719,7 +1719,7 @@ fn test_get_offers_paginated() {
 
     // Create 4 offers
     for (id, rate) in [("o1", 100u32), ("o2", 200), ("o3", 300), ("o4", 400)] {
-        let sym = soroban_sdk::symbol_short!(id);
+        let sym = soroban_sdk::Symbol::new(&env, id);
         client.create_offer(
             &sym,
             &symbol_short!("inv1"),
@@ -1850,6 +1850,9 @@ fn test_get_invoices_due_before_excludes_repaid() {
     let token_id = setup_token(&env, &contract_id, &lender, 1_000_000_000_i128);
     client.initialize(&originator, &token_id);
     client.accept_offer(&symbol_short!("off1"), &originator);
+    // The originator received the 500M principal on accept but owes 515M
+    // (3% yield) — mint the difference so the full repayment can clear.
+    token::StellarAssetClient::new(&env, &token_id).mint(&originator, &15_000_000_i128);
     // Repay so inv2 moves to Repaid
     client.repay_invoice(&symbol_short!("inv2"), &symbol_short!("off1"), &originator, &515_000_000_i128);
 
@@ -1884,7 +1887,6 @@ fn test_full_invoice_financing_lifecycle() {
     let token_id = setup_token(&env, &contract_id, &lender_a, offer_a_amount + offer_b_amount);
     client.initialize(&admin, &token_id);
     // Also mint to lender_b
-    let token_admin = Address::generate(&env);
     let asset_client = token::StellarAssetClient::new(&env, &token_id);
     asset_client.mint(&lender_b, &offer_b_amount);
     let token_client = token::TokenClient::new(&env, &token_id);
