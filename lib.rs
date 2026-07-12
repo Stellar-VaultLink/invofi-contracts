@@ -60,6 +60,7 @@ pub enum InvoiceStatus {
     Repaid    = 2,
     Overdue   = 3,
     Cancelled = 4,
+    Disputed  = 5,
 }
 
 // ─── Financing Offer ─────────────────────────────────────────────────────────
@@ -164,6 +165,30 @@ fn load_stats(env: &Env) -> ProtocolStats {
 
 fn save_stats(env: &Env, s: &ProtocolStats) {
     env.storage().instance().set(&symbol_short!("stats"), s);
+}
+
+// ─── Lender Stats ───────────────────────────────────────────────────────────
+
+#[contracttype]
+#[derive(Clone, Debug, Default)]
+pub struct LenderStats {
+    pub total_offered:  i128,
+    pub total_accepted: i128,
+    pub offers_pending: u32,
+    pub offers_repaid:  u32,
+}
+
+fn load_lender_stats(env: &Env, lender: &Address) -> LenderStats {
+    env.storage()
+        .persistent()
+        .get(&(symbol_short!("lstats"), lender.clone()))
+        .unwrap_or_default()
+}
+
+fn save_lender_stats(env: &Env, lender: &Address, stats: &LenderStats) {
+    env.storage()
+        .persistent()
+        .set(&(symbol_short!("lstats"), lender.clone()), stats);
 }
 
 // --- Blacklist helpers -------------------------------------------------------
