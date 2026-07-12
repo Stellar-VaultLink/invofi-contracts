@@ -1546,7 +1546,7 @@ fn test_version_returns_nonempty_string() {
     let contract_id = env.register(InvoiceRegistryContract, ());
     let client = super::InvoiceRegistryContractClient::new(&env, &contract_id);
     let ver = client.version();
-    assert!(!ver.is_empty());
+    assert!(ver.len() > 0);
 }
 
 

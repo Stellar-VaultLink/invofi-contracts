@@ -1035,8 +1035,8 @@ impl InvoiceRegistryContract {
     }
 
     /// Return the contract's semantic version string.
-    pub fn version(_env: Env) -> &'static str {
-        env!("CARGO_PKG_VERSION")
+    pub fn version(env: Env) -> soroban_sdk::String {
+        soroban_sdk::String::from_str(&env, env!("CARGO_PKG_VERSION"))
     }
 
     /// Return the minimum invoice amount (in stroops) enforced by this contract.
