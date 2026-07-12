@@ -1763,3 +1763,99 @@ fn test_batch_get_invoices_skips_missing() {
     assert_eq!(results.len(), 1);
     assert_eq!(results.get(0).unwrap().id, symbol_short!("real"));
 }
+
+
+// ─── Constant introspection and edge case tests ───────────────────────────────
+
+#[test]
+fn test_get_min_invoice_amount_matches_constant() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let contract_id = env.register(InvoiceRegistryContract, ());
+    let client = super::InvoiceRegistryContractClient::new(&env, &contract_id);
+    assert_eq!(client.get_min_invoice_amount(), super::MIN_INVOICE_AMOUNT);
+}
+
+#[test]
+fn test_get_offer_duration_limits() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let contract_id = env.register(InvoiceRegistryContract, ());
+    let client = super::InvoiceRegistryContractClient::new(&env, &contract_id);
+    let (min, max) = client.get_offer_duration_limits();
+    assert_eq!(min, super::MIN_OFFER_DURATION_SECS);
+    assert_eq!(max, super::MAX_OFFER_DURATION_SECS);
+    assert!(min < max);
+}
+
+#[test]
+#[should_panic(expected = "Cannot resolve to Disputed status")]
+fn test_resolve_dispute_to_disputed_panics() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let contract_id = env.register(InvoiceRegistryContract, ());
+    let client = super::InvoiceRegistryContractClient::new(&env, &contract_id);
+
+    let admin = Address::generate(&env);
+    let originator = Address::generate(&env);
+    let lender = Address::generate(&env);
+    let currency = symbol_short!("USDC");
+
+    client.register_invoice(&symbol_short!("inv1"), &originator, &1_000_000_000_i128, &currency, &1_735_689_600_u64);
+    client.create_offer(
+        &symbol_short!("off1"),
+        &symbol_short!("inv1"),
+        &lender,
+        &500_000_000_i128,
+        &currency,
+        &300_u32,
+        &86_400_u64,
+    );
+    let token_id = setup_token(&env, &contract_id, &lender, 500_000_000_i128);
+    client.initialize(&admin, &token_id);
+    client.accept_offer(&symbol_short!("off1"), &originator);
+    client.raise_dispute(&symbol_short!("inv1"), &originator);
+
+    // Trying to resolve to Disputed is invalid
+    client.resolve_dispute(&admin, &symbol_short!("inv1"), &InvoiceStatus::Disputed);
+}
+
+#[test]
+fn test_get_invoices_due_before_excludes_repaid() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let contract_id = env.register(InvoiceRegistryContract, ());
+    let client = super::InvoiceRegistryContractClient::new(&env, &contract_id);
+
+    let originator = Address::generate(&env);
+    let lender = Address::generate(&env);
+    let amount: i128 = 1_000_000_000;
+    let currency = symbol_short!("USDC");
+
+    env.ledger().set_timestamp(1000);
+
+    // Invoice due at 2000 — will be Pending
+    client.register_invoice(&symbol_short!("inv1"), &originator, &amount, &currency, &2000_u64);
+    // Invoice due at 2000 — will be Financed then Repaid
+    client.register_invoice(&symbol_short!("inv2"), &originator, &amount, &currency, &2000_u64);
+    client.create_offer(
+        &symbol_short!("off1"),
+        &symbol_short!("inv2"),
+        &lender,
+        &500_000_000_i128,
+        &currency,
+        &300_u32,
+        &86_400_u64,
+    );
+    let token_id = setup_token(&env, &contract_id, &lender, 1_000_000_000_i128);
+    client.initialize(&originator, &token_id);
+    client.accept_offer(&symbol_short!("off1"), &originator);
+    // Repay so inv2 moves to Repaid
+    client.repay_invoice(&symbol_short!("inv2"), &symbol_short!("off1"), &originator, &515_000_000_i128);
+
+    // Both have due_date=2000, but query at 5000 should only return inv1 (Pending)
+    // inv2 is Repaid and should not appear
+    let due = client.get_invoices_due_before(&5000_u64);
+    assert_eq!(due.len(), 1);
+    assert_eq!(due.get(0).unwrap().id, symbol_short!("inv1"));
+}
