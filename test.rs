@@ -1670,3 +1670,96 @@ fn test_get_lender_stats_after_create_offer() {
     assert_eq!(stats.total_offered, offer_amount);
     assert_eq!(stats.offers_pending, 1);
 }
+
+
+// ─── Pagination and batch tests ───────────────────────────────────────────────
+
+#[test]
+fn test_get_invoices_paginated() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let contract_id = env.register(InvoiceRegistryContract, ());
+    let client = super::InvoiceRegistryContractClient::new(&env, &contract_id);
+
+    let originator = Address::generate(&env);
+    let amount: i128 = 1_000_000_000;
+    let due_date: u64 = 1_735_689_600;
+    let currency = symbol_short!("USDC");
+
+    // Register 5 invoices
+    for i in 0u32..5 {
+        let id = soroban_sdk::symbol_short!(match i {
+            0 => "i0", 1 => "i1", 2 => "i2", 3 => "i3", _ => "i4",
+        });
+        client.register_invoice(&id, &originator, &amount, &currency, &due_date);
+    }
+
+    // Page 1: offset 0, limit 3
+    let page1 = client.get_invoices_paginated(&0_u32, &3_u32);
+    assert_eq!(page1.len(), 3);
+
+    // Page 2: offset 3, limit 3 (only 2 remaining)
+    let page2 = client.get_invoices_paginated(&3_u32, &3_u32);
+    assert_eq!(page2.len(), 2);
+}
+
+#[test]
+fn test_get_offers_paginated() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let contract_id = env.register(InvoiceRegistryContract, ());
+    let client = super::InvoiceRegistryContractClient::new(&env, &contract_id);
+
+    let originator = Address::generate(&env);
+    let lender = Address::generate(&env);
+    let amount: i128 = 2_000_000_000;
+    let currency = symbol_short!("USDC");
+
+    client.register_invoice(&symbol_short!("inv1"), &originator, &amount, &currency, &1_735_689_600_u64);
+
+    // Create 4 offers
+    for (id, rate) in [("o1", 100u32), ("o2", 200), ("o3", 300), ("o4", 400)] {
+        let sym = soroban_sdk::symbol_short!(id);
+        client.create_offer(
+            &sym,
+            &symbol_short!("inv1"),
+            &lender,
+            &100_000_000_i128,
+            &currency,
+            &rate,
+            &86_400_u64,
+        );
+    }
+
+    let page1 = client.get_offers_paginated(&0_u32, &2_u32);
+    assert_eq!(page1.len(), 2);
+
+    let page2 = client.get_offers_paginated(&2_u32, &2_u32);
+    assert_eq!(page2.len(), 2);
+
+    let page3 = client.get_offers_paginated(&4_u32, &2_u32);
+    assert_eq!(page3.len(), 0);
+}
+
+#[test]
+fn test_batch_get_invoices_skips_missing() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let contract_id = env.register(InvoiceRegistryContract, ());
+    let client = super::InvoiceRegistryContractClient::new(&env, &contract_id);
+
+    let originator = Address::generate(&env);
+    let amount: i128 = 1_000_000_000;
+    let currency = symbol_short!("USDC");
+
+    client.register_invoice(&symbol_short!("real"), &originator, &amount, &currency, &1_735_689_600_u64);
+
+    let mut ids = soroban_sdk::Vec::new(&env);
+    ids.push_back(symbol_short!("real"));
+    ids.push_back(symbol_short!("fake")); // does not exist
+
+    let results = client.batch_get_invoices(&ids);
+    // Only the real invoice should be returned
+    assert_eq!(results.len(), 1);
+    assert_eq!(results.get(0).unwrap().id, symbol_short!("real"));
+}
