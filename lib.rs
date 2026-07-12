@@ -130,6 +130,60 @@ fn save_offers(env: &Env, map: &Map<Symbol, FinancingOffer>) {
 }
 
 // ─── Contract ────────────────────────────────────────────────────────────────
+// --- ProtocolStats ------------------------------------------------------------
+
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ProtocolStats {
+    pub total_invoices: u32,
+    pub total_offers: u32,
+    pub total_financed: i128,
+    pub total_repaid: i128,
+    pub total_fee_revenue: i128,
+}
+
+fn load_stats(env: &Env) -> ProtocolStats {
+    env.storage()
+        .instance()
+        .get(&symbol_short!("stats"))
+        .unwrap_or(ProtocolStats {
+            total_invoices: 0,
+            total_offers: 0,
+            total_financed: 0,
+            total_repaid: 0,
+            total_fee_revenue: 0,
+        })
+}
+
+fn save_stats(env: &Env, s: &ProtocolStats) {
+    env.storage().instance().set(&symbol_short!("stats"), s);
+}
+
+// --- Blacklist helpers -------------------------------------------------------
+
+fn load_blacklist(env: &Env) -> Vec<Address> {
+    env.storage()
+        .persistent()
+        .get(&symbol_short!("blklist"))
+        .unwrap_or(Vec::new(env))
+}
+
+fn save_blacklist(env: &Env, list: &Vec<Address>) {
+    env.storage()
+        .persistent()
+        .set(&symbol_short!("blklist"), list);
+}
+
+fn assert_not_blacklisted(env: &Env, address: &Address) {
+    let list = load_blacklist(env);
+    for entry in list.iter() {
+        if entry == *address {
+            panic!("Address is blacklisted");
+        }
+    }
+}
+
+
 
 #[contract]
 pub struct InvoiceRegistryContract;
@@ -292,6 +346,7 @@ impl InvoiceRegistryContract {
     ) -> Invoice {
         assert_not_paused(&env);
         originator.require_auth();
+        assert_not_blacklisted(&env, &originator);
         assert!(amount > 0, "amount must be greater than zero");
         assert!(
             due_date > env.ledger().timestamp(),
@@ -313,6 +368,7 @@ impl InvoiceRegistryContract {
         };
         invoices.set(id, invoice.clone());
         save_invoices(&env, &invoices);
+        let mut s = load_stats(&env); s.total_invoices += 1; save_stats(&env, &s);
         invoice
     }
 
@@ -349,6 +405,7 @@ impl InvoiceRegistryContract {
         duration: u64,
     ) -> FinancingOffer {
         lender.require_auth();
+        assert_not_blacklisted(&env, &lender);
         assert!(amount > 0, "offer amount must be greater than zero");
         assert!(interest_rate > 0, "interest_rate must be greater than zero");
         assert!(interest_rate <= 10_000, "interest_rate must be at most 10000 bps");
@@ -383,6 +440,7 @@ impl InvoiceRegistryContract {
         };
         offers.set(offer_id, offer.clone());
         save_offers(&env, &offers);
+        let mut s = load_stats(&env); s.total_offers += 1; save_stats(&env, &s);
         offer
     }
 
@@ -793,6 +851,75 @@ impl InvoiceRegistryContract {
         let total_due = offer.amount + yield_amount;
         (total_due - offer.amount_repaid).max(0)
     }
+
+    // --- Blacklist management ------------------------------------------------
+
+    /// Permanently ban an address from registering invoices or submitting offers.
+    /// Only the admin can call this.
+    pub fn blacklist_address(env: Env, admin: Address, target: Address) {
+        admin.require_auth();
+        let current: Address = env
+            .storage()
+            .instance()
+            .get(&symbol_short!("admin"))
+            .unwrap_or_else(|| panic!("Not initialized"));
+        if current != admin {
+            panic!("Only admin can blacklist");
+        }
+        let mut list = load_blacklist(&env);
+        for entry in list.iter() {
+            if entry == target {
+                return;
+            }
+        }
+        list.push_back(target);
+        save_blacklist(&env, &list);
+    }
+
+    /// Remove an address from the protocol blacklist. Admin only.
+    pub fn unblacklist_address(env: Env, admin: Address, target: Address) {
+        admin.require_auth();
+        let current: Address = env
+            .storage()
+            .instance()
+            .get(&symbol_short!("admin"))
+            .unwrap_or_else(|| panic!("Not initialized"));
+        if current != admin {
+            panic!("Only admin can unblacklist");
+        }
+        let list = load_blacklist(&env);
+        let mut new_list: Vec<Address> = Vec::new(&env);
+        for entry in list.iter() {
+            if entry != target {
+                new_list.push_back(entry);
+            }
+        }
+        save_blacklist(&env, &new_list);
+    }
+
+    /// Returns true if the given address is currently blacklisted.
+    pub fn is_blacklisted(env: Env, address: Address) -> bool {
+        let list = load_blacklist(&env);
+        for entry in list.iter() {
+            if entry == address {
+                return true;
+            }
+        }
+        false
+    }
+
+    /// Return the full blacklist for admin review.
+    pub fn get_blacklist(env: Env) -> Vec<Address> {
+        load_blacklist(&env)
+    }
+
+    // --- Protocol statistics -------------------------------------------------
+
+    /// Return aggregate statistics collected across all protocol activity.
+    pub fn get_stats(env: Env) -> ProtocolStats {
+        load_stats(&env)
+    }
+
 }
 
 #[cfg(test)]
