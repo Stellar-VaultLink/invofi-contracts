@@ -1109,6 +1109,55 @@ impl InvoiceRegistryContract {
         load_lender_stats(&env, &lender)
     }
 
+    /// Return up to `limit` invoices starting at `offset` (zero-based).
+    /// Provides cursor-free pagination over the full invoice set.
+    pub fn get_invoices_paginated(env: Env, offset: u32, limit: u32) -> Vec<Invoice> {
+        let invoices = load_invoices(&env);
+        let mut result: Vec<Invoice> = Vec::new(&env);
+        let mut idx: u32 = 0;
+        for (_id, inv) in invoices.iter() {
+            if idx >= offset && result.len() < limit {
+                result.push_back(inv);
+            }
+            idx += 1;
+            if result.len() >= limit {
+                break;
+            }
+        }
+        result
+    }
+
+    /// Return up to `limit` offers starting at `offset` (zero-based).
+    /// Provides cursor-free pagination over the full offer set.
+    pub fn get_offers_paginated(env: Env, offset: u32, limit: u32) -> Vec<FinancingOffer> {
+        let offers = load_offers(&env);
+        let mut result: Vec<FinancingOffer> = Vec::new(&env);
+        let mut idx: u32 = 0;
+        for (_id, offer) in offers.iter() {
+            if idx >= offset && result.len() < limit {
+                result.push_back(offer);
+            }
+            idx += 1;
+            if result.len() >= limit {
+                break;
+            }
+        }
+        result
+    }
+
+    /// Return invoices for multiple IDs in a single call to reduce round-trips.
+    /// Silently skips IDs that don't exist.
+    pub fn batch_get_invoices(env: Env, ids: Vec<Symbol>) -> Vec<Invoice> {
+        let invoices = load_invoices(&env);
+        let mut result: Vec<Invoice> = Vec::new(&env);
+        for id in ids.iter() {
+            if let Some(inv) = invoices.get(id) {
+                result.push_back(inv);
+            }
+        }
+        result
+    }
+
 }
 
 #[cfg(test)]
