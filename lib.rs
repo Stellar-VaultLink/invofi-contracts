@@ -8,6 +8,13 @@ const GRACE_PERIOD_SECS: u64 = 604_800;
 /// Minimum allowed financing duration in create_offer. 1 day, in seconds.
 pub const MIN_OFFER_DURATION_SECS: u64 = 86_400;
 
+/// Maximum allowed financing duration in create_offer. 365 days, in seconds.
+pub const MAX_OFFER_DURATION_SECS: u64 = 31_536_000;
+
+/// Minimum invoice amount in stroops (1 XLM = 10_000_000 stroops).
+/// Prevents dust invoices that would cost more in fees than they're worth.
+pub const MIN_INVOICE_AMOUNT: i128 = 10_000_000;
+
 // ─── Yield Rate Oracle ───────────────────────────────────────────────────────
 
 /// Risk tier for yield-rate lookups. A = low risk, C = high risk.
@@ -53,6 +60,7 @@ pub enum InvoiceStatus {
     Repaid    = 2,
     Overdue   = 3,
     Cancelled = 4,
+    Disputed  = 5,
 }
 
 // ─── Financing Offer ─────────────────────────────────────────────────────────
@@ -130,6 +138,84 @@ fn save_offers(env: &Env, map: &Map<Symbol, FinancingOffer>) {
 }
 
 // ─── Contract ────────────────────────────────────────────────────────────────
+// --- ProtocolStats ------------------------------------------------------------
+
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ProtocolStats {
+    pub total_invoices: u32,
+    pub total_offers: u32,
+    pub total_financed: i128,
+    pub total_repaid: i128,
+    pub total_fee_revenue: i128,
+}
+
+fn load_stats(env: &Env) -> ProtocolStats {
+    env.storage()
+        .instance()
+        .get(&symbol_short!("stats"))
+        .unwrap_or(ProtocolStats {
+            total_invoices: 0,
+            total_offers: 0,
+            total_financed: 0,
+            total_repaid: 0,
+            total_fee_revenue: 0,
+        })
+}
+
+fn save_stats(env: &Env, s: &ProtocolStats) {
+    env.storage().instance().set(&symbol_short!("stats"), s);
+}
+
+// ─── Lender Stats ───────────────────────────────────────────────────────────
+
+#[contracttype]
+#[derive(Clone, Debug, Default)]
+pub struct LenderStats {
+    pub total_offered:  i128,
+    pub total_accepted: i128,
+    pub offers_pending: u32,
+    pub offers_repaid:  u32,
+}
+
+fn load_lender_stats(env: &Env, lender: &Address) -> LenderStats {
+    env.storage()
+        .persistent()
+        .get(&(symbol_short!("lstats"), lender.clone()))
+        .unwrap_or_default()
+}
+
+fn save_lender_stats(env: &Env, lender: &Address, stats: &LenderStats) {
+    env.storage()
+        .persistent()
+        .set(&(symbol_short!("lstats"), lender.clone()), stats);
+}
+
+// --- Blacklist helpers -------------------------------------------------------
+
+fn load_blacklist(env: &Env) -> Vec<Address> {
+    env.storage()
+        .persistent()
+        .get(&symbol_short!("blklist"))
+        .unwrap_or(Vec::new(env))
+}
+
+fn save_blacklist(env: &Env, list: &Vec<Address>) {
+    env.storage()
+        .persistent()
+        .set(&symbol_short!("blklist"), list);
+}
+
+fn assert_not_blacklisted(env: &Env, address: &Address) {
+    let list = load_blacklist(env);
+    for entry in list.iter() {
+        if entry == *address {
+            panic!("Address is blacklisted");
+        }
+    }
+}
+
+
 
 #[contract]
 pub struct InvoiceRegistryContract;
@@ -292,7 +378,8 @@ impl InvoiceRegistryContract {
     ) -> Invoice {
         assert_not_paused(&env);
         originator.require_auth();
-        assert!(amount > 0, "amount must be greater than zero");
+        assert_not_blacklisted(&env, &originator);
+        assert!(amount >= MIN_INVOICE_AMOUNT, "amount must be at least MIN_INVOICE_AMOUNT stroops");
         assert!(
             due_date > env.ledger().timestamp(),
             "due_date must be in the future"
@@ -313,6 +400,7 @@ impl InvoiceRegistryContract {
         };
         invoices.set(id, invoice.clone());
         save_invoices(&env, &invoices);
+        let mut s = load_stats(&env); s.total_invoices += 1; save_stats(&env, &s);
         invoice
     }
 
@@ -349,10 +437,12 @@ impl InvoiceRegistryContract {
         duration: u64,
     ) -> FinancingOffer {
         lender.require_auth();
+        assert_not_blacklisted(&env, &lender);
         assert!(amount > 0, "offer amount must be greater than zero");
         assert!(interest_rate > 0, "interest_rate must be greater than zero");
         assert!(interest_rate <= 10_000, "interest_rate must be at most 10000 bps");
         assert!(duration >= MIN_OFFER_DURATION_SECS, "duration must be at least 1 day (86400 seconds)");
+        assert!(duration <= MAX_OFFER_DURATION_SECS, "duration must be at most 365 days");
 
         // Invoice must exist, and the lender can't finance their own invoice.
         let invoices = load_invoices(&env);
@@ -383,6 +473,14 @@ impl InvoiceRegistryContract {
         };
         offers.set(offer_id, offer.clone());
         save_offers(&env, &offers);
+        let mut s = load_stats(&env); s.total_offers += 1; save_stats(&env, &s);
+
+        // Update per-lender stats
+        let mut lstats = load_lender_stats(&env, &offer.lender);
+        lstats.total_offered += offer.amount;
+        lstats.offers_pending += 1;
+        save_lender_stats(&env, &offer.lender, &lstats);
+
         offer
     }
 
@@ -793,6 +891,283 @@ impl InvoiceRegistryContract {
         let total_due = offer.amount + yield_amount;
         (total_due - offer.amount_repaid).max(0)
     }
+
+    // --- Blacklist management ------------------------------------------------
+
+    /// Permanently ban an address from registering invoices or submitting offers.
+    /// Only the admin can call this.
+    pub fn blacklist_address(env: Env, admin: Address, target: Address) {
+        admin.require_auth();
+        let current: Address = env
+            .storage()
+            .instance()
+            .get(&symbol_short!("admin"))
+            .unwrap_or_else(|| panic!("Not initialized"));
+        if current != admin {
+            panic!("Only admin can blacklist");
+        }
+        let mut list = load_blacklist(&env);
+        for entry in list.iter() {
+            if entry == target {
+                return;
+            }
+        }
+        list.push_back(target);
+        save_blacklist(&env, &list);
+    }
+
+    /// Remove an address from the protocol blacklist. Admin only.
+    pub fn unblacklist_address(env: Env, admin: Address, target: Address) {
+        admin.require_auth();
+        let current: Address = env
+            .storage()
+            .instance()
+            .get(&symbol_short!("admin"))
+            .unwrap_or_else(|| panic!("Not initialized"));
+        if current != admin {
+            panic!("Only admin can unblacklist");
+        }
+        let list = load_blacklist(&env);
+        let mut new_list: Vec<Address> = Vec::new(&env);
+        for entry in list.iter() {
+            if entry != target {
+                new_list.push_back(entry);
+            }
+        }
+        save_blacklist(&env, &new_list);
+    }
+
+    /// Returns true if the given address is currently blacklisted.
+    pub fn is_blacklisted(env: Env, address: Address) -> bool {
+        let list = load_blacklist(&env);
+        for entry in list.iter() {
+            if entry == address {
+                return true;
+            }
+        }
+        false
+    }
+
+    /// Return the full blacklist for admin review.
+    pub fn get_blacklist(env: Env) -> Vec<Address> {
+        load_blacklist(&env)
+    }
+
+    // --- Protocol statistics -------------------------------------------------
+
+    /// Return aggregate statistics collected across all protocol activity.
+    pub fn get_stats(env: Env) -> ProtocolStats {
+        load_stats(&env)
+    }
+
+    /// Return the total number of invoices ever registered.
+    pub fn get_invoices_count(env: Env) -> u32 {
+        load_invoices(&env).len()
+    }
+
+    /// Return the total number of offers ever created.
+    pub fn get_offers_count(env: Env) -> u32 {
+        load_offers(&env).len()
+    }
+
+    /// Return all financing offers matching the given status.
+    pub fn get_offers_by_status(env: Env, status: OfferStatus) -> Vec<FinancingOffer> {
+        let offers = load_offers(&env);
+        let mut result: Vec<FinancingOffer> = Vec::new(&env);
+        for (_id, offer) in offers.iter() {
+            if offer.status == status {
+                result.push_back(offer);
+            }
+        }
+        result
+    }
+
+    /// Return all invoices denominated in the given currency Symbol.
+    pub fn get_invoices_by_currency(env: Env, currency: Symbol) -> Vec<Invoice> {
+        let invoices = load_invoices(&env);
+        let mut result: Vec<Invoice> = Vec::new(&env);
+        for (_id, inv) in invoices.iter() {
+            if inv.currency == currency {
+                result.push_back(inv);
+            }
+        }
+        result
+    }
+
+    /// Return all Pending or Financed invoices whose due_date is before the
+    /// given UNIX timestamp. Useful for automated overdue detection jobs.
+    pub fn get_invoices_due_before(env: Env, timestamp: u64) -> Vec<Invoice> {
+        let invoices = load_invoices(&env);
+        let mut result: Vec<Invoice> = Vec::new(&env);
+        for (_id, inv) in invoices.iter() {
+            let is_open = inv.status == InvoiceStatus::Pending || inv.status == InvoiceStatus::Financed;
+            if is_open && inv.due_date < timestamp {
+                result.push_back(inv);
+            }
+        }
+        result
+    }
+
+    /// Return only the Pending offers attached to a given invoice. Useful for
+    /// a business to see which offers are awaiting their decision.
+    pub fn get_pending_offers_by_invoice(env: Env, invoice_id: Symbol) -> Vec<FinancingOffer> {
+        let offers = load_offers(&env);
+        let mut result: Vec<FinancingOffer> = Vec::new(&env);
+        for (_id, offer) in offers.iter() {
+            if offer.invoice_id == invoice_id && offer.status == OfferStatus::Pending {
+                result.push_back(offer);
+            }
+        }
+        result
+    }
+
+    /// Return the sum of amounts across all Accepted offers held by a lender.
+    /// Gives a quick portfolio-size snapshot without fetching all offer details.
+    pub fn get_lender_active_total(env: Env, lender: Address) -> i128 {
+        let offers = load_offers(&env);
+        let mut total: i128 = 0;
+        for (_id, offer) in offers.iter() {
+            if offer.lender == lender && offer.status == OfferStatus::Accepted {
+                total += offer.amount;
+            }
+        }
+        total
+    }
+
+    /// Return the contract's semantic version string.
+    pub fn version(_env: Env) -> &'static str {
+        env!("CARGO_PKG_VERSION")
+    }
+
+    /// Return the minimum invoice amount (in stroops) enforced by this contract.
+    pub fn get_min_invoice_amount(_env: Env) -> i128 {
+        MIN_INVOICE_AMOUNT
+    }
+
+    /// Return the minimum and maximum offer duration in seconds as a tuple.
+    pub fn get_offer_duration_limits(_env: Env) -> (u64, u64) {
+        (MIN_OFFER_DURATION_SECS, MAX_OFFER_DURATION_SECS)
+    }
+
+    // ─── Dispute management ─────────────────────────────────────────────────
+
+    /// Mark a Financed invoice as Disputed. Only the invoice originator can
+    /// call this — it signals a disagreement with the lender and freezes
+    /// further state transitions (repayment is still possible). Admin
+    /// resolves via resolve_dispute.
+    pub fn raise_dispute(env: Env, invoice_id: Symbol, originator: Address) -> Invoice {
+        assert_not_paused(&env);
+        originator.require_auth();
+
+        let mut invoices = load_invoices(&env);
+        let mut invoice = invoices
+            .get(invoice_id.clone())
+            .unwrap_or_else(|| panic!("Invoice not found"));
+
+        if invoice.originator != originator {
+            panic!("Only the invoice originator can raise a dispute");
+        }
+        if invoice.status != InvoiceStatus::Financed {
+            panic!("Only Financed invoices can be disputed");
+        }
+
+        invoice.status = InvoiceStatus::Disputed;
+        invoices.set(invoice_id, invoice.clone());
+        save_invoices(&env, &invoices);
+        invoice
+    }
+
+    /// Resolve a Disputed invoice. Admin only. Accepts a target_status
+    /// parameter — typically Financed (dispute withdrawn) or Cancelled
+    /// (dispute upheld). Panics if invoice is not Disputed.
+    pub fn resolve_dispute(
+        env: Env,
+        admin: Address,
+        invoice_id: Symbol,
+        target_status: InvoiceStatus,
+    ) -> Invoice {
+        admin.require_auth();
+        let current_admin: Address = env
+            .storage()
+            .instance()
+            .get(&symbol_short!("admin"))
+            .unwrap_or_else(|| panic!("Not initialized"));
+        if current_admin != admin {
+            panic!("Only admin can resolve disputes");
+        }
+
+        let mut invoices = load_invoices(&env);
+        let mut invoice = invoices
+            .get(invoice_id.clone())
+            .unwrap_or_else(|| panic!("Invoice not found"));
+
+        if invoice.status != InvoiceStatus::Disputed {
+            panic!("Invoice is not in Disputed status");
+        }
+        if target_status == InvoiceStatus::Disputed {
+            panic!("Cannot resolve to Disputed status");
+        }
+
+        invoice.status = target_status;
+        invoices.set(invoice_id, invoice.clone());
+        save_invoices(&env, &invoices);
+        invoice
+    }
+
+    /// Return the aggregated stats for a specific lender address.
+    pub fn get_lender_stats(env: Env, lender: Address) -> LenderStats {
+        load_lender_stats(&env, &lender)
+    }
+
+    /// Return up to `limit` invoices starting at `offset` (zero-based).
+    /// Provides cursor-free pagination over the full invoice set.
+    pub fn get_invoices_paginated(env: Env, offset: u32, limit: u32) -> Vec<Invoice> {
+        let invoices = load_invoices(&env);
+        let mut result: Vec<Invoice> = Vec::new(&env);
+        let mut idx: u32 = 0;
+        for (_id, inv) in invoices.iter() {
+            if idx >= offset && result.len() < limit {
+                result.push_back(inv);
+            }
+            idx += 1;
+            if result.len() >= limit {
+                break;
+            }
+        }
+        result
+    }
+
+    /// Return up to `limit` offers starting at `offset` (zero-based).
+    /// Provides cursor-free pagination over the full offer set.
+    pub fn get_offers_paginated(env: Env, offset: u32, limit: u32) -> Vec<FinancingOffer> {
+        let offers = load_offers(&env);
+        let mut result: Vec<FinancingOffer> = Vec::new(&env);
+        let mut idx: u32 = 0;
+        for (_id, offer) in offers.iter() {
+            if idx >= offset && result.len() < limit {
+                result.push_back(offer);
+            }
+            idx += 1;
+            if result.len() >= limit {
+                break;
+            }
+        }
+        result
+    }
+
+    /// Return invoices for multiple IDs in a single call to reduce round-trips.
+    /// Silently skips IDs that don't exist.
+    pub fn batch_get_invoices(env: Env, ids: Vec<Symbol>) -> Vec<Invoice> {
+        let invoices = load_invoices(&env);
+        let mut result: Vec<Invoice> = Vec::new(&env);
+        for id in ids.iter() {
+            if let Some(inv) = invoices.get(id) {
+                result.push_back(inv);
+            }
+        }
+        result
+    }
+
 }
 
 #[cfg(test)]
