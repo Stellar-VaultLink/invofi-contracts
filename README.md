@@ -103,3 +103,36 @@ Blacklisted addresses will get a panic on `register_invoice` and `create_offer`.
 |---|---|---|
 | `set_fee(admin, fee_bps)` | Admin | Set protocol fee (max 500 bps = 5%) |
 | `get_fee()` | Anyone | Read current fee in basis points |
+
+## v0.2 — New features
+
+### Invoice validation
+- `MIN_INVOICE_AMOUNT` (10 XLM / 10,000,000 stroops) — invoices below this threshold are rejected
+- `MAX_OFFER_DURATION` (365 days) — offer durations cannot exceed one year
+
+### Dispute resolution
+- `raise_dispute(invoice_id, originator)` — business marks a Financed invoice Disputed
+- `resolve_dispute(admin, invoice_id, target_status)` — admin resolves back to Financed or Cancelled
+
+### Pagination
+- `get_invoices_paginated(offset, limit)` — page through the invoice list
+- `get_offers_paginated(offset, limit)` — page through the offer list
+
+### Batch queries
+- `batch_get_invoices(ids)` — fetch multiple invoices in a single call; silently skips missing IDs
+
+### Lender portfolio analytics
+- `LenderStats` struct: `total_offered`, `total_accepted`, `offers_pending`, `offers_repaid`
+- `get_lender_stats(lender)` — returns per-address stats
+- `get_lender_active_total(lender)` — sum of amounts across all Accepted offers
+
+### New query helpers
+- `get_invoices_count()` — total invoices ever registered
+- `get_offers_count()` — total offers ever created
+- `get_offers_by_status(status)` — filter offers by status
+- `get_invoices_by_currency(currency)` — filter invoices by currency symbol
+- `get_invoices_due_before(timestamp)` — open invoices with `due_date < timestamp`
+- `get_pending_offers_by_invoice(invoice_id)` — only Pending offers on an invoice
+- `get_min_invoice_amount()` — on-chain constant introspection
+- `get_offer_duration_limits()` — returns `(MIN_OFFER_DURATION_SECS, MAX_OFFER_DURATION_SECS)`
+- `version()` — returns the CARGO_PKG_VERSION string
