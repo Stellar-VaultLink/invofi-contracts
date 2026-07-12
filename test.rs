@@ -1548,3 +1548,125 @@ fn test_version_returns_nonempty_string() {
     let ver = client.version();
     assert!(!ver.is_empty());
 }
+
+
+// ─── Dispute and lender stats tests ─────────────────────────────────────────
+
+#[test]
+fn test_raise_dispute_changes_status_to_disputed() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let contract_id = env.register(InvoiceRegistryContract, ());
+    let client = super::InvoiceRegistryContractClient::new(&env, &contract_id);
+
+    let originator = Address::generate(&env);
+    let lender = Address::generate(&env);
+    let amount: i128 = 1_000_000_000;
+    let due_date: u64 = 1_735_689_600;
+    let currency = symbol_short!("USDC");
+
+    client.register_invoice(&symbol_short!("inv1"), &originator, &amount, &currency, &due_date);
+    client.create_offer(
+        &symbol_short!("off1"),
+        &symbol_short!("inv1"),
+        &lender,
+        &500_000_000_i128,
+        &currency,
+        &300_u32,
+        &86_400_u64,
+    );
+
+    let token_id = setup_token(&env, &contract_id, &lender, 500_000_000_i128);
+    client.initialize(&originator, &token_id);
+    client.accept_offer(&symbol_short!("off1"), &originator);
+
+    // Now raise dispute
+    let disputed = client.raise_dispute(&symbol_short!("inv1"), &originator);
+    assert_eq!(disputed.status, InvoiceStatus::Disputed);
+}
+
+#[test]
+#[should_panic(expected = "Only Financed invoices can be disputed")]
+fn test_raise_dispute_on_pending_invoice_panics() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let contract_id = env.register(InvoiceRegistryContract, ());
+    let client = super::InvoiceRegistryContractClient::new(&env, &contract_id);
+
+    let originator = Address::generate(&env);
+    client.register_invoice(
+        &symbol_short!("inv1"),
+        &originator,
+        &1_000_000_000_i128,
+        &symbol_short!("USDC"),
+        &1_735_689_600_u64,
+    );
+    // Pending — cannot be disputed
+    client.raise_dispute(&symbol_short!("inv1"), &originator);
+}
+
+#[test]
+fn test_resolve_dispute_restores_financed_status() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let contract_id = env.register(InvoiceRegistryContract, ());
+    let client = super::InvoiceRegistryContractClient::new(&env, &contract_id);
+
+    let admin = Address::generate(&env);
+    let originator = Address::generate(&env);
+    let lender = Address::generate(&env);
+    let amount: i128 = 1_000_000_000;
+    let currency = symbol_short!("USDC");
+
+    client.register_invoice(&symbol_short!("inv1"), &originator, &amount, &currency, &1_735_689_600_u64);
+    client.create_offer(
+        &symbol_short!("off1"),
+        &symbol_short!("inv1"),
+        &lender,
+        &500_000_000_i128,
+        &currency,
+        &300_u32,
+        &86_400_u64,
+    );
+    let token_id = setup_token(&env, &contract_id, &lender, 500_000_000_i128);
+    client.initialize(&admin, &token_id);
+    client.accept_offer(&symbol_short!("off1"), &originator);
+    client.raise_dispute(&symbol_short!("inv1"), &originator);
+
+    // Admin resolves back to Financed
+    let resolved = client.resolve_dispute(
+        &admin,
+        &symbol_short!("inv1"),
+        &InvoiceStatus::Financed,
+    );
+    assert_eq!(resolved.status, InvoiceStatus::Financed);
+}
+
+#[test]
+fn test_get_lender_stats_after_create_offer() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let contract_id = env.register(InvoiceRegistryContract, ());
+    let client = super::InvoiceRegistryContractClient::new(&env, &contract_id);
+
+    let originator = Address::generate(&env);
+    let lender = Address::generate(&env);
+    let amount: i128 = 1_000_000_000;
+    let offer_amount: i128 = 500_000_000;
+    let currency = symbol_short!("USDC");
+
+    client.register_invoice(&symbol_short!("inv1"), &originator, &amount, &currency, &1_735_689_600_u64);
+    client.create_offer(
+        &symbol_short!("off1"),
+        &symbol_short!("inv1"),
+        &lender,
+        &offer_amount,
+        &currency,
+        &300_u32,
+        &86_400_u64,
+    );
+
+    let stats = client.get_lender_stats(&lender);
+    assert_eq!(stats.total_offered, offer_amount);
+    assert_eq!(stats.offers_pending, 1);
+}
