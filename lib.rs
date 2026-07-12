@@ -1,4 +1,7 @@
 #![no_std]
+// create_offer takes 8 args — that's the contract's public ABI, and the lint
+// also fires inside the #[contractimpl]-generated client where we can't allow it.
+#![allow(clippy::too_many_arguments)]
 use soroban_sdk::{contract, contractimpl, contracttype, symbol_short, token, Address, Env, Map, Symbol, Vec};
 
 /// Grace period after due_date before a lender can mark a Financed offer
@@ -1124,12 +1127,10 @@ impl InvoiceRegistryContract {
     pub fn get_invoices_paginated(env: Env, offset: u32, limit: u32) -> Vec<Invoice> {
         let invoices = load_invoices(&env);
         let mut result: Vec<Invoice> = Vec::new(&env);
-        let mut idx: u32 = 0;
-        for (_id, inv) in invoices.iter() {
-            if idx >= offset && result.len() < limit {
+        for (idx, (_id, inv)) in invoices.iter().enumerate() {
+            if idx as u32 >= offset && result.len() < limit {
                 result.push_back(inv);
             }
-            idx += 1;
             if result.len() >= limit {
                 break;
             }
@@ -1142,12 +1143,10 @@ impl InvoiceRegistryContract {
     pub fn get_offers_paginated(env: Env, offset: u32, limit: u32) -> Vec<FinancingOffer> {
         let offers = load_offers(&env);
         let mut result: Vec<FinancingOffer> = Vec::new(&env);
-        let mut idx: u32 = 0;
-        for (_id, offer) in offers.iter() {
-            if idx >= offset && result.len() < limit {
+        for (idx, (_id, offer)) in offers.iter().enumerate() {
+            if idx as u32 >= offset && result.len() < limit {
                 result.push_back(offer);
             }
-            idx += 1;
             if result.len() >= limit {
                 break;
             }
