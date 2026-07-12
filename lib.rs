@@ -1039,6 +1039,16 @@ impl InvoiceRegistryContract {
         env!("CARGO_PKG_VERSION")
     }
 
+    /// Return the minimum invoice amount (in stroops) enforced by this contract.
+    pub fn get_min_invoice_amount(_env: Env) -> i128 {
+        MIN_INVOICE_AMOUNT
+    }
+
+    /// Return the minimum and maximum offer duration in seconds as a tuple.
+    pub fn get_offer_duration_limits(_env: Env) -> (u64, u64) {
+        (MIN_OFFER_DURATION_SECS, MAX_OFFER_DURATION_SECS)
+    }
+
     // ─── Dispute management ─────────────────────────────────────────────────
 
     /// Mark a Financed invoice as Disputed. Only the invoice originator can
