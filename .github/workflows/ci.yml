@@ -19,7 +19,8 @@ jobs:
       - name: Run tests
         # .cargo/config.toml defaults to wasm32v1-none; override to the host
         # so tests actually compile and execute on the runner.
-        run: cargo test --target "$(rustc -vV | sed -n 's/^host: //p')" -- --nocapture
+        run: |
+          cargo test --target "$(rustc -vV | sed -n 's/^host: //p')" -- --nocapture
 
   build:
     name: Build WASM
