@@ -928,6 +928,85 @@ impl InvoiceRegistryContract {
         load_stats(&env)
     }
 
+    /// Return the total number of invoices ever registered.
+    pub fn get_invoices_count(env: Env) -> u32 {
+        load_invoices(&env).len()
+    }
+
+    /// Return the total number of offers ever created.
+    pub fn get_offers_count(env: Env) -> u32 {
+        load_offers(&env).len()
+    }
+
+    /// Return all financing offers matching the given status.
+    pub fn get_offers_by_status(env: Env, status: OfferStatus) -> Vec<FinancingOffer> {
+        let offers = load_offers(&env);
+        let mut result: Vec<FinancingOffer> = Vec::new(&env);
+        for (_id, offer) in offers.iter() {
+            if offer.status == status {
+                result.push_back(offer);
+            }
+        }
+        result
+    }
+
+    /// Return all invoices denominated in the given currency Symbol.
+    pub fn get_invoices_by_currency(env: Env, currency: Symbol) -> Vec<Invoice> {
+        let invoices = load_invoices(&env);
+        let mut result: Vec<Invoice> = Vec::new(&env);
+        for (_id, inv) in invoices.iter() {
+            if inv.currency == currency {
+                result.push_back(inv);
+            }
+        }
+        result
+    }
+
+    /// Return all Pending or Financed invoices whose due_date is before the
+    /// given UNIX timestamp. Useful for automated overdue detection jobs.
+    pub fn get_invoices_due_before(env: Env, timestamp: u64) -> Vec<Invoice> {
+        let invoices = load_invoices(&env);
+        let mut result: Vec<Invoice> = Vec::new(&env);
+        for (_id, inv) in invoices.iter() {
+            let is_open = inv.status == InvoiceStatus::Pending || inv.status == InvoiceStatus::Financed;
+            if is_open && inv.due_date < timestamp {
+                result.push_back(inv);
+            }
+        }
+        result
+    }
+
+    /// Return only the Pending offers attached to a given invoice. Useful for
+    /// a business to see which offers are awaiting their decision.
+    pub fn get_pending_offers_by_invoice(env: Env, invoice_id: Symbol) -> Vec<FinancingOffer> {
+        let offers = load_offers(&env);
+        let mut result: Vec<FinancingOffer> = Vec::new(&env);
+        for (_id, offer) in offers.iter() {
+            if offer.invoice_id == invoice_id && offer.status == OfferStatus::Pending {
+                result.push_back(offer);
+            }
+        }
+        result
+    }
+
+    /// Return the sum of amounts across all Accepted offers held by a lender.
+    /// Gives a quick portfolio-size snapshot without fetching all offer details.
+    pub fn get_lender_active_total(env: Env, lender: Address) -> i128 {
+        let offers = load_offers(&env);
+        let mut total: i128 = 0;
+        for (_id, offer) in offers.iter() {
+            if offer.lender == lender && offer.status == OfferStatus::Accepted {
+                total += offer.amount;
+            }
+        }
+        total
+    }
+
+    /// Return the contract's semantic version string.
+    pub fn version(_env: Env) -> &'static str {
+        env!("CARGO_PKG_VERSION")
+    }
+
 }
 
 #[cfg(test)]
