@@ -61,3 +61,45 @@ bash scripts/deploy.sh
 ## License
 
 MIT
+## Protocol Statistics
+
+The contract tracks aggregate metrics across all activity:
+
+| Function | Auth | Description |
+|---|---|---|
+| `get_stats()` | Anyone | Returns `ProtocolStats` — invoice/offer counts, total financed/repaid/fee revenue |
+
+`ProtocolStats` fields:
+- `total_invoices` — cumulative invoices ever registered
+- `total_offers` — cumulative financing offers ever created
+- `total_financed` — cumulative principal financed (token base units)
+- `total_repaid` — cumulative principal repaid (token base units)
+- `total_fee_revenue` — cumulative protocol fee collected (token base units)
+
+## Blacklist
+
+Admins can ban malicious actors from participating in the protocol:
+
+| Function | Auth | Description |
+|---|---|---|
+| `blacklist_address(admin, target)` | Admin | Prevent address from registering invoices or offers |
+| `unblacklist_address(admin, target)` | Admin | Remove the ban |
+| `is_blacklisted(address)` | Anyone | Query blacklist status |
+| `get_blacklist()` | Anyone | Return full blacklist |
+
+Blacklisted addresses will get a panic on `register_invoice` and `create_offer`.
+
+## Emergency Controls
+
+| Function | Auth | Description |
+|---|---|---|
+| `pause(admin)` | Admin | Halt all state-mutating operations |
+| `unpause(admin)` | Admin | Resume normal operation |
+| `contract_is_paused()` | Anyone | Query pause state |
+
+## Fee Configuration
+
+| Function | Auth | Description |
+|---|---|---|
+| `set_fee(admin, fee_bps)` | Admin | Set protocol fee (max 500 bps = 5%) |
+| `get_fee()` | Anyone | Read current fee in basis points |
