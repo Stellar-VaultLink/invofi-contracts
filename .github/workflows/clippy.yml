@@ -10,15 +10,13 @@ jobs:
   clippy:
     name: Contracts / Clippy lint
     runs-on: ubuntu-latest
-    defaults:
-      run:
-        working-directory: .
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: clippy
-          targets: wasm32-unknown-unknown
+          targets: wasm32-unknown-unknown,wasm32v1-none
       - uses: Swatinem/rust-cache@v2
       - name: Run clippy
-        run: cargo clippy -- -D warnings
+        # Lint against the real build target so WASM-specific issues are caught.
+        run: cargo clippy --target wasm32v1-none -- -D warnings
