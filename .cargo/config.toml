@@ -1,12 +1,16 @@
-[target.wasm32-unknown-unknown]
-# Soroban only accepts MVP WebAssembly. Explicitly disable every post-MVP
-# feature. On Rust 1.80+ these flags are required because target-cpu=mvp
-# no longer reliably strips them.
-rustflags = [
-    "-C", "target-feature=-reference-types",
-    "-C", "target-feature=-bulk-memory",
-    "-C", "target-feature=-simd128",
-    "-C", "target-feature=-multivalue",
-    "-C", "target-feature=-sign-ext",
-    "-C", "target-feature=-mutable-globals",
-]
+[build]
+# Soroban contracts must be compiled for wasm32v1-none
+target = "wasm32v1-none"
+
+[target.wasm32v1-none]
+rustflags = ["-C", "link-arg=-zstack-size=65536"]
+
+[profile.release]
+opt-level = "z"
+overflow-checks = true
+debug = 0
+strip = "symbols"
+debug-assertions = false
+panic = "abort"
+codegen-units = 1
+lto = true
