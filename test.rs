@@ -1850,6 +1850,9 @@ fn test_get_invoices_due_before_excludes_repaid() {
     let token_id = setup_token(&env, &contract_id, &lender, 1_000_000_000_i128);
     client.initialize(&originator, &token_id);
     client.accept_offer(&symbol_short!("off1"), &originator);
+    // The originator received the 500M principal on accept but owes 515M
+    // (3% yield) — mint the difference so the full repayment can clear.
+    token::StellarAssetClient::new(&env, &token_id).mint(&originator, &15_000_000_i128);
     // Repay so inv2 moves to Repaid
     client.repay_invoice(&symbol_short!("inv2"), &symbol_short!("off1"), &originator, &515_000_000_i128);
 
