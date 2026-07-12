@@ -1328,3 +1328,223 @@ fn test_blacklist_non_admin_panics() {
     // non_admin tries to blacklist — should panic
     client.blacklist_address(&non_admin, &victim);
 }
+
+
+// ─── Tests for new query functions and constants (v0.2) ──────────────────────
+
+#[test]
+#[should_panic(expected = "amount must be at least MIN_INVOICE_AMOUNT stroops")]
+fn test_min_invoice_amount_rejected() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let contract_id = env.register(InvoiceRegistryContract, ());
+    let client = super::InvoiceRegistryContractClient::new(&env, &contract_id);
+    let originator = Address::generate(&env);
+    client.register_invoice(
+        &symbol_short!("tiny"),
+        &originator,
+        &1_i128,
+        &symbol_short!("USDC"),
+        &1_735_689_600_u64,
+    );
+}
+
+#[test]
+#[should_panic(expected = "duration must be at most 365 days")]
+fn test_max_offer_duration_rejected() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let contract_id = env.register(InvoiceRegistryContract, ());
+    let client = super::InvoiceRegistryContractClient::new(&env, &contract_id);
+    let originator = Address::generate(&env);
+    let lender = Address::generate(&env);
+    client.register_invoice(
+        &symbol_short!("inv001"),
+        &originator,
+        &1_000_000_000_i128,
+        &symbol_short!("USDC"),
+        &1_735_689_600_u64,
+    );
+    client.create_offer(
+        &symbol_short!("off001"),
+        &symbol_short!("inv001"),
+        &lender,
+        &500_000_000_i128,
+        &symbol_short!("USDC"),
+        &500_u32,
+        &31_622_400_u64,
+    );
+}
+
+#[test]
+fn test_get_invoices_and_offers_count() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let contract_id = env.register(InvoiceRegistryContract, ());
+    let client = super::InvoiceRegistryContractClient::new(&env, &contract_id);
+
+    assert_eq!(client.get_invoices_count(), 0);
+    assert_eq!(client.get_offers_count(), 0);
+
+    let originator = Address::generate(&env);
+    let lender = Address::generate(&env);
+    let amount: i128 = 1_000_000_000;
+    let due_date: u64 = 1_735_689_600;
+    let currency = symbol_short!("USDC");
+
+    client.register_invoice(&symbol_short!("i1"), &originator, &amount, &currency, &due_date);
+    client.register_invoice(&symbol_short!("i2"), &originator, &amount, &currency, &due_date);
+    assert_eq!(client.get_invoices_count(), 2);
+
+    client.create_offer(
+        &symbol_short!("o1"),
+        &symbol_short!("i1"),
+        &lender,
+        &500_000_000_i128,
+        &currency,
+        &300_u32,
+        &86_400_u64,
+    );
+    assert_eq!(client.get_offers_count(), 1);
+}
+
+#[test]
+fn test_get_offers_by_status_filters_correctly() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let contract_id = env.register(InvoiceRegistryContract, ());
+    let client = super::InvoiceRegistryContractClient::new(&env, &contract_id);
+
+    let originator = Address::generate(&env);
+    let lender = Address::generate(&env);
+    let amount: i128 = 1_000_000_000;
+    let due_date: u64 = 1_735_689_600;
+    let currency = symbol_short!("USDC");
+
+    client.register_invoice(&symbol_short!("inv1"), &originator, &amount, &currency, &due_date);
+    client.create_offer(
+        &symbol_short!("off1"),
+        &symbol_short!("inv1"),
+        &lender,
+        &500_000_000_i128,
+        &currency,
+        &300_u32,
+        &86_400_u64,
+    );
+    client.create_offer(
+        &symbol_short!("off2"),
+        &symbol_short!("inv1"),
+        &lender,
+        &500_000_000_i128,
+        &currency,
+        &400_u32,
+        &86_400_u64,
+    );
+
+    let pending = client.get_offers_by_status(&OfferStatus::Pending);
+    assert_eq!(pending.len(), 2);
+
+    client.reject_offer(&symbol_short!("off1"), &originator);
+    let still_pending = client.get_offers_by_status(&OfferStatus::Pending);
+    assert_eq!(still_pending.len(), 1);
+    let rejected = client.get_offers_by_status(&OfferStatus::Rejected);
+    assert_eq!(rejected.len(), 1);
+}
+
+#[test]
+fn test_get_invoices_by_currency_filters_correctly() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let contract_id = env.register(InvoiceRegistryContract, ());
+    let client = super::InvoiceRegistryContractClient::new(&env, &contract_id);
+
+    let originator = Address::generate(&env);
+    let amount: i128 = 1_000_000_000;
+    let due_date: u64 = 1_735_689_600;
+    let usdc = symbol_short!("USDC");
+    let xlm = symbol_short!("XLM");
+
+    client.register_invoice(&symbol_short!("u1"), &originator, &amount, &usdc, &due_date);
+    client.register_invoice(&symbol_short!("u2"), &originator, &amount, &usdc, &due_date);
+    client.register_invoice(&symbol_short!("x1"), &originator, &amount, &xlm, &due_date);
+
+    let usdc_invoices = client.get_invoices_by_currency(&usdc);
+    let xlm_invoices = client.get_invoices_by_currency(&xlm);
+    assert_eq!(usdc_invoices.len(), 2);
+    assert_eq!(xlm_invoices.len(), 1);
+}
+
+#[test]
+fn test_get_invoices_due_before_timestamp() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let contract_id = env.register(InvoiceRegistryContract, ());
+    let client = super::InvoiceRegistryContractClient::new(&env, &contract_id);
+
+    let originator = Address::generate(&env);
+    let amount: i128 = 1_000_000_000;
+    let currency = symbol_short!("USDC");
+
+    env.ledger().set_timestamp(1000);
+    client.register_invoice(&symbol_short!("soon"), &originator, &amount, &currency, &2000_u64);
+    client.register_invoice(&symbol_short!("later"), &originator, &amount, &currency, &9999_u64);
+
+    let early = client.get_invoices_due_before(&5000_u64);
+    assert_eq!(early.len(), 1);
+    assert_eq!(early.get(0).unwrap().id, symbol_short!("soon"));
+
+    let all = client.get_invoices_due_before(&10000_u64);
+    assert_eq!(all.len(), 2);
+}
+
+#[test]
+fn test_get_pending_offers_by_invoice_excludes_rejected() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let contract_id = env.register(InvoiceRegistryContract, ());
+    let client = super::InvoiceRegistryContractClient::new(&env, &contract_id);
+
+    let originator = Address::generate(&env);
+    let lender = Address::generate(&env);
+    let amount: i128 = 1_000_000_000;
+    let due_date: u64 = 1_735_689_600;
+    let currency = symbol_short!("USDC");
+
+    client.register_invoice(&symbol_short!("inv1"), &originator, &amount, &currency, &due_date);
+    client.create_offer(
+        &symbol_short!("off1"),
+        &symbol_short!("inv1"),
+        &lender,
+        &500_000_000_i128,
+        &currency,
+        &300_u32,
+        &86_400_u64,
+    );
+    client.create_offer(
+        &symbol_short!("off2"),
+        &symbol_short!("inv1"),
+        &lender,
+        &300_000_000_i128,
+        &currency,
+        &250_u32,
+        &86_400_u64,
+    );
+
+    let pending = client.get_pending_offers_by_invoice(&symbol_short!("inv1"));
+    assert_eq!(pending.len(), 2);
+
+    client.reject_offer(&symbol_short!("off1"), &originator);
+    let still_pending = client.get_pending_offers_by_invoice(&symbol_short!("inv1"));
+    assert_eq!(still_pending.len(), 1);
+    assert_eq!(still_pending.get(0).unwrap().id, symbol_short!("off2"));
+}
+
+#[test]
+fn test_version_returns_nonempty_string() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let contract_id = env.register(InvoiceRegistryContract, ());
+    let client = super::InvoiceRegistryContractClient::new(&env, &contract_id);
+    let ver = client.version();
+    assert!(!ver.is_empty());
+}
