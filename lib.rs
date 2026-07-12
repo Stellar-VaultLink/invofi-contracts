@@ -474,6 +474,13 @@ impl InvoiceRegistryContract {
         offers.set(offer_id, offer.clone());
         save_offers(&env, &offers);
         let mut s = load_stats(&env); s.total_offers += 1; save_stats(&env, &s);
+
+        // Update per-lender stats
+        let mut lstats = load_lender_stats(&env, &offer.lender);
+        lstats.total_offered += offer.amount;
+        lstats.offers_pending += 1;
+        save_lender_stats(&env, &offer.lender, &lstats);
+
         offer
     }
 
