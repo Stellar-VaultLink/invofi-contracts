@@ -1859,3 +1859,97 @@ fn test_get_invoices_due_before_excludes_repaid() {
     assert_eq!(due.len(), 1);
     assert_eq!(due.get(0).unwrap().id, symbol_short!("inv1"));
 }
+
+
+// ─── Full lifecycle integration test ─────────────────────────────────────────
+
+#[test]
+fn test_full_invoice_financing_lifecycle() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let contract_id = env.register(InvoiceRegistryContract, ());
+    let client = super::InvoiceRegistryContractClient::new(&env, &contract_id);
+
+    let admin = Address::generate(&env);
+    let business = Address::generate(&env);
+    let lender_a = Address::generate(&env);
+    let lender_b = Address::generate(&env);
+    let currency = symbol_short!("USDC");
+    let due_date: u64 = 1_735_689_600;
+    let invoice_amount: i128 = 5_000_000_000; // 500 USDC
+
+    // ── 1. Setup ────────────────────────────────────────────────────────────
+    let offer_a_amount: i128 = 4_000_000_000; // 400 USDC
+    let offer_b_amount: i128 = 3_000_000_000; // 300 USDC
+    let token_id = setup_token(&env, &contract_id, &lender_a, offer_a_amount + offer_b_amount);
+    client.initialize(&admin, &token_id);
+    // Also mint to lender_b
+    let token_admin = Address::generate(&env);
+    let asset_client = token::StellarAssetClient::new(&env, &token_id);
+    asset_client.mint(&lender_b, &offer_b_amount);
+    let token_client = token::TokenClient::new(&env, &token_id);
+    token_client.approve(&lender_b, &contract_id, &offer_b_amount, &(env.ledger().sequence() + 1000));
+
+    // ── 2. Business registers an invoice ────────────────────────────────────
+    let inv = client.register_invoice(
+        &symbol_short!("main_inv"),
+        &business,
+        &invoice_amount,
+        &currency,
+        &due_date,
+    );
+    assert_eq!(inv.status, InvoiceStatus::Pending);
+    assert_eq!(client.get_invoices_count(), 1);
+
+    // ── 3. Two lenders submit offers ────────────────────────────────────────
+    client.create_offer(
+        &symbol_short!("off_a"),
+        &symbol_short!("main_inv"),
+        &lender_a,
+        &offer_a_amount,
+        &currency,
+        &500_u32, // 5%
+        &86_400_u64,
+    );
+    client.create_offer(
+        &symbol_short!("off_b"),
+        &symbol_short!("main_inv"),
+        &lender_b,
+        &offer_b_amount,
+        &currency,
+        &300_u32, // 3%
+        &86_400_u64,
+    );
+    assert_eq!(client.get_offers_count(), 2);
+
+    let pending = client.get_pending_offers_by_invoice(&symbol_short!("main_inv"));
+    assert_eq!(pending.len(), 2);
+
+    // ── 4. Business rejects offer B and accepts offer A ─────────────────────
+    client.reject_offer(&symbol_short!("off_b"), &business);
+    client.accept_offer(&symbol_short!("off_a"), &business);
+
+    let accepted_inv = client.get_invoice(&symbol_short!("main_inv"));
+    assert_eq!(accepted_inv.status, InvoiceStatus::Financed);
+
+    // ── 5. Business repays ──────────────────────────────────────────────────
+    let total_due = client.calculate_total_due(&symbol_short!("off_a"));
+    assert!(total_due > offer_a_amount); // principal + yield
+
+    // Mint repayment tokens to business
+    asset_client.mint(&business, &total_due);
+    client.repay_invoice(
+        &symbol_short!("main_inv"),
+        &symbol_short!("off_a"),
+        &business,
+        &total_due,
+    );
+
+    let repaid_inv = client.get_invoice(&symbol_short!("main_inv"));
+    assert_eq!(repaid_inv.status, InvoiceStatus::Repaid);
+
+    // ── 6. Protocol stats ───────────────────────────────────────────────────
+    let stats = client.get_stats();
+    assert_eq!(stats.total_invoices, 1);
+    assert_eq!(stats.total_offers, 2);
+}
