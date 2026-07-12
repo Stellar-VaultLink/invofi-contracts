@@ -354,7 +354,7 @@ impl InvoiceRegistryContract {
         assert_not_paused(&env);
         originator.require_auth();
         assert_not_blacklisted(&env, &originator);
-        assert!(amount > 0, "amount must be greater than zero");
+        assert!(amount >= MIN_INVOICE_AMOUNT, "amount must be at least MIN_INVOICE_AMOUNT stroops");
         assert!(
             due_date > env.ledger().timestamp(),
             "due_date must be in the future"
