@@ -404,6 +404,10 @@ impl InvoiceRegistryContract {
         invoices.set(id, invoice.clone());
         save_invoices(&env, &invoices);
         let mut s = load_stats(&env); s.total_invoices += 1; save_stats(&env, &s);
+        env.events().publish(
+            (symbol_short!("inv_reg"), invoice.id.clone()),
+            (invoice.originator.clone(), amount, due_date),
+        );
         invoice
     }
 
@@ -484,6 +488,10 @@ impl InvoiceRegistryContract {
         lstats.offers_pending += 1;
         save_lender_stats(&env, &offer.lender, &lstats);
 
+        env.events().publish(
+            (symbol_short!("off_new"), offer.id.clone()),
+            (offer.invoice_id.clone(), offer.lender.clone(), amount, interest_rate),
+        );
         offer
     }
 
@@ -549,6 +557,10 @@ impl InvoiceRegistryContract {
         invoices.set(offer.invoice_id.clone(), invoice);
         save_invoices(&env, &invoices);
 
+        env.events().publish(
+            (symbol_short!("off_acc"), offer.id.clone()),
+            (offer.invoice_id.clone(), offer.lender.clone(), offer.amount),
+        );
         offer
     }
 
@@ -578,6 +590,10 @@ impl InvoiceRegistryContract {
         offers.set(offer_id, offer.clone());
         save_offers(&env, &offers);
 
+        env.events().publish(
+            (symbol_short!("off_rej"), offer.id.clone()),
+            offer.invoice_id.clone(),
+        );
         offer
     }
 
@@ -654,7 +670,8 @@ impl InvoiceRegistryContract {
         }
 
         offer.amount_repaid += amount;
-        if offer.amount_repaid >= total_due {
+        let fully_repaid = offer.amount_repaid >= total_due;
+        if fully_repaid {
             invoice.status = InvoiceStatus::Repaid;
             offer.status = OfferStatus::Repaid;
         } else {
@@ -665,9 +682,13 @@ impl InvoiceRegistryContract {
         invoices.set(invoice_id, invoice.clone());
         save_invoices(&env, &invoices);
 
-        offers.set(offer_id, offer);
+        offers.set(offer_id.clone(), offer);
         save_offers(&env, &offers);
 
+        env.events().publish(
+            (symbol_short!("inv_rep"), invoice.id.clone()),
+            (offer_id, amount, fully_repaid),
+        );
         invoice
     }
 
@@ -711,6 +732,10 @@ impl InvoiceRegistryContract {
         offers.set(offer_id, offer.clone());
         save_offers(&env, &offers);
 
+        env.events().publish(
+            (symbol_short!("off_def"), offer.id.clone()),
+            (offer.invoice_id.clone(), offer.lender.clone()),
+        );
         offer
     }
 
@@ -731,6 +756,10 @@ impl InvoiceRegistryContract {
         invoice.status = InvoiceStatus::Overdue;
         invoices.set(invoice_id, invoice.clone());
         save_invoices(&env, &invoices);
+        env.events().publish(
+            (symbol_short!("inv_ovd"), invoice.id.clone()),
+            invoice.due_date,
+        );
         invoice
     }
 
@@ -796,6 +825,10 @@ impl InvoiceRegistryContract {
         invoice.status = InvoiceStatus::Cancelled;
         invoices.set(invoice_id, invoice.clone());
         save_invoices(&env, &invoices);
+        env.events().publish(
+            (symbol_short!("inv_cxl"), invoice.id.clone()),
+            invoice.originator.clone(),
+        );
         invoice
     }
 
@@ -843,6 +876,10 @@ impl InvoiceRegistryContract {
         offer.status = OfferStatus::Rejected;
         offers.set(offer_id, offer.clone());
         save_offers(&env, &offers);
+        env.events().publish(
+            (symbol_short!("off_wdr"), offer.id.clone()),
+            offer.lender.clone(),
+        );
         offer
     }
 
@@ -1077,6 +1114,10 @@ impl InvoiceRegistryContract {
         invoice.status = InvoiceStatus::Disputed;
         invoices.set(invoice_id, invoice.clone());
         save_invoices(&env, &invoices);
+        env.events().publish(
+            (symbol_short!("inv_dsp"), invoice.id.clone()),
+            invoice.originator.clone(),
+        );
         invoice
     }
 
@@ -1114,6 +1155,10 @@ impl InvoiceRegistryContract {
         invoice.status = target_status;
         invoices.set(invoice_id, invoice.clone());
         save_invoices(&env, &invoices);
+        env.events().publish(
+            (symbol_short!("inv_rsl"), invoice.id.clone()),
+            invoice.status.clone(),
+        );
         invoice
     }
 
