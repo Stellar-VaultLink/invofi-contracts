@@ -3,6 +3,36 @@
 All notable changes to InvoFi Contracts are documented here.
 Versioning follows [Semantic Versioning](https://semver.org/).
 
+## [0.3.0] – 2026-07-13
+
+### Added
+- **Protocol events** — every state-mutating function now publishes a Soroban
+  contract event, enabling off-chain indexers, activity feeds, and real-time
+  UI updates without polling:
+
+  | Event topic | Emitted by | Data payload |
+  |---|---|---|
+  | `inv_reg`  | `register_invoice` | `(originator, amount, due_date)` |
+  | `off_new`  | `create_offer` | `(invoice_id, lender, amount, interest_rate)` |
+  | `off_acc`  | `accept_offer` | `(invoice_id, lender, amount)` |
+  | `off_rej`  | `reject_offer` | `invoice_id` |
+  | `off_wdr`  | `withdraw_offer` | `lender` |
+  | `off_def`  | `reclaim_invoice` | `(invoice_id, lender)` |
+  | `inv_rep`  | `repay_invoice` | `(offer_id, amount, fully_repaid)` |
+  | `inv_ovd`  | `mark_overdue` | `due_date` |
+  | `inv_cxl`  | `cancel_invoice` | `originator` |
+  | `inv_dsp`  | `raise_dispute` | `originator` |
+  | `inv_rsl`  | `resolve_dispute` | `new_status` |
+
+  Every event carries the subject's `Symbol` id as its second topic, so
+  indexers can filter by invoice or offer without decoding payloads.
+- Event emission tests covering register, offer create/accept, repayment,
+  and cancellation flows
+
+### Changed
+- `version()` returns `soroban_sdk::String` (was `&'static str`, which is not
+  a valid Soroban return type)
+
 ## [0.2.0] – 2026-07-12
 
 ### Added
