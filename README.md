@@ -119,6 +119,28 @@ register_invoice()  →  create_offer()  →  accept_offer()
 
 ---
 
+## Protocol Events
+
+Every state-mutating function publishes a Soroban contract event (v0.3.0+).
+Topics are `(event_name, subject_id)` — indexers can filter by invoice or
+offer id without decoding payloads.
+
+| Event | Emitted by | Data payload |
+|---|---|---|
+| `inv_reg` | `register_invoice` | `(originator, amount, due_date)` |
+| `off_new` | `create_offer` | `(invoice_id, lender, amount, interest_rate)` |
+| `off_acc` | `accept_offer` | `(invoice_id, lender, amount)` |
+| `off_rej` | `reject_offer` | `invoice_id` |
+| `off_wdr` | `withdraw_offer` | `lender` |
+| `off_def` | `reclaim_invoice` | `(invoice_id, lender)` |
+| `inv_rep` | `repay_invoice` | `(offer_id, amount, fully_repaid)` |
+| `inv_ovd` | `mark_overdue` | `due_date` |
+| `inv_cxl` | `cancel_invoice` | `originator` |
+| `inv_dsp` | `raise_dispute` | `originator` |
+| `inv_rsl` | `resolve_dispute` | `new_status` |
+
+---
+
 ## Constants
 
 | Constant | Value | Description |

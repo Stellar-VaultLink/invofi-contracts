@@ -4,7 +4,7 @@ extern crate std;
 use super::{InvoiceRegistryContract, InvoiceStatus, OfferStatus, RiskTier};
 use soroban_sdk::{
     symbol_short,
-    testutils::{Address as _, Ledger as _},
+    testutils::{Address as _, Events as _, Ledger as _},
     token, Address, Env,
 };
 
@@ -2043,4 +2043,133 @@ fn test_blacklisted_cannot_raise_dispute() {
     // Now the originator can dispute again (no longer blacklisted)
     let disputed = client.raise_dispute(&symbol_short!("inv1"), &originator);
     assert_eq!(disputed.status, super::InvoiceStatus::Disputed);
+}
+
+
+// ─── Protocol event tests ─────────────────────────────────────────────────────
+
+#[test]
+fn test_register_invoice_emits_event() {
+    let env = Env::default();
+    env.mock_all_auths();
+    env.ledger().set_timestamp(1_000_000);
+    let contract_id = env.register(InvoiceRegistryContract, ());
+    let client = super::InvoiceRegistryContractClient::new(&env, &contract_id);
+
+    let originator = Address::generate(&env);
+    client.register_invoice(
+        &symbol_short!("ev1"),
+        &originator,
+        &10_000_000i128,
+        &symbol_short!("XLM"),
+        &2_000_000u64,
+    );
+
+    let events = env.events().all();
+    assert!(!events.is_empty(), "register_invoice should emit an event");
+    let (emitter, _topics, _data) = events.last().unwrap();
+    assert_eq!(emitter, contract_id);
+}
+
+#[test]
+fn test_create_and_accept_offer_emit_events() {
+    let env = Env::default();
+    env.mock_all_auths();
+    env.ledger().set_timestamp(1_000_000);
+    let contract_id = env.register(InvoiceRegistryContract, ());
+    let client = super::InvoiceRegistryContractClient::new(&env, &contract_id);
+
+    let originator = Address::generate(&env);
+    let lender = Address::generate(&env);
+    let token_id = setup_token(&env, &contract_id, &lender, 500_000_000i128);
+    client.initialize(&originator, &token_id);
+
+    client.register_invoice(
+        &symbol_short!("ev2"),
+        &originator,
+        &1_000_000_000i128,
+        &symbol_short!("XLM"),
+        &2_000_000u64,
+    );
+
+    client.create_offer(
+        &symbol_short!("ev2_off"),
+        &symbol_short!("ev2"),
+        &lender,
+        &500_000_000i128,
+        &symbol_short!("XLM"),
+        &300u32,
+        &86_400u64,
+    );
+    let events = env.events().all();
+    assert!(!events.is_empty(), "create_offer should emit an event");
+
+    client.accept_offer(&symbol_short!("ev2_off"), &originator);
+    let events = env.events().all();
+    assert!(!events.is_empty(), "accept_offer should emit an event");
+    let (emitter, _topics, _data) = events.last().unwrap();
+    assert_eq!(emitter, contract_id);
+}
+
+#[test]
+fn test_repay_emits_event() {
+    let env = Env::default();
+    env.mock_all_auths();
+    env.ledger().set_timestamp(1_000_000);
+    let contract_id = env.register(InvoiceRegistryContract, ());
+    let client = super::InvoiceRegistryContractClient::new(&env, &contract_id);
+
+    let originator = Address::generate(&env);
+    let lender = Address::generate(&env);
+    let token_id = setup_token(&env, &contract_id, &lender, 500_000_000i128);
+    client.initialize(&originator, &token_id);
+
+    client.register_invoice(
+        &symbol_short!("ev3"),
+        &originator,
+        &1_000_000_000i128,
+        &symbol_short!("XLM"),
+        &2_000_000u64,
+    );
+    client.create_offer(
+        &symbol_short!("ev3_off"),
+        &symbol_short!("ev3"),
+        &lender,
+        &500_000_000i128,
+        &symbol_short!("XLM"),
+        &300u32,
+        &86_400u64,
+    );
+    client.accept_offer(&symbol_short!("ev3_off"), &originator);
+
+    // Partial repayment — originator holds the 500M principal from accept
+    client.repay_invoice(&symbol_short!("ev3"), &symbol_short!("ev3_off"), &originator, &100_000_000i128);
+    let events = env.events().all();
+    assert!(!events.is_empty(), "repay_invoice should emit an event");
+    let (emitter, _topics, _data) = events.last().unwrap();
+    assert_eq!(emitter, contract_id);
+}
+
+#[test]
+fn test_cancel_invoice_emits_event() {
+    let env = Env::default();
+    env.mock_all_auths();
+    env.ledger().set_timestamp(1_000_000);
+    let contract_id = env.register(InvoiceRegistryContract, ());
+    let client = super::InvoiceRegistryContractClient::new(&env, &contract_id);
+
+    let originator = Address::generate(&env);
+    client.register_invoice(
+        &symbol_short!("ev4"),
+        &originator,
+        &10_000_000i128,
+        &symbol_short!("XLM"),
+        &2_000_000u64,
+    );
+    client.cancel_invoice(&symbol_short!("ev4"), &originator);
+
+    let events = env.events().all();
+    assert!(!events.is_empty(), "cancel_invoice should emit an event");
+    let (emitter, _topics, _data) = events.last().unwrap();
+    assert_eq!(emitter, contract_id);
 }
