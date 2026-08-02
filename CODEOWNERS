@@ -1,0 +1,9 @@
+# InvoFi Contracts — CODEOWNERS
+* @samjay8
+
+# Contract modules
+lib.rs @samjay8
+test.rs @samjay8
+Cargo.toml @samjay8
+scripts/** @samjay8
+.github/** @samjay8

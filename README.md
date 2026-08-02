@@ -188,6 +188,14 @@ Or trigger the **[Deploy Contract](https://github.com/Stellar-VaultLink/invofi-c
 
 See [CHANGELOG.md](./CHANGELOG.md) for version history.
 
+## Maintainers
+
+- [@samjay8](https://github.com/samjay8) — project maintainer and protocol owner
+
+## Contributors
+
+Thanks to everyone who has contributed to InvoFi. The contributor list is maintained automatically by the [all-contributors bot](https://github.com/all-contributors/all-contributors-bot) — after your first merged PR, comment `@all-contributors please add @<your-username> for code` on it and you'll be added.
+
 ## Contributing
 
 See [CONTRIBUTING.md](./CONTRIBUTING.md) for build, test, and PR guidelines.
