@@ -418,15 +418,36 @@ impl InvoiceRegistryContract {
             .unwrap_or_else(|| panic!("Invoice not found"))
     }
 
-    /// Update the status of an invoice. Restricted to originator or contract logic.
-    pub fn update_invoice_status(env: Env, id: Symbol, new_status: InvoiceStatus) -> Invoice {
+    /// Manually update the status of a Pending invoice. Only the invoice
+    /// originator can call this. Dedicated functions cover the other
+    /// transitions (cancel_invoice, mark_overdue, raise_dispute, ...) — this
+    /// is an originator-only escape hatch that can never touch an invoice
+    /// that has already been financed.
+    pub fn update_invoice_status(
+        env: Env,
+        id: Symbol,
+        originator: Address,
+        new_status: InvoiceStatus,
+    ) -> Invoice {
+        assert_not_paused(&env);
+        originator.require_auth();
         let mut invoices = load_invoices(&env);
         let mut invoice = invoices
             .get(id.clone())
             .unwrap_or_else(|| panic!("Invoice not found"));
-        invoice.status = new_status;
+        if invoice.originator != originator {
+            panic!("Only the invoice originator can update the status");
+        }
+        if invoice.status != InvoiceStatus::Pending {
+            panic!("Only Pending invoices can have their status updated");
+        }
+        invoice.status = new_status.clone();
         invoices.set(id, invoice.clone());
         save_invoices(&env, &invoices);
+        env.events().publish(
+            (symbol_short!("inv_sts"), invoice.id.clone()),
+            new_status,
+        );
         invoice
     }
 
@@ -443,6 +464,7 @@ impl InvoiceRegistryContract {
         interest_rate: u32,
         duration: u64,
     ) -> FinancingOffer {
+        assert_not_paused(&env);
         lender.require_auth();
         assert_not_blacklisted(&env, &lender);
         assert!(amount > 0, "offer amount must be greater than zero");
@@ -557,6 +579,15 @@ impl InvoiceRegistryContract {
         invoices.set(offer.invoice_id.clone(), invoice);
         save_invoices(&env, &invoices);
 
+        // Protocol + lender bookkeeping
+        let mut s = load_stats(&env);
+        s.total_financed += offer.amount;
+        save_stats(&env, &s);
+
+        let mut lstats = load_lender_stats(&env, &offer.lender);
+        lstats.total_accepted += offer.amount;
+        save_lender_stats(&env, &offer.lender, &lstats);
+
         env.events().publish(
             (symbol_short!("off_acc"), offer.id.clone()),
             (offer.invoice_id.clone(), offer.lender.clone(), offer.amount),
@@ -566,6 +597,7 @@ impl InvoiceRegistryContract {
 
     /// Reject a financing offer. Only the invoice originator can call this.
     pub fn reject_offer(env: Env, offer_id: Symbol, invoice_originator: Address) -> FinancingOffer {
+        assert_not_paused(&env);
         invoice_originator.require_auth();
 
         let mut offers = load_offers(&env);
@@ -607,6 +639,7 @@ impl InvoiceRegistryContract {
         repayer: Address,
         amount: i128,
     ) -> Invoice {
+        assert_not_paused(&env);
         repayer.require_auth();
 
         let mut invoices = load_invoices(&env);
@@ -679,6 +712,19 @@ impl InvoiceRegistryContract {
             offer.status = OfferStatus::Financed;
         }
 
+        // Protocol + lender bookkeeping
+        let lender = offer.lender.clone();
+        let mut s = load_stats(&env);
+        s.total_repaid += amount;
+        s.total_fee_revenue += fee_amount;
+        save_stats(&env, &s);
+
+        let mut lstats = load_lender_stats(&env, &lender);
+        if fully_repaid {
+            lstats.offers_repaid += 1;
+        }
+        save_lender_stats(&env, &lender, &lstats);
+
         invoices.set(invoice_id, invoice.clone());
         save_invoices(&env, &invoices);
 
@@ -699,6 +745,7 @@ impl InvoiceRegistryContract {
     /// record for off-chain recovery, not a refund. There is nothing held
     /// in escrow to reclaim under this protocol's unsecured-financing model.
     pub fn reclaim_invoice(env: Env, invoice_id: Symbol, offer_id: Symbol, lender: Address) -> FinancingOffer {
+        assert_not_paused(&env);
         lender.require_auth();
 
         let invoices = load_invoices(&env);
@@ -741,6 +788,7 @@ impl InvoiceRegistryContract {
 
     /// Mark an invoice as overdue. Can be called by anyone after due_date has passed.
     pub fn mark_overdue(env: Env, invoice_id: Symbol) -> Invoice {
+        assert_not_paused(&env);
         let mut invoices = load_invoices(&env);
         let mut invoice = invoices
             .get(invoice_id.clone())
@@ -783,6 +831,7 @@ impl InvoiceRegistryContract {
         originator: Address,
         new_amount: i128,
     ) -> Invoice {
+        assert_not_paused(&env);
         originator.require_auth();
 
         let mut invoices = load_invoices(&env);
@@ -796,7 +845,10 @@ impl InvoiceRegistryContract {
         if invoice.status != InvoiceStatus::Pending {
             panic!("Only Pending invoices can have their amount updated");
         }
-        assert!(new_amount > 0, "new_amount must be greater than zero");
+        assert!(
+            new_amount >= MIN_INVOICE_AMOUNT,
+            "new_amount must be at least MIN_INVOICE_AMOUNT stroops"
+        );
 
         invoice.amount = new_amount;
         invoices.set(invoice_id, invoice.clone());
@@ -808,6 +860,7 @@ impl InvoiceRegistryContract {
     /// Transitions the invoice from Pending → Cancelled. Any pending offers
     /// attached to the invoice remain in Pending status (they were never funded).
     pub fn cancel_invoice(env: Env, invoice_id: Symbol, originator: Address) -> Invoice {
+        assert_not_paused(&env);
         originator.require_auth();
 
         let mut invoices = load_invoices(&env);
@@ -859,6 +912,7 @@ impl InvoiceRegistryContract {
     /// Withdraw a pending offer. Only the lender who created the offer can call this.
     /// Transitions the offer from Pending → Rejected (lender-initiated withdrawal).
     pub fn withdraw_offer(env: Env, offer_id: Symbol, lender: Address) -> FinancingOffer {
+        assert_not_paused(&env);
         lender.require_auth();
 
         let mut offers = load_offers(&env);
@@ -1061,13 +1115,17 @@ impl InvoiceRegistryContract {
         result
     }
 
-    /// Return the sum of amounts across all Accepted offers held by a lender.
+    /// Return the sum of amounts across all outstanding (Accepted or Financed)
+    /// offers held by a lender. Financed offers are included because a partially
+    /// repaid offer is still a live position until fully cleared.
     /// Gives a quick portfolio-size snapshot without fetching all offer details.
     pub fn get_lender_active_total(env: Env, lender: Address) -> i128 {
         let offers = load_offers(&env);
         let mut total: i128 = 0;
         for (_id, offer) in offers.iter() {
-            if offer.lender == lender && offer.status == OfferStatus::Accepted {
+            if offer.lender == lender
+                && (offer.status == OfferStatus::Accepted || offer.status == OfferStatus::Financed)
+            {
                 total += offer.amount;
             }
         }

@@ -1,0 +1,81 @@
+name: Deploy Contract to Testnet
+
+on:
+  workflow_dispatch:
+    inputs:
+      network:
+        description: 'Target network'
+        required: true
+        default: testnet
+        type: choice
+        options:
+          - testnet
+
+jobs:
+  deploy:
+    name: Build & Deploy Soroban Contract
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: invofi/apps/contracts
+
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32v1-none,wasm32-unknown-unknown
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: invofi/apps/contracts
+
+      - name: Install native build dependencies
+        run: sudo apt-get update && sudo apt-get install -y libdbus-1-dev libudev-dev pkg-config
+
+      - name: Install Stellar CLI
+        run: cargo install --locked stellar-cli
+
+      - name: Configure deployer identity
+        env:
+          DEPLOYER_SECRET_KEY: ${{ secrets.STELLAR_DEPLOYER_SECRET_KEY }}
+        run: |
+          stellar --version
+          if [ -z "$DEPLOYER_SECRET_KEY" ]; then
+            echo "::notice::STELLAR_DEPLOYER_SECRET_KEY not set — generating a fresh keypair for this run."
+            stellar keys generate invofi-deployer --network ${{ inputs.network }}
+          else
+            # --secret-key is an interactive prompt flag; CI must pass the key via env var
+            SOROBAN_SECRET_KEY="$DEPLOYER_SECRET_KEY" stellar keys add invofi-deployer
+          fi
+
+      - name: Fund deployer via Friendbot
+        run: stellar keys fund invofi-deployer --network ${{ inputs.network }}
+
+      - name: Build WASM
+        run: stellar contract build
+
+      - name: Deploy contract
+        id: deploy
+        run: |
+          WASM="target/wasm32v1-none/release/invofi_invoice_registry.wasm"
+          CONTRACT_ID=$(stellar contract deploy \
+            --wasm "$WASM" \
+            --source invofi-deployer \
+            --network ${{ inputs.network }})
+          echo "contract_id=$CONTRACT_ID" >> "$GITHUB_OUTPUT"
+          echo "CONTRACT_ID=$CONTRACT_ID" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Print instructions
+        run: |
+          echo "## Contract deployed successfully" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "**CONTRACT_ID:** \`${{ steps.deploy.outputs.contract_id }}\`" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "### Next steps" >> "$GITHUB_STEP_SUMMARY"
+          echo "1. Go to your Vercel project → Settings → Environment Variables" >> "$GITHUB_STEP_SUMMARY"
+          echo "2. Set \`NEXT_PUBLIC_CONTRACT_ID\` = \`${{ steps.deploy.outputs.contract_id }}\`" >> "$GITHUB_STEP_SUMMARY"
+          echo "3. Redeploy (or push a new commit) to pick up the new value." >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "> The deployer's public key can be retrieved with:" >> "$GITHUB_STEP_SUMMARY"
+          echo "> \`stellar keys address invofi-deployer\`" >> "$GITHUB_STEP_SUMMARY"

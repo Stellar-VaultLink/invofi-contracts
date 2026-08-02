@@ -6,9 +6,6 @@ description = "Soroban contract for InvoFi invoice registry"
 license = "MIT"
 
 [workspace]
-members = [
-    "invofi-core",
-]
 resolver = "2"
 
 [workspace.dependencies]

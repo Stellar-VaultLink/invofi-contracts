@@ -104,8 +104,76 @@ fn test_update_invoice_status() {
         &(1_735_689_600u64),
     );
 
-    let updated = client.update_invoice_status(&invoice_id, &InvoiceStatus::Financed);
-    assert_eq!(updated.status, InvoiceStatus::Financed);
+    let updated = client.update_invoice_status(&invoice_id, &originator, &InvoiceStatus::Cancelled);
+    assert_eq!(updated.status, InvoiceStatus::Cancelled);
+
+    // Status updates publish an event for indexers.
+    let events = env.events().all();
+    assert!(!events.is_empty(), "update_invoice_status should emit an event");
+}
+
+#[test]
+#[should_panic(expected = "Only the invoice originator can update the status")]
+fn test_update_invoice_status_non_originator_panics() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let contract_id = env.register(InvoiceRegistryContract, ());
+    let client = super::InvoiceRegistryContractClient::new(&env, &contract_id);
+
+    let originator = Address::generate(&env);
+    let attacker = Address::generate(&env);
+    let invoice_id = symbol_short!("inv002b");
+
+    client.register_invoice(
+        &invoice_id,
+        &originator,
+        &(1_000_000_000i128),
+        &symbol_short!("USDC"),
+        &(1_735_689_600u64),
+    );
+
+    // Someone who is not the originator tries to flip the status.
+    client.update_invoice_status(&invoice_id, &attacker, &InvoiceStatus::Cancelled);
+}
+
+#[test]
+#[should_panic(expected = "Only Pending invoices can have their status updated")]
+fn test_update_invoice_status_on_financed_panics() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let contract_id = env.register(InvoiceRegistryContract, ());
+    let client = super::InvoiceRegistryContractClient::new(&env, &contract_id);
+
+    let originator = Address::generate(&env);
+    let lender = Address::generate(&env);
+    let invoice_id = symbol_short!("inv002c");
+    let offer_id = symbol_short!("off002c");
+    let amount: i128 = 1_000_000_000;
+
+    let token_id = setup_token(&env, &contract_id, &lender, amount);
+    client.initialize(&originator, &token_id);
+
+    client.register_invoice(
+        &invoice_id,
+        &originator,
+        &amount,
+        &symbol_short!("USDC"),
+        &(1_735_689_600u64),
+    );
+    client.create_offer(
+        &offer_id,
+        &invoice_id,
+        &lender,
+        &amount,
+        &symbol_short!("USDC"),
+        &300u32,
+        &86_400u64,
+    );
+    client.accept_offer(&offer_id, &originator);
+
+    // Invoice is Financed — the originator must use repay/overdue/dispute,
+    // not this escape hatch.
+    client.update_invoice_status(&invoice_id, &originator, &InvoiceStatus::Repaid);
 }
 
 #[test]
@@ -1165,12 +1233,34 @@ fn test_update_invoice_amount() {
         &3_000_000u64,
     );
 
-    let updated = client.update_invoice_amount(&symbol_short!("inv_ua1"), &originator, &2_500i128);
-    assert_eq!(updated.amount, 2_500i128);
+    let updated = client.update_invoice_amount(&symbol_short!("inv_ua1"), &originator, &20_000_000i128);
+    assert_eq!(updated.amount, 20_000_000i128);
 
     // Verify persistence
     let fetched = client.get_invoice(&symbol_short!("inv_ua1"));
-    assert_eq!(fetched.amount, 2_500i128);
+    assert_eq!(fetched.amount, 20_000_000i128);
+}
+
+#[test]
+#[should_panic(expected = "new_amount must be at least MIN_INVOICE_AMOUNT stroops")]
+fn test_update_invoice_amount_below_min_panics() {
+    let env = Env::default();
+    env.mock_all_auths();
+    env.ledger().set_timestamp(1_000_000);
+    let contract_id = env.register(InvoiceRegistryContract, ());
+    let client = super::InvoiceRegistryContractClient::new(&env, &contract_id);
+
+    let originator = Address::generate(&env);
+    client.register_invoice(
+        &symbol_short!("inv_ua3"),
+        &originator,
+        &10_000_000i128,
+        &symbol_short!("XLM"),
+        &3_000_000u64,
+    );
+
+    // Below MIN_INVOICE_AMOUNT — should panic
+    client.update_invoice_amount(&symbol_short!("inv_ua3"), &originator, &100i128);
 }
 
 #[test]
@@ -2172,4 +2262,148 @@ fn test_cancel_invoice_emits_event() {
     assert!(!events.is_empty(), "cancel_invoice should emit an event");
     let (emitter, _topics, _data) = events.last().unwrap();
     assert_eq!(emitter, contract_id);
+}
+
+// ─── Hardening regression tests (v0.3.1) ─────────────────────────────────────
+
+#[test]
+fn test_lender_active_total_includes_partially_repaid() {
+    let env = Env::default();
+    env.mock_all_auths();
+    env.ledger().set_timestamp(1_000_000);
+    let contract_id = env.register(InvoiceRegistryContract, ());
+    let client = super::InvoiceRegistryContractClient::new(&env, &contract_id);
+
+    let admin = Address::generate(&env);
+    let originator = Address::generate(&env);
+    let lender = Address::generate(&env);
+    let currency = symbol_short!("USDC");
+    let amount: i128 = 1_000_000_000;
+
+    let token_id = setup_token(&env, &contract_id, &lender, amount);
+    client.initialize(&admin, &token_id);
+
+    client.register_invoice(
+        &symbol_short!("inv_act1"),
+        &originator,
+        &amount,
+        &currency,
+        &1_735_689_600u64,
+    );
+    client.create_offer(
+        &symbol_short!("off_act1"),
+        &symbol_short!("inv_act1"),
+        &lender,
+        &amount,
+        &currency,
+        &300u32,
+        &86_400u64,
+    );
+    client.accept_offer(&symbol_short!("off_act1"), &originator);
+
+    // After a partial repayment the offer is Financed — still a live position.
+    token::StellarAssetClient::new(&env, &token_id).mint(&originator, &100_000_000i128);
+    client.repay_invoice(
+        &symbol_short!("inv_act1"),
+        &symbol_short!("off_act1"),
+        &originator,
+        &100_000_000i128,
+    );
+
+    assert_eq!(client.get_lender_active_total(&lender), amount);
+}
+
+#[test]
+fn test_stats_bookkeeping_through_full_lifecycle() {
+    let env = Env::default();
+    env.mock_all_auths();
+    env.ledger().set_timestamp(1_000_000);
+    let contract_id = env.register(InvoiceRegistryContract, ());
+    let client = super::InvoiceRegistryContractClient::new(&env, &contract_id);
+
+    let admin = Address::generate(&env);
+    let originator = Address::generate(&env);
+    let lender = Address::generate(&env);
+    let currency = symbol_short!("USDC");
+    let amount: i128 = 1_000_000_000;
+    let offer_amount: i128 = 500_000_000;
+
+    let token_id = setup_token(&env, &contract_id, &lender, offer_amount);
+    client.initialize(&admin, &token_id);
+
+    client.register_invoice(
+        &symbol_short!("inv_st1"),
+        &originator,
+        &amount,
+        &currency,
+        &1_735_689_600u64,
+    );
+    client.create_offer(
+        &symbol_short!("off_st1"),
+        &symbol_short!("inv_st1"),
+        &lender,
+        &offer_amount,
+        &currency,
+        &500u32,
+        &86_400u64,
+    );
+    client.accept_offer(&symbol_short!("off_st1"), &originator);
+
+    let stats_after_accept = client.get_stats();
+    assert_eq!(stats_after_accept.total_financed, offer_amount);
+
+    let lender_after_accept = client.get_lender_stats(&lender);
+    assert_eq!(lender_after_accept.total_accepted, offer_amount);
+
+    // Repay in full (principal 500M + 5% yield = 525M)
+    let total_due = client.calculate_total_due(&symbol_short!("off_st1"));
+    token::StellarAssetClient::new(&env, &token_id).mint(&originator, &total_due);
+    client.repay_invoice(
+        &symbol_short!("inv_st1"),
+        &symbol_short!("off_st1"),
+        &originator,
+        &total_due,
+    );
+
+    let stats_after_repay = client.get_stats();
+    assert_eq!(stats_after_repay.total_repaid, total_due);
+
+    let lender_after_repay = client.get_lender_stats(&lender);
+    assert_eq!(lender_after_repay.offers_repaid, 1);
+}
+
+#[test]
+#[should_panic(expected = "Contract is paused")]
+fn test_create_offer_while_paused_panics() {
+    let env = Env::default();
+    env.mock_all_auths();
+    env.ledger().set_timestamp(1_000_000);
+    let contract_id = env.register(InvoiceRegistryContract, ());
+    let client = super::InvoiceRegistryContractClient::new(&env, &contract_id);
+
+    let admin = Address::generate(&env);
+    let originator = Address::generate(&env);
+    let lender = Address::generate(&env);
+    let token_id = setup_token(&env, &contract_id, &lender, 5_000i128);
+    client.initialize(&admin, &token_id);
+
+    client.register_invoice(
+        &symbol_short!("inv_p2"),
+        &originator,
+        &10_000_000i128,
+        &symbol_short!("XLM"),
+        &3_000_000u64,
+    );
+    client.pause(&admin);
+
+    // create_offer must respect the pause switch.
+    client.create_offer(
+        &symbol_short!("off_p2"),
+        &symbol_short!("inv_p2"),
+        &lender,
+        &1_000i128,
+        &symbol_short!("XLM"),
+        &500u32,
+        &86_400u64,
+    );
 }
