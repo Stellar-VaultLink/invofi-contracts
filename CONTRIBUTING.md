@@ -2,6 +2,19 @@
 
 Thank you for your interest! InvoFi Contracts is a Soroban smart contract for invoice financing on Stellar.
 
+### Label → Wave points
+
+Issues are labelled by **complexity**, not raw point values. Each label maps to a Wave reward tier so contributors can gauge effort at a glance:
+
+| Label | Wave points | What it covers |
+|---|---|---|
+| `trivial` | 100 | Small, well-scoped fixes — typos, one-line bugs, simple docs |
+| `medium` | 150 | Standard features and fixes — a single contract function or test |
+| `high-complexity` | 200 | Large multi-part efforts — new subsystems, migration-sized changes |
+| `good-first-issue` | 100 | Onboarding-friendly tasks; usually also trivial or medium |
+
+Additional area labels (`contracts`, `infra`, `docs`) describe *where* the work lives, not its size — a `docs` issue can still be `trivial`, `medium`, or `high-complexity`.
+
 ## Getting started
 
 ### Prerequisites
