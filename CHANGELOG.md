@@ -3,6 +3,26 @@
 All notable changes to InvoFi Contracts are documented here.
 Versioning follows [Semantic Versioning](https://semver.org/).
 
+## [0.3.1] – 2026-08-02
+
+### Fixed
+- **`update_invoice_status` now requires originator auth** and is restricted to
+  Pending invoices — previously anyone could flip any invoice to any status.
+  Emits a new `inv_sts` protocol event.
+- **`get_lender_active_total` includes `Financed` offers** — a partially repaid
+  offer is still a live position until fully cleared.
+- **Pause guard applied consistently** — `create_offer`, `reject_offer`,
+  `repay_invoice`, `reclaim_invoice`, `mark_overdue`, `cancel_invoice`,
+  `withdraw_offer`, and `update_invoice_amount` now respect the admin pause
+  switch like the other mutating functions.
+- **`update_invoice_amount` enforces `MIN_INVOICE_AMOUNT`** (was `> 0`) and the
+  pause guard.
+- **Protocol + lender stats bookkeeping completed** — `total_financed`,
+  `total_repaid`, `total_fee_revenue`, `LenderStats.total_accepted`, and
+  `LenderStats.offers_repaid` are now incremented on the corresponding state
+  transitions (previously they were never written).
+- **Removed the unused legacy `invofi-core` crate** from the workspace.
+
 ## [0.3.0] – 2026-07-13
 
 ### Added
