@@ -1,3 +1,15 @@
+---
+
+## Project Map
+
+InvoFi is split across two repositories so the fast-moving app layer and the slow-moving, audit-bound contract layer stay decoupled:
+
+| Repo | Contains | Why separate |
+|---|---|---|
+| [**invofi**](https://github.com/Stellar-VaultLink/invofi) | Next.js frontend (`apps/frontend`), SDK, docs, scripts | App-layer changes constantly, Node/npm CI, no audit dependency |
+| **invofi-contracts** (this repo) | All Soroban Rust contracts — registry, financing, repayment, insurance, reputation, common | Stable, auditable, slow-moving history; Rust-only CI; the repo that goes through the SCF Audit Bank |
+
+Smart-contract contributions happen here; frontend and SDK contributions happen in [invofi](https://github.com/Stellar-VaultLink/invofi).
 # InvoFi Contracts
 
 Soroban smart contracts for the [InvoFi](https://github.com/Stellar-VaultLink/invofi) decentralised invoice financing protocol, built with Rust + Soroban SDK 22 on Stellar.
