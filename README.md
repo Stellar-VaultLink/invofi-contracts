@@ -194,26 +194,10 @@ See [CHANGELOG.md](./CHANGELOG.md) for version history.
 
 ## Contributors
 
-<!-- ALL-CONTRIBUTORS-BADGE:START - Do not remove or modify this section -->
-[![All Contributors](https://img.shields.io/badge/all_contributors-1-orange.svg?style=flat-square)](#contributors)
-<!-- ALL-CONTRIBUTORS-BADGE:END -->
+Thanks to everyone who has contributed to InvoFi — the list below is generated automatically from the GitHub API whenever code lands on `master`. No action needed on your part after a merged PR.
 
-Thanks to everyone who has contributed to InvoFi — the list below is maintained automatically by the [all-contributors bot](https://github.com/all-contributors/all-contributors-bot). After your first merged PR, comment `@all-contributors please add @<your-username> for code` on the PR and the bot will add you.
-
-<!-- ALL-CONTRIBUTORS-LIST:START - Do not remove or modify this section -->
-<!-- prettier-ignore-start -->
-<!-- markdownlint-disable -->
-<table>
-  <tbody>
-    <tr>
-      <td align="center" valign="top" width="14.28%"><a href="https://github.com/samjay8"><img src="https://avatars.githubusercontent.com/u/197444055?v=4?s=100" width="100px;" alt="Samuel Ojetunde"/><br /><sub><b>Samuel Ojetunde</b></sub></a><br /><a href="https://github.com/Stellar-VaultLink/invofi-contracts/commits?author=samjay8" title="Code">💻</a> <a href="https://github.com/Stellar-VaultLink/invofi-contracts/commits?author=samjay8" title="Documentation">📖</a> <a href="#infra-samjay8" title="Infrastructure (Hosting, Build-Tools, etc)">🚇</a></td>
-    </tr>
-  </tbody>
-</table>
-
-<!-- markdownlint-restore -->
-<!-- prettier-ignore-end -->
-<!-- ALL-CONTRIBUTORS-LIST:END -->
+<!-- readme: contributors -start -->
+<!-- readme: contributors -end -->
 
 ## Contributing
 
