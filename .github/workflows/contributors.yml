@@ -7,7 +7,6 @@ on:
 
 permissions:
   contents: write
-  pull-requests: write
 
 jobs:
   contrib-readme-job:
@@ -18,10 +17,10 @@ jobs:
       - name: Contribute List
         uses: akhilmhdh/contributors-readme-action@v2.3.11
         env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GITHUB_TOKEN: ${{ secrets.CONTRIBUTORS_TOKEN }}
         with:
           image_size: 100
           columns_per_row: 6
           readme_path: README.md
           commit_message: 'docs(contributor): update contributors list'
-          pr_title_on_protected: 'docs(contributor): update contributors list'
+          auto_detect_branch_protection: false
