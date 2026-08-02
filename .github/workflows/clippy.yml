@@ -1,0 +1,22 @@
+name: Clippy
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+    branches: [master]
+
+jobs:
+  clippy:
+    name: Contracts / Clippy lint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+          targets: wasm32-unknown-unknown,wasm32v1-none
+      - uses: Swatinem/rust-cache@v2
+      - name: Run clippy
+        # Lint against the real build target so WASM-specific issues are caught.
+        run: cargo clippy --target wasm32v1-none -- -D warnings
