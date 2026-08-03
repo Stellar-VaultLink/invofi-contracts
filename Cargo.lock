@@ -772,6 +772,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "invofi-repayment"
+version = "0.4.0"
+dependencies = [
+ "invofi-common",
+ "invofi-financing",
+ "invofi-registry",
+ "soroban-sdk",
+]
+
+[[package]]
 name = "itertools"
 version = "0.10.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"

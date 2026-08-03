@@ -1,8 +1,8 @@
 [package]
-name = "invofi-registry"
+name = "invofi-repayment"
 version = "0.4.0"
 edition = "2021"
-description = "Soroban invoice registry contract for InvoFi"
+description = "Repayment contract for InvoFi Soroban protocol"
 license = "MIT"
 
 [lib]
@@ -11,10 +11,13 @@ crate-type = ["cdylib", "lib"]
 [dependencies]
 soroban-sdk = { workspace = true }
 invofi-common = { path = "../common" }
+invofi-financing = { path = "../financing", default-features = false }
 
 [dev-dependencies]
 soroban-sdk = { workspace = true, features = ["testutils"] }
 invofi-common = { path = "../common", features = ["testutils"] }
+invofi-financing = { path = "../financing", features = ["testutils"] }
+invofi-registry = { path = "../registry", features = ["testutils"] }
 
 [features]
 testutils = ["soroban-sdk/testutils", "invofi-common/testutils"]

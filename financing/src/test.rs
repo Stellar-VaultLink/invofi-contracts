@@ -444,328 +444,6 @@ fn test_withdraw_offer_wrong_lender_panics() {
     fin.withdraw_offer(&symbol_short!("off_w2"), &other);
 }
 
-// ─── Repayment tests ────────────────────────────────────────────────────────
-
-#[test]
-fn test_repay_invoice_partial_then_full() {
-    let env = Env::default();
-    env.mock_all_auths();
-    env.ledger().set_timestamp(1_000_000);
-
-    let admin = Address::generate(&env);
-    let originator = Address::generate(&env);
-    let lender = Address::generate(&env);
-    let invoice_id = symbol_short!("inv006");
-    let offer_id = symbol_short!("off004");
-    let amount: i128 = 1_000_000_000;
-    let interest_rate: u32 = 500; // 5.00%
-    let yield_amount = amount * (interest_rate as i128) / 10_000;
-    let total_due = amount + yield_amount;
-
-    let financing_id = env.register(FinancingContract, ());
-    let token_id = setup_token(&env, &financing_id, &lender, amount);
-
-    let registry_id = env.register(RegistryContract, ());
-    let reg = invofi_registry::RegistryContractClient::new(&env, &registry_id);
-    reg.initialize(&admin);
-
-    let fin = super::FinancingContractClient::new(&env, &financing_id);
-    fin.initialize(&admin, &registry_id, &token_id);
-
-    reg.register_invoice(
-        &invoice_id,
-        &originator,
-        &amount,
-        &symbol_short!("USDC"),
-        &(3_000_000u64),
-    );
-    fin.create_offer(
-        &offer_id,
-        &invoice_id,
-        &lender,
-        &amount,
-        &symbol_short!("USDC"),
-        &interest_rate,
-        &(2_592_000u64),
-    );
-    fin.accept_offer(&offer_id, &originator);
-
-    // Mint repayment funds to originator
-    let asset_client = token::StellarAssetClient::new(&env, &token_id);
-    asset_client.mint(&originator, &total_due);
-
-    // Partial repayment
-    let partial_amount = amount / 2;
-    let repaid = fin.repay_invoice(&invoice_id, &offer_id, &originator, &partial_amount);
-    assert_eq!(repaid.status, InvoiceStatus::Financed);
-
-    let offer = fin.get_offer(&offer_id);
-    assert_eq!(offer.status, OfferStatus::Financed);
-    assert_eq!(offer.amount_repaid, partial_amount);
-
-    let token_client = token::TokenClient::new(&env, &token_id);
-    assert_eq!(token_client.balance(&lender), partial_amount);
-
-    // Full repayment
-    let final_amount = total_due - partial_amount;
-    let repaid_final = fin.repay_invoice(&invoice_id, &offer_id, &originator, &final_amount);
-    assert_eq!(repaid_final.status, InvoiceStatus::Repaid);
-
-    let settled_offer = fin.get_offer(&offer_id);
-    assert_eq!(settled_offer.status, OfferStatus::Repaid);
-    assert_eq!(settled_offer.amount_repaid, total_due);
-    assert_eq!(token_client.balance(&lender), total_due);
-}
-
-#[test]
-#[should_panic(expected = "Repayment amount exceeds remaining balance")]
-fn test_repay_invoice_overpayment_panics() {
-    let env = Env::default();
-    env.mock_all_auths();
-    env.ledger().set_timestamp(1_000_000);
-
-    let admin = Address::generate(&env);
-    let originator = Address::generate(&env);
-    let lender = Address::generate(&env);
-    let amount: i128 = 1_000_000_000;
-    let interest_rate: u32 = 500;
-    let yield_amount = amount * (interest_rate as i128) / 10_000;
-    let total_due = amount + yield_amount;
-
-    let financing_id = env.register(FinancingContract, ());
-    let token_id = setup_token(&env, &financing_id, &lender, amount);
-
-    let registry_id = env.register(RegistryContract, ());
-    let reg = invofi_registry::RegistryContractClient::new(&env, &registry_id);
-    reg.initialize(&admin);
-
-    let fin = super::FinancingContractClient::new(&env, &financing_id);
-    fin.initialize(&admin, &registry_id, &token_id);
-
-    reg.register_invoice(
-        &symbol_short!("inv010"),
-        &originator,
-        &amount,
-        &symbol_short!("USDC"),
-        &(3_000_000u64),
-    );
-    fin.create_offer(
-        &symbol_short!("off008"),
-        &symbol_short!("inv010"),
-        &lender,
-        &amount,
-        &symbol_short!("USDC"),
-        &interest_rate,
-        &(2_592_000u64),
-    );
-    fin.accept_offer(&symbol_short!("off008"), &originator);
-
-    let asset_client = token::StellarAssetClient::new(&env, &token_id);
-    asset_client.mint(&originator, &total_due);
-
-    fin.repay_invoice(
-        &symbol_short!("inv010"),
-        &symbol_short!("off008"),
-        &originator,
-        &(total_due + 1),
-    );
-}
-
-#[test]
-#[should_panic(expected = "Invoice must be Financed before repayment")]
-fn test_repay_unfinanced_invoice_panics() {
-    let env = Env::default();
-    env.mock_all_auths();
-    env.ledger().set_timestamp(1_000_000);
-
-    let admin = Address::generate(&env);
-    let originator = Address::generate(&env);
-    let lender = Address::generate(&env);
-    let token = Address::generate(&env);
-    let (reg, fin) = setup_contracts(&env, &admin, &token);
-
-    reg.register_invoice(
-        &symbol_short!("inv007"),
-        &originator,
-        &(1_000_000_000i128),
-        &symbol_short!("USDC"),
-        &(3_000_000u64),
-    );
-    fin.create_offer(
-        &symbol_short!("off005"),
-        &symbol_short!("inv007"),
-        &lender,
-        &(1_000_000_000i128),
-        &symbol_short!("USDC"),
-        &500u32,
-        &(2_592_000u64),
-    );
-    // Offer NOT accepted — invoice stays Pending
-    fin.repay_invoice(
-        &symbol_short!("inv007"),
-        &symbol_short!("off005"),
-        &originator,
-        &1,
-    );
-}
-
-// ─── Overdue / Reclaim tests ────────────────────────────────────────────────
-
-#[test]
-fn test_reclaim_invoice_after_grace_period() {
-    let env = Env::default();
-    env.mock_all_auths();
-    env.ledger().set_timestamp(1_000_000);
-
-    let admin = Address::generate(&env);
-    let originator = Address::generate(&env);
-    let lender = Address::generate(&env);
-    let invoice_id = symbol_short!("inv008");
-    let offer_id = symbol_short!("off006");
-    let amount: i128 = 1_000_000_000;
-    let due_date: u64 = 1_735_689_600;
-
-    let financing_id = env.register(FinancingContract, ());
-    let token_id = setup_token(&env, &financing_id, &lender, amount);
-
-    let registry_id = env.register(RegistryContract, ());
-    let reg = invofi_registry::RegistryContractClient::new(&env, &registry_id);
-    reg.initialize(&admin);
-
-    let fin = super::FinancingContractClient::new(&env, &financing_id);
-    fin.initialize(&admin, &registry_id, &token_id);
-
-    reg.register_invoice(
-        &invoice_id,
-        &originator,
-        &amount,
-        &symbol_short!("USDC"),
-        &due_date,
-    );
-    fin.create_offer(
-        &offer_id,
-        &invoice_id,
-        &lender,
-        &amount,
-        &symbol_short!("USDC"),
-        &500u32,
-        &(2_592_000u64),
-    );
-    fin.accept_offer(&offer_id, &originator);
-
-    // Move past due_date + grace period
-    env.ledger()
-        .set_timestamp(due_date + invofi_common::GRACE_PERIOD_SECS + 1);
-
-    // Mark overdue via financing (delegates to registry)
-    fin.mark_overdue(&invoice_id);
-
-    // Verify invoice is Overdue in registry
-    let invoice = reg.get_invoice(&invoice_id);
-    assert_eq!(invoice.status, InvoiceStatus::Overdue);
-
-    let reclaimed = fin.reclaim_invoice(&invoice_id, &offer_id, &lender);
-    assert_eq!(reclaimed.status, OfferStatus::Defaulted);
-}
-
-#[test]
-#[should_panic(expected = "Grace period has not elapsed")]
-fn test_reclaim_before_grace_period_panics() {
-    let env = Env::default();
-    env.mock_all_auths();
-    env.ledger().set_timestamp(1_000_000);
-
-    let admin = Address::generate(&env);
-    let originator = Address::generate(&env);
-    let lender = Address::generate(&env);
-    let invoice_id = symbol_short!("inv009");
-    let offer_id = symbol_short!("off007");
-    let amount: i128 = 1_000_000_000;
-    let due_date: u64 = 1_735_689_600;
-
-    let financing_id = env.register(FinancingContract, ());
-    let token_id = setup_token(&env, &financing_id, &lender, amount);
-
-    let registry_id = env.register(RegistryContract, ());
-    let reg = invofi_registry::RegistryContractClient::new(&env, &registry_id);
-    reg.initialize(&admin);
-
-    let fin = super::FinancingContractClient::new(&env, &financing_id);
-    fin.initialize(&admin, &registry_id, &token_id);
-
-    reg.register_invoice(
-        &invoice_id,
-        &originator,
-        &amount,
-        &symbol_short!("USDC"),
-        &due_date,
-    );
-    fin.create_offer(
-        &offer_id,
-        &invoice_id,
-        &lender,
-        &amount,
-        &symbol_short!("USDC"),
-        &500u32,
-        &(2_592_000u64),
-    );
-    fin.accept_offer(&offer_id, &originator);
-
-    // Just past due_date, but not past grace period
-    env.ledger().set_timestamp(due_date + 1);
-    fin.mark_overdue(&invoice_id);
-    fin.reclaim_invoice(&invoice_id, &offer_id, &lender);
-}
-
-#[test]
-#[should_panic(expected = "Invoice must be Overdue before reclaim")]
-fn test_reclaim_on_non_overdue_panics() {
-    let env = Env::default();
-    env.mock_all_auths();
-    env.ledger().set_timestamp(1_000_000);
-
-    let admin = Address::generate(&env);
-    let originator = Address::generate(&env);
-    let lender = Address::generate(&env);
-    let amount: i128 = 1_000_000_000;
-    let due_date: u64 = 3_000_000;
-
-    let financing_id = env.register(FinancingContract, ());
-    let token_id = setup_token(&env, &financing_id, &lender, amount);
-
-    let registry_id = env.register(RegistryContract, ());
-    let reg = invofi_registry::RegistryContractClient::new(&env, &registry_id);
-    reg.initialize(&admin);
-
-    let fin = super::FinancingContractClient::new(&env, &financing_id);
-    fin.initialize(&admin, &registry_id, &token_id);
-
-    reg.register_invoice(
-        &symbol_short!("inv_rc1"),
-        &originator,
-        &amount,
-        &symbol_short!("USDC"),
-        &due_date,
-    );
-    fin.create_offer(
-        &symbol_short!("off_rc1"),
-        &symbol_short!("inv_rc1"),
-        &lender,
-        &amount,
-        &symbol_short!("USDC"),
-        &500u32,
-        &(2_592_000u64),
-    );
-    fin.accept_offer(&symbol_short!("off_rc1"), &originator);
-
-    // Invoice is Financed, not Overdue — should panic
-    fin.reclaim_invoice(
-        &symbol_short!("inv_rc1"),
-        &symbol_short!("off_rc1"),
-        &lender,
-    );
-}
-
 // ─── Query helper tests ───────────────────────────────────────────────────
 
 #[test]
@@ -852,49 +530,6 @@ fn test_get_offers_by_lender() {
     let lender_offers = fin.get_offers_by_lender(&lender);
     assert_eq!(lender_offers.len(), 1);
     assert_eq!(lender_offers.get(0).unwrap().lender, lender);
-}
-
-#[test]
-fn test_calculate_total_due() {
-    let env = Env::default();
-    env.mock_all_auths();
-    env.ledger().set_timestamp(1_000_000);
-
-    let admin = Address::generate(&env);
-    let originator = Address::generate(&env);
-    let lender = Address::generate(&env);
-
-    let financing_id = env.register(FinancingContract, ());
-    let token_id = setup_token(&env, &financing_id, &lender, 10_000i128);
-
-    let registry_id = env.register(RegistryContract, ());
-    let reg = invofi_registry::RegistryContractClient::new(&env, &registry_id);
-    reg.initialize(&admin);
-
-    let fin = super::FinancingContractClient::new(&env, &financing_id);
-    fin.initialize(&admin, &registry_id, &token_id);
-
-    reg.register_invoice(
-        &symbol_short!("inv_d1"),
-        &originator,
-        &100_000_000i128,
-        &symbol_short!("XLM"),
-        &3_000_000u64,
-    );
-    fin.create_offer(
-        &symbol_short!("off_d1"),
-        &symbol_short!("inv_d1"),
-        &lender,
-        &10_000i128,
-        &symbol_short!("XLM"),
-        &1_000u32, // 10%
-        &86_400u64,
-    );
-    fin.accept_offer(&symbol_short!("off_d1"), &originator);
-
-    // principal=10000, yield=10000*1000/10000=1000, total_due=11000, repaid=0
-    let due = fin.calculate_total_due(&symbol_short!("off_d1"));
-    assert_eq!(due, 11_000i128);
 }
 
 #[test]
@@ -1066,6 +701,116 @@ fn test_get_offers_paginated() {
 
     let page3 = fin.get_offers_paginated(&4_u32, &2_u32);
     assert_eq!(page3.len(), 0);
+}
+
+// ─── Cross-contract callback tests ────────────────────────────────────────
+
+#[test]
+fn test_update_offer_status_and_amount_repaid() {
+    let env = Env::default();
+    env.mock_all_auths();
+    env.ledger().set_timestamp(1_000_000);
+
+    let admin = Address::generate(&env);
+    let originator = Address::generate(&env);
+    let lender = Address::generate(&env);
+    let token = Address::generate(&env);
+    let (reg, fin) = setup_contracts(&env, &admin, &token);
+
+    reg.register_invoice(
+        &symbol_short!("inv_cr"),
+        &originator,
+        &50_000_000i128,
+        &symbol_short!("USDC"),
+        &3_000_000u64,
+    );
+    fin.create_offer(
+        &symbol_short!("off_cr"),
+        &symbol_short!("inv_cr"),
+        &lender,
+        &5_000i128,
+        &symbol_short!("USDC"),
+        &300u32,
+        &86_400u64,
+    );
+
+    // Register a fake repayment contract (auth is mocked)
+    let repayment_id = env.register(super::FinancingContract, ());
+    fin.set_repayment_contract(&admin, &repayment_id);
+
+    // Simulate repayment callback
+    fin.update_offer_status(&symbol_short!("off_cr"), &OfferStatus::Financed);
+    fin.update_offer_amount_repaid(&symbol_short!("off_cr"), &2_500i128);
+
+    let offer = fin.get_offer(&symbol_short!("off_cr"));
+    assert_eq!(offer.status, OfferStatus::Financed);
+    assert_eq!(offer.amount_repaid, 2_500i128);
+}
+
+#[test]
+fn test_update_lender_stats_repaid() {
+    let env = Env::default();
+    env.mock_all_auths();
+    env.ledger().set_timestamp(1_000_000);
+
+    let admin = Address::generate(&env);
+    let originator = Address::generate(&env);
+    let lender = Address::generate(&env);
+    let token = Address::generate(&env);
+    let (reg, fin) = setup_contracts(&env, &admin, &token);
+
+    reg.register_invoice(
+        &symbol_short!("inv_ls"),
+        &originator,
+        &50_000_000i128,
+        &symbol_short!("USDC"),
+        &3_000_000u64,
+    );
+    fin.create_offer(
+        &symbol_short!("off_ls"),
+        &symbol_short!("inv_ls"),
+        &lender,
+        &5_000i128,
+        &symbol_short!("USDC"),
+        &300u32,
+        &86_400u64,
+    );
+
+    let stats_before = fin.get_lender_stats(&lender);
+    assert_eq!(stats_before.offers_repaid, 0);
+
+    // Register a fake repayment contract (auth is mocked)
+    let repayment_id = env.register(super::FinancingContract, ());
+    fin.set_repayment_contract(&admin, &repayment_id);
+
+    fin.update_lender_stats_repaid(&lender, &true);
+
+    let stats_after = fin.get_lender_stats(&lender);
+    assert_eq!(stats_after.offers_repaid, 1);
+}
+
+#[test]
+fn test_update_stats_repaid_and_get_fee_bps() {
+    let env = Env::default();
+    env.mock_all_auths();
+    env.ledger().set_timestamp(1_000_000);
+
+    let admin = Address::generate(&env);
+    let token = Address::generate(&env);
+    let (_, fin) = setup_contracts(&env, &admin, &token);
+
+    // Default fee_bps is 0
+    assert_eq!(fin.get_fee_bps(), 0);
+
+    // Register a fake repayment contract (auth is mocked)
+    let repayment_id = env.register(super::FinancingContract, ());
+    fin.set_repayment_contract(&admin, &repayment_id);
+
+    // Simulate stats update
+    fin.update_stats_repaid(&1_000_000i128, &50_000i128);
+    let stats = fin.get_stats();
+    assert_eq!(stats.total_repaid, 1_000_000i128);
+    assert_eq!(stats.total_fee_revenue, 50_000i128);
 }
 
 // ─── Version test ─────────────────────────────────────────────────────────────

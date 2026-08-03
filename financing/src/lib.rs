@@ -7,8 +7,7 @@ use soroban_sdk::{contract, contractimpl, symbol_short, token, Address, Env, Map
 
 use invofi_common::{
     assert_not_paused, resolve_token, FinancingOffer, Invoice, InvoiceStatus, LenderStats,
-    OfferStatus, ProtocolStats, RegistryClient, GRACE_PERIOD_SECS, MAX_OFFER_DURATION_SECS,
-    MIN_OFFER_DURATION_SECS,
+    OfferStatus, ProtocolStats, RegistryClient, MAX_OFFER_DURATION_SECS, MIN_OFFER_DURATION_SECS,
 };
 
 // ─── Storage Helpers ─────────────────────────────────────────────────────────
@@ -95,6 +94,24 @@ impl FinancingContract {
         env.storage()
             .instance()
             .set(&symbol_short!("token"), &token);
+    }
+
+    /// Register the repayment contract address. Only admin.
+    /// The repayment contract is the only caller authorized to invoke
+    /// callback methods (update_offer_status, update_offer_amount_repaid, etc.).
+    pub fn set_repayment_contract(env: Env, admin: Address, repayment: Address) {
+        admin.require_auth();
+        let current: Address = env
+            .storage()
+            .instance()
+            .get(&symbol_short!("admin"))
+            .unwrap_or_else(|| panic!("Not initialized"));
+        if current != admin {
+            panic!("Only the current admin can set the repayment contract");
+        }
+        env.storage()
+            .instance()
+            .set(&symbol_short!("repayment"), &repayment);
     }
 
     pub fn get_admin(env: Env) -> Address {
@@ -412,177 +429,67 @@ impl FinancingContract {
         offer
     }
 
-    // ── Repayment ────────────────────────────────────────────────────────────
+    // ── Cross-contract callback methods (called by Repayment) ───────────
 
-    /// Mark part or all of an invoice as repaid. Only the originator.
-    /// Cross-contract: reads + updates invoice status in registry.
-    pub fn repay_invoice(
-        env: Env,
-        invoice_id: Symbol,
-        offer_id: Symbol,
-        repayer: Address,
-        amount: i128,
-    ) -> Invoice {
-        assert_not_paused(&env);
-        repayer.require_auth();
-
-        // Cross-contract: read invoice from registry
-        let registry_addr: Address = env
+    fn assert_only_repayment(env: &Env) {
+        let repayment_addr: Address = env
             .storage()
             .instance()
-            .get(&symbol_short!("registry"))
-            .unwrap_or_else(|| panic!("Not initialized"));
-        let registry_client = RegistryClient::new(&env, &registry_addr);
-        let invoice: Invoice = registry_client.get_invoice(&invoice_id);
+            .get(&symbol_short!("repayment"))
+            .unwrap_or_else(|| panic!("Repayment contract not configured"));
+        repayment_addr.require_auth();
+    }
 
-        if invoice.originator != repayer {
-            panic!("Only the invoice originator can repay");
-        }
-        if invoice.status != InvoiceStatus::Financed {
-            panic!("Invoice must be Financed before repayment");
-        }
-
+    /// Update the status of an offer. Called by the Repayment contract
+    /// after accept/reject/repay/reclaim to keep offer state in sync.
+    pub fn update_offer_status(env: Env, id: Symbol, new_status: OfferStatus) {
+        Self::assert_only_repayment(&env);
         let mut offers = load_offers(&env);
         let mut offer = offers
-            .get(offer_id.clone())
+            .get(id.clone())
             .unwrap_or_else(|| panic!("Offer not found"));
-        if offer.invoice_id != invoice_id {
-            panic!("Offer does not belong to this invoice");
-        }
-        if offer.status != OfferStatus::Accepted && offer.status != OfferStatus::Financed {
-            panic!("Offer must be Accepted or Financed before repayment");
-        }
-        assert!(amount > 0, "repayment amount must be greater than zero");
-
-        let token_id = resolve_token(&env, &offer.currency);
-        let token_client = token::TokenClient::new(&env, &token_id);
-        let yield_amount = offer.amount * (offer.interest_rate as i128) / 10_000;
-        let total_due = offer.amount + yield_amount;
-        let remaining_balance = total_due - offer.amount_repaid;
-        assert!(
-            amount <= remaining_balance,
-            "Repayment amount exceeds remaining balance"
-        );
-
-        // Protocol fee deduction
-        let fee_bps: u32 = env
-            .storage()
-            .instance()
-            .get(&symbol_short!("feebps"))
-            .unwrap_or(0);
-        let fee_amount = amount * (fee_bps as i128) / 10_000;
-        let lender_amount = amount - fee_amount;
-        token_client.transfer(&repayer, &offer.lender, &lender_amount);
-        if fee_amount > 0 {
-            let admin: Address = env
-                .storage()
-                .instance()
-                .get(&symbol_short!("admin"))
-                .unwrap_or_else(|| panic!("Not initialized"));
-            token_client.transfer(&repayer, &admin, &fee_amount);
-        }
-
-        offer.amount_repaid += amount;
-        let fully_repaid = offer.amount_repaid >= total_due;
-        let new_status = if fully_repaid {
-            OfferStatus::Repaid
-        } else {
-            OfferStatus::Financed
-        };
         offer.status = new_status;
+        offers.set(id, offer);
+        save_offers(&env, &offers);
+    }
 
-        let lender = offer.lender.clone();
-        let mut s = load_stats(&env);
-        s.total_repaid += amount;
-        s.total_fee_revenue += fee_amount;
-        save_stats(&env, &s);
+    /// Update the running amount_repaid on an offer. Called by Repayment.
+    pub fn update_offer_amount_repaid(env: Env, id: Symbol, amount_repaid: i128) {
+        Self::assert_only_repayment(&env);
+        let mut offers = load_offers(&env);
+        let mut offer = offers
+            .get(id.clone())
+            .unwrap_or_else(|| panic!("Offer not found"));
+        offer.amount_repaid = amount_repaid;
+        offers.set(id, offer);
+        save_offers(&env, &offers);
+    }
 
+    /// Update lender stats after a repayment. Called by Repayment.
+    pub fn update_lender_stats_repaid(env: Env, lender: Address, fully_repaid: bool) {
+        Self::assert_only_repayment(&env);
         let mut lstats = load_lender_stats(&env, &lender);
         if fully_repaid {
             lstats.offers_repaid += 1;
         }
         save_lender_stats(&env, &lender, &lstats);
-
-        offers.set(offer_id.clone(), offer);
-        save_offers(&env, &offers);
-
-        // Cross-contract: update invoice status in registry
-        let updated_invoice =
-            registry_client.set_invoice_repaid_status(&invoice_id, &repayer, &fully_repaid);
-
-        env.events().publish(
-            (symbol_short!("inv_rep"), invoice_id),
-            (offer_id, amount, fully_repaid),
-        );
-        updated_invoice
     }
 
-    // ── Overdue / Reclaim ────────────────────────────────────────────────────
-
-    /// Mark an invoice as overdue. Can be called by anyone after due_date.
-    /// Cross-contract: delegates to registry's mark_invoice_overdue which
-    /// handles the status transition and event emission.
-    pub fn mark_overdue(env: Env, invoice_id: Symbol) -> Invoice {
-        assert_not_paused(&env);
-
-        let registry_addr: Address = env
-            .storage()
-            .instance()
-            .get(&symbol_short!("registry"))
-            .unwrap_or_else(|| panic!("Not initialized"));
-        let registry_client = RegistryClient::new(&env, &registry_addr);
-        registry_client.mark_invoice_overdue(&invoice_id)
+    /// Update protocol-level stats after a repayment. Called by Repayment.
+    pub fn update_stats_repaid(env: Env, amount: i128, fee_amount: i128) {
+        Self::assert_only_repayment(&env);
+        let mut s = load_stats(&env);
+        s.total_repaid += amount;
+        s.total_fee_revenue += fee_amount;
+        save_stats(&env, &s);
     }
 
-    /// After grace period, lender can mark their offer Defaulted.
-    pub fn reclaim_invoice(
-        env: Env,
-        invoice_id: Symbol,
-        offer_id: Symbol,
-        lender: Address,
-    ) -> FinancingOffer {
-        assert_not_paused(&env);
-        lender.require_auth();
-
-        // Cross-contract: read invoice from registry
-        let registry_addr: Address = env
-            .storage()
+    /// Read the protocol fee in basis points. Called by Repayment.
+    pub fn get_fee_bps(env: Env) -> u32 {
+        env.storage()
             .instance()
-            .get(&symbol_short!("registry"))
-            .unwrap_or_else(|| panic!("Not initialized"));
-        let registry_client = RegistryClient::new(&env, &registry_addr);
-        let invoice: Invoice = registry_client.get_invoice(&invoice_id);
-
-        if invoice.status != InvoiceStatus::Overdue {
-            panic!("Invoice must be Overdue before reclaim");
-        }
-        if env.ledger().timestamp() < invoice.due_date + GRACE_PERIOD_SECS {
-            panic!("Grace period has not elapsed");
-        }
-
-        let mut offers = load_offers(&env);
-        let mut offer = offers
-            .get(offer_id.clone())
-            .unwrap_or_else(|| panic!("Offer not found"));
-        if offer.invoice_id != invoice_id {
-            panic!("Offer does not belong to this invoice");
-        }
-        if offer.lender != lender {
-            panic!("Only the financing lender can reclaim");
-        }
-        if offer.status != OfferStatus::Accepted && offer.status != OfferStatus::Financed {
-            panic!("Offer must be Accepted or Financed before reclaim");
-        }
-
-        offer.status = OfferStatus::Defaulted;
-        offers.set(offer_id, offer.clone());
-        save_offers(&env, &offers);
-
-        env.events().publish(
-            (symbol_short!("off_def"), offer.id.clone()),
-            (offer.invoice_id.clone(), offer.lender.clone()),
-        );
-        offer
+            .get(&symbol_short!("feebps"))
+            .unwrap_or(0)
     }
 
     // ── Query helpers ────────────────────────────────────────────────────────
@@ -658,19 +565,6 @@ impl FinancingContract {
             }
         }
         result
-    }
-
-    pub fn calculate_total_due(env: Env, offer_id: Symbol) -> i128 {
-        let offers = load_offers(&env);
-        let offer = offers
-            .get(offer_id)
-            .unwrap_or_else(|| panic!("Offer not found"));
-        if offer.status == OfferStatus::Repaid || offer.status == OfferStatus::Defaulted {
-            return 0;
-        }
-        let yield_amount = offer.amount * (offer.interest_rate as i128) / 10_000;
-        let total_due = offer.amount + yield_amount;
-        (total_due - offer.amount_repaid).max(0)
     }
 
     pub fn get_lender_stats(env: Env, lender: Address) -> LenderStats {

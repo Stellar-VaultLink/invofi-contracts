@@ -4,6 +4,7 @@ members = [
     "common",
     "registry",
     "financing",
+    "repayment",
 ]
 
 [workspace.dependencies]

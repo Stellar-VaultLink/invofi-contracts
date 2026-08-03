@@ -214,3 +214,36 @@ pub trait RegistryInterface {
     /// Read the admin address.
     fn get_admin(env: Env) -> Address;
 }
+
+// ─── Financing Cross-Contract Interface ──────────────────────────────────────
+// Repayment calls these methods on the Financing contract.
+
+/// Client trait for the Financing contract, used by Repayment for
+/// cross-contract calls. The `#[contractclient]` macro generates a
+/// type-safe client from this trait.
+#[contractclient(name = "FinancingClient")]
+pub trait FinancingInterface {
+    /// Read a financing offer by ID.
+    fn get_offer(env: Env, id: Symbol) -> FinancingOffer;
+
+    /// Update the status of an offer. Called by Repayment after accept/reject/
+    /// repay/reclaim to keep offer state in sync.
+    fn update_offer_status(env: Env, id: Symbol, new_status: OfferStatus);
+
+    /// Update the running amount_repaid on an offer.
+    fn update_offer_amount_repaid(env: Env, id: Symbol, amount_repaid: i128);
+
+    /// Update lender stats after a repayment. `fully_repaid` increments
+    /// `offers_repaid`.
+    fn update_lender_stats_repaid(env: Env, lender: Address, fully_repaid: bool);
+
+    /// Update protocol-level stats after a repayment. Adds to
+    /// `total_repaid` and `total_fee_revenue`.
+    fn update_stats_repaid(env: Env, amount: i128, fee_amount: i128);
+
+    /// Read the admin address.
+    fn get_admin(env: Env) -> Address;
+
+    /// Read the protocol fee in basis points.
+    fn get_fee_bps(env: Env) -> u32;
+}
