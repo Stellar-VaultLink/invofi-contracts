@@ -748,10 +748,26 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "8e04e2fd2b8188ea827b32ef11de88377086d690286ab35747ef7f9bf3ccb590"
 
 [[package]]
-name = "invofi-invoice-registry"
-version = "0.3.0"
+name = "invofi-common"
+version = "0.4.0"
 dependencies = [
- "arbitrary",
+ "soroban-sdk",
+]
+
+[[package]]
+name = "invofi-financing"
+version = "0.4.0"
+dependencies = [
+ "invofi-common",
+ "invofi-registry",
+ "soroban-sdk",
+]
+
+[[package]]
+name = "invofi-registry"
+version = "0.4.0"
+dependencies = [
+ "invofi-common",
  "soroban-sdk",
 ]
 

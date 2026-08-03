@@ -1,0 +1,17 @@
+[package]
+name = "invofi-registry"
+version = "0.4.0"
+edition = "2021"
+description = "Soroban invoice registry contract for InvoFi"
+license = "MIT"
+
+[lib]
+crate-type = ["cdylib", "lib"]
+
+[dependencies]
+soroban-sdk = { workspace = true }
+invofi-common = { path = "../common" }
+
+[dev-dependencies]
+soroban-sdk = { workspace = true, features = ["testutils"] }
+invofi-common = { path = "../common", features = ["testutils"] }
