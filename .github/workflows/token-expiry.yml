@@ -25,6 +25,8 @@ jobs:
   check-expiry:
     runs-on: ubuntu-latest
     name: Check CONTRIBUTORS_TOKEN expiry
+    env:
+      GH_TOKEN: ${{ github.token }}
     steps:
       - uses: actions/checkout@v7
 
