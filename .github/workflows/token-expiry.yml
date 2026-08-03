@@ -55,7 +55,18 @@ jobs:
             exit 0
           fi
 
-          EXP=$(python3 - <<'PY'
+          # Primary: the REST API returns a GitHub-Authentication-Token-Expiration
+          # header on any PAT-backed call (classic or fine-grained).
+          EXP_STR=$(curl -s -D - -o /dev/null -H "Authorization: Bearer ${TOKEN}" https://api.github.com/user 2>/dev/null | tr -d '\r' | grep -i '^github-authentication-token-expiration:' | awk '{print $2, $3, $4}')
+
+          EXP=0
+          if [ -n "$EXP_STR" ]; then
+            EXP=$(date -u -d "$EXP_STR" +%s 2>/dev/null || echo 0)
+          fi
+
+          # Fallback: decode the JWT exp claim embedded in classic/fine-grained PATs.
+          if [ -z "$EXP" ] || [ "$EXP" -le 0 ]; then
+            EXP=$(python3 - <<'PY'
           import base64, json, os
 
           tok = os.environ.get("BOT_TOKEN", "")
@@ -68,10 +79,11 @@ jobs:
               print(0)
           PY
           )
+          fi
 
           if [ -z "$EXP" ] || [ "$EXP" -le 0 ]; then
             echo "days=unknown" >> "$GITHUB_OUTPUT"
-            echo "Could not decode PAT expiry from token format."
+            echo "Could not determine PAT expiry (no API header, no JWT exp)."
             exit 0
           fi
 
