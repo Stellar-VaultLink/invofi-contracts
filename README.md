@@ -197,6 +197,26 @@ See [CHANGELOG.md](./CHANGELOG.md) for version history.
 Thanks to everyone who has contributed to InvoFi — the list below is generated automatically from the GitHub API whenever code lands on `master`. No action needed on your part after a merged PR.
 
 <!-- readme: contributors -start -->
+<table>
+	<tbody>
+		<tr>
+            <td align="center">
+                <a href="https://github.com/samjay8">
+                    <img src="https://avatars.githubusercontent.com/u/197444055?v=4" width="100;" alt="samjay8"/>
+                    <br />
+                    <sub><b>Samuel Ojetunde</b></sub>
+                </a>
+            </td>
+            <td align="center">
+                <a href="https://github.com/hexlaapp">
+                    <img src="https://avatars.githubusercontent.com/u/287440938?v=4" width="100;" alt="hexlaapp"/>
+                    <br />
+                    <sub><b>hexlaapp</b></sub>
+                </a>
+            </td>
+		</tr>
+	<tbody>
+</table>
 <!-- readme: contributors -end -->
 
 ## Contributing
