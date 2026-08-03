@@ -2,7 +2,11 @@
 // create_offer takes 8 args — that's the contract's public ABI, and the lint
 // also fires inside the #[contractimpl]-generated client where we can't allow it.
 #![allow(clippy::too_many_arguments)]
-use soroban_sdk::{contract, contractimpl, contracttype, symbol_short, token, Address, Env, Map, Symbol, Vec};
+use soroban_sdk::{
+    contract, contractimpl, contracttype, symbol_short, token, Address, Env, Map, Symbol, Vec,
+};
+
+mod common;
 
 /// Grace period after due_date before a lender can mark a Financed offer
 /// Defaulted on an Overdue invoice. 7 days, in seconds.
@@ -58,12 +62,12 @@ pub struct Invoice {
 #[derive(Clone, Debug, Eq, PartialEq)]
 #[repr(u32)]
 pub enum InvoiceStatus {
-    Pending   = 0,
-    Financed  = 1,
-    Repaid    = 2,
-    Overdue   = 3,
+    Pending = 0,
+    Financed = 1,
+    Repaid = 2,
+    Overdue = 3,
     Cancelled = 4,
-    Disputed  = 5,
+    Disputed = 5,
 }
 
 // ─── Financing Offer ─────────────────────────────────────────────────────────
@@ -91,11 +95,11 @@ pub struct FinancingOffer {
 #[derive(Clone, Debug, Eq, PartialEq)]
 #[repr(u32)]
 pub enum OfferStatus {
-    Pending   = 0,
-    Accepted  = 1,
-    Rejected  = 2,
-    Financed  = 3,
-    Repaid    = 4,
+    Pending = 0,
+    Accepted = 1,
+    Rejected = 2,
+    Financed = 3,
+    Repaid = 4,
     Defaulted = 5,
 }
 
@@ -175,10 +179,10 @@ fn save_stats(env: &Env, s: &ProtocolStats) {
 #[contracttype]
 #[derive(Clone, Debug, Default)]
 pub struct LenderStats {
-    pub total_offered:  i128,
+    pub total_offered: i128,
     pub total_accepted: i128,
     pub offers_pending: u32,
-    pub offers_repaid:  u32,
+    pub offers_repaid: u32,
 }
 
 fn load_lender_stats(env: &Env, lender: &Address) -> LenderStats {
@@ -218,8 +222,6 @@ fn assert_not_blacklisted(env: &Env, address: &Address) {
     }
 }
 
-
-
 #[contract]
 pub struct InvoiceRegistryContract;
 
@@ -235,8 +237,12 @@ impl InvoiceRegistryContract {
         if env.storage().instance().has(&symbol_short!("admin")) {
             panic!("Already initialized");
         }
-        env.storage().instance().set(&symbol_short!("admin"), &admin);
-        env.storage().instance().set(&symbol_short!("token"), &token);
+        env.storage()
+            .instance()
+            .set(&symbol_short!("admin"), &admin);
+        env.storage()
+            .instance()
+            .set(&symbol_short!("token"), &token);
     }
 
     /// Returns the admin address. Panics if not yet initialized.
@@ -256,6 +262,31 @@ impl InvoiceRegistryContract {
             .unwrap_or_else(|| panic!("Not initialized"))
     }
 
+    /// Registers (or overwrites) the SEP-41 token contract that settles a
+    /// currency symbol (e.g. `USDC`). Admin only. `accept_offer` and
+    /// `repay_invoice` resolve the token to move funds through this registry,
+    /// falling back to the single token set at `initialize` for currencies
+    /// that have not been registered — so adding a new currency is one
+    /// registry entry, not a branch in every money-touching function.
+    pub fn register_currency(env: Env, admin: Address, currency: Symbol, token: Address) {
+        admin.require_auth();
+        let current: Address = env
+            .storage()
+            .instance()
+            .get(&symbol_short!("admin"))
+            .unwrap_or_else(|| panic!("Not initialized"));
+        if current != admin {
+            panic!("Only the current admin can register currencies");
+        }
+        common::register_currency(&env, &currency, &token);
+    }
+
+    /// Returns the SEP-41 token contract registered for a currency symbol,
+    /// or `None` if that currency has not been registered.
+    pub fn get_currency_token(env: Env, currency: Symbol) -> Option<Address> {
+        common::get_currency_token(&env, &currency)
+    }
+
     /// Transfers admin rights to a new address. Only the current admin can
     /// call this.
     pub fn transfer_admin(env: Env, admin: Address, new_admin: Address) {
@@ -268,7 +299,9 @@ impl InvoiceRegistryContract {
         if current != admin {
             panic!("Only the current admin can transfer admin rights");
         }
-        env.storage().instance().set(&symbol_short!("admin"), &new_admin);
+        env.storage()
+            .instance()
+            .set(&symbol_short!("admin"), &new_admin);
     }
 
     // ── Pause / unpause ──────────────────────────────────────────────────────
@@ -284,7 +317,9 @@ impl InvoiceRegistryContract {
         if current != admin {
             panic!("Only admin can pause");
         }
-        env.storage().instance().set(&symbol_short!("paused"), &true);
+        env.storage()
+            .instance()
+            .set(&symbol_short!("paused"), &true);
     }
 
     /// Resume operations after a pause. Admin only.
@@ -298,7 +333,9 @@ impl InvoiceRegistryContract {
         if current != admin {
             panic!("Only admin can unpause");
         }
-        env.storage().instance().set(&symbol_short!("paused"), &false);
+        env.storage()
+            .instance()
+            .set(&symbol_short!("paused"), &false);
     }
 
     /// Returns true if the contract is currently paused.
@@ -357,7 +394,9 @@ impl InvoiceRegistryContract {
         if fee_bps > 500 {
             panic!("fee_bps must be at most 500 (5%)");
         }
-        env.storage().instance().set(&symbol_short!("feebps"), &fee_bps);
+        env.storage()
+            .instance()
+            .set(&symbol_short!("feebps"), &fee_bps);
     }
 
     /// Returns the configured protocol fee in basis points (default 0).
@@ -382,7 +421,10 @@ impl InvoiceRegistryContract {
         assert_not_paused(&env);
         originator.require_auth();
         assert_not_blacklisted(&env, &originator);
-        assert!(amount >= MIN_INVOICE_AMOUNT, "amount must be at least MIN_INVOICE_AMOUNT stroops");
+        assert!(
+            amount >= MIN_INVOICE_AMOUNT,
+            "amount must be at least MIN_INVOICE_AMOUNT stroops"
+        );
         assert!(
             due_date > env.ledger().timestamp(),
             "due_date must be in the future"
@@ -403,7 +445,9 @@ impl InvoiceRegistryContract {
         };
         invoices.set(id, invoice.clone());
         save_invoices(&env, &invoices);
-        let mut s = load_stats(&env); s.total_invoices += 1; save_stats(&env, &s);
+        let mut s = load_stats(&env);
+        s.total_invoices += 1;
+        save_stats(&env, &s);
         env.events().publish(
             (symbol_short!("inv_reg"), invoice.id.clone()),
             (invoice.originator.clone(), amount, due_date),
@@ -444,10 +488,8 @@ impl InvoiceRegistryContract {
         invoice.status = new_status.clone();
         invoices.set(id, invoice.clone());
         save_invoices(&env, &invoices);
-        env.events().publish(
-            (symbol_short!("inv_sts"), invoice.id.clone()),
-            new_status,
-        );
+        env.events()
+            .publish((symbol_short!("inv_sts"), invoice.id.clone()), new_status);
         invoice
     }
 
@@ -469,9 +511,18 @@ impl InvoiceRegistryContract {
         assert_not_blacklisted(&env, &lender);
         assert!(amount > 0, "offer amount must be greater than zero");
         assert!(interest_rate > 0, "interest_rate must be greater than zero");
-        assert!(interest_rate <= 10_000, "interest_rate must be at most 10000 bps");
-        assert!(duration >= MIN_OFFER_DURATION_SECS, "duration must be at least 1 day (86400 seconds)");
-        assert!(duration <= MAX_OFFER_DURATION_SECS, "duration must be at most 365 days");
+        assert!(
+            interest_rate <= 10_000,
+            "interest_rate must be at most 10000 bps"
+        );
+        assert!(
+            duration >= MIN_OFFER_DURATION_SECS,
+            "duration must be at least 1 day (86400 seconds)"
+        );
+        assert!(
+            duration <= MAX_OFFER_DURATION_SECS,
+            "duration must be at most 365 days"
+        );
 
         // Invoice must exist, and the lender can't finance their own invoice.
         let invoices = load_invoices(&env);
@@ -502,7 +553,9 @@ impl InvoiceRegistryContract {
         };
         offers.set(offer_id, offer.clone());
         save_offers(&env, &offers);
-        let mut s = load_stats(&env); s.total_offers += 1; save_stats(&env, &s);
+        let mut s = load_stats(&env);
+        s.total_offers += 1;
+        save_stats(&env, &s);
 
         // Update per-lender stats
         let mut lstats = load_lender_stats(&env, &offer.lender);
@@ -512,7 +565,12 @@ impl InvoiceRegistryContract {
 
         env.events().publish(
             (symbol_short!("off_new"), offer.id.clone()),
-            (offer.invoice_id.clone(), offer.lender.clone(), amount, interest_rate),
+            (
+                offer.invoice_id.clone(),
+                offer.lender.clone(),
+                amount,
+                interest_rate,
+            ),
         );
         offer
     }
@@ -556,12 +614,10 @@ impl InvoiceRegistryContract {
         // this is the "immediate liquidity" the protocol promises. The
         // lender must have called token.approve(lender, <this contract>,
         // offer.amount, ...) on the token contract before the offer is
-        // accepted, since the lender isn't a co-signer of this call.
-        let token_id: Address = env
-            .storage()
-            .instance()
-            .get(&symbol_short!("token"))
-            .unwrap_or_else(|| panic!("Not initialized"));
+        // accepted, since the lender isn't a co-signer of this call. The
+        // token is resolved through the currency registry so each currency
+        // settles on its own registered token contract.
+        let token_id = common::resolve_token(&env, &offer.currency);
         let token_client = token::TokenClient::new(&env, &token_id);
         token_client.transfer_from(
             &env.current_contract_address(),
@@ -669,12 +725,9 @@ impl InvoiceRegistryContract {
 
         // Repay principal + yield directly to the lender, minus protocol fee.
         // `repayer` already authorized this call, so a direct transfer
-        // (not transfer_from) is sufficient.
-        let token_id: Address = env
-            .storage()
-            .instance()
-            .get(&symbol_short!("token"))
-            .unwrap_or_else(|| panic!("Not initialized"));
+        // (not transfer_from) is sufficient. The token is resolved through
+        // the currency registry, mirroring accept_offer.
+        let token_id = common::resolve_token(&env, &offer.currency);
         let token_client = token::TokenClient::new(&env, &token_id);
         let yield_amount = offer.amount * (offer.interest_rate as i128) / 10_000;
         let total_due = offer.amount + yield_amount;
@@ -744,7 +797,12 @@ impl InvoiceRegistryContract {
     /// business at `accept_offer` time, so this is an on-chain default
     /// record for off-chain recovery, not a refund. There is nothing held
     /// in escrow to reclaim under this protocol's unsecured-financing model.
-    pub fn reclaim_invoice(env: Env, invoice_id: Symbol, offer_id: Symbol, lender: Address) -> FinancingOffer {
+    pub fn reclaim_invoice(
+        env: Env,
+        invoice_id: Symbol,
+        offer_id: Symbol,
+        lender: Address,
+    ) -> FinancingOffer {
         assert_not_paused(&env);
         lender.require_auth();
 
@@ -1094,7 +1152,8 @@ impl InvoiceRegistryContract {
         let invoices = load_invoices(&env);
         let mut result: Vec<Invoice> = Vec::new(&env);
         for (_id, inv) in invoices.iter() {
-            let is_open = inv.status == InvoiceStatus::Pending || inv.status == InvoiceStatus::Financed;
+            let is_open =
+                inv.status == InvoiceStatus::Pending || inv.status == InvoiceStatus::Financed;
             if is_open && inv.due_date < timestamp {
                 result.push_back(inv);
             }
@@ -1269,7 +1328,6 @@ impl InvoiceRegistryContract {
         }
         result
     }
-
 }
 
 #[cfg(test)]

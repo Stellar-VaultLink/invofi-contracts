@@ -1,3 +1,12 @@
+# InvoFi Contracts
+
+Soroban smart contracts for the [InvoFi](https://github.com/Stellar-VaultLink/invofi) decentralised invoice financing protocol, built with Rust + Soroban SDK 22 on Stellar.
+
+[![CI](https://github.com/Stellar-VaultLink/invofi-contracts/actions/workflows/ci.yml/badge.svg)](https://github.com/Stellar-VaultLink/invofi-contracts/actions/workflows/ci.yml)
+[![Clippy](https://github.com/Stellar-VaultLink/invofi-contracts/actions/workflows/clippy.yml/badge.svg)](https://github.com/Stellar-VaultLink/invofi-contracts/actions/workflows/clippy.yml)
+[![Scout](https://github.com/Stellar-VaultLink/invofi-contracts/actions/workflows/scout-security-analysis.yml/badge.svg)](https://github.com/Stellar-VaultLink/invofi-contracts/actions/workflows/scout-security-analysis.yml)
+[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](./LICENSE)
+
 ---
 
 ## Project Map
@@ -10,13 +19,6 @@ InvoFi is split across two repositories so the fast-moving app layer and the slo
 | **invofi-contracts** (this repo) | All Soroban Rust contracts — registry, financing, repayment, insurance, reputation, common | Stable, auditable, slow-moving history; Rust-only CI; the repo that goes through the SCF Audit Bank |
 
 Smart-contract contributions happen here; frontend and SDK contributions happen in [invofi](https://github.com/Stellar-VaultLink/invofi).
-# InvoFi Contracts
-
-Soroban smart contracts for the [InvoFi](https://github.com/Stellar-VaultLink/invofi) decentralised invoice financing protocol, built with Rust + Soroban SDK 22 on Stellar.
-
-[![CI](https://github.com/Stellar-VaultLink/invofi-contracts/actions/workflows/ci.yml/badge.svg)](https://github.com/Stellar-VaultLink/invofi-contracts/actions/workflows/ci.yml)
-[![Clippy](https://github.com/Stellar-VaultLink/invofi-contracts/actions/workflows/clippy.yml/badge.svg)](https://github.com/Stellar-VaultLink/invofi-contracts/actions/workflows/clippy.yml)
-[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](./LICENSE)
 
 ---
 

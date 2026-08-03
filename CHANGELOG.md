@@ -3,6 +3,21 @@
 All notable changes to InvoFi Contracts are documented here.
 Versioning follows [Semantic Versioning](https://semver.org/).
 
+## [0.4.0] – 2026-08-03
+
+### Added
+- **Currency registry** — `register_currency(admin, currency, token)` and
+  `get_currency_token(currency)` now let the admin register arbitrary
+  Symbol → SEP-41 token mappings. `accept_offer` and `repay_invoice` resolve
+  the token to move funds through the registry, falling back to the legacy
+  single-token `initialize()` value for unbuckled currencies. Adding a third
+  currency is one `register_currency` call, not a branch in every
+  money-touching function.
+- **Soroban Scout static analysis** — `scout-security-analysis.yml` workflow
+  runs CoinFabrik's Soroban Scout on every PR, failing CI on security issues.
+- **Failure-path tests** — 4 new tests cover insufficient balance and wrong
+  currency on both `accept_offer` and `repay_invoice`.
+
 ## [0.3.1] – 2026-08-02
 
 ### Fixed

@@ -20,7 +20,12 @@ fn setup_token(env: &Env, contract_id: &Address, lender: &Address, amount: i128)
     asset_client.mint(lender, &amount);
 
     let token_client = token::TokenClient::new(env, &token_id);
-    token_client.approve(lender, contract_id, &amount, &(env.ledger().sequence() + 1000));
+    token_client.approve(
+        lender,
+        contract_id,
+        &amount,
+        &(env.ledger().sequence() + 1000),
+    );
 
     token_id
 }
@@ -38,13 +43,8 @@ fn test_register_and_get_invoice() {
     let currency = symbol_short!("USDC");
     let due_date: u64 = 1_735_689_600;
 
-    let registered = client.register_invoice(
-        &invoice_id,
-        &originator,
-        &amount,
-        &currency,
-        &due_date,
-    );
+    let registered =
+        client.register_invoice(&invoice_id, &originator, &amount, &currency, &due_date);
 
     assert_eq!(registered.id, invoice_id);
     assert_eq!(registered.originator, originator);
@@ -109,7 +109,10 @@ fn test_update_invoice_status() {
 
     // Status updates publish an event for indexers.
     let events = env.events().all();
-    assert!(!events.is_empty(), "update_invoice_status should emit an event");
+    assert!(
+        !events.is_empty(),
+        "update_invoice_status should emit an event"
+    );
 }
 
 #[test]
@@ -368,7 +371,10 @@ fn test_repay_invoice_partial_then_full() {
 
     let token_client = token::TokenClient::new(&env, &token_id);
     assert_eq!(token_client.balance(&lender), partial_amount);
-    assert_eq!(token_client.balance(&originator), amount + total_due - partial_amount);
+    assert_eq!(
+        token_client.balance(&originator),
+        amount + total_due - partial_amount
+    );
 
     let final_amount = total_due - partial_amount;
     let repaid_final = client.repay_invoice(&invoice_id, &offer_id, &originator, &final_amount);
@@ -444,7 +450,13 @@ fn test_reclaim_invoice_after_grace_period() {
     let token_id = setup_token(&env, &contract_id, &lender, amount);
     client.initialize(&admin, &token_id);
 
-    client.register_invoice(&invoice_id, &originator, &amount, &symbol_short!("USDC"), &due_date);
+    client.register_invoice(
+        &invoice_id,
+        &originator,
+        &amount,
+        &symbol_short!("USDC"),
+        &due_date,
+    );
     client.create_offer(
         &offer_id,
         &invoice_id,
@@ -457,7 +469,8 @@ fn test_reclaim_invoice_after_grace_period() {
     client.accept_offer(&offer_id, &originator);
 
     // Move past due_date + grace period.
-    env.ledger().set_timestamp(due_date + super::GRACE_PERIOD_SECS + 1);
+    env.ledger()
+        .set_timestamp(due_date + super::GRACE_PERIOD_SECS + 1);
     client.mark_overdue(&invoice_id);
 
     let reclaimed = client.reclaim_invoice(&invoice_id, &offer_id, &lender);
@@ -483,7 +496,13 @@ fn test_reclaim_before_grace_period_panics() {
     let token_id = setup_token(&env, &contract_id, &lender, amount);
     client.initialize(&admin, &token_id);
 
-    client.register_invoice(&invoice_id, &originator, &amount, &symbol_short!("USDC"), &due_date);
+    client.register_invoice(
+        &invoice_id,
+        &originator,
+        &amount,
+        &symbol_short!("USDC"),
+        &due_date,
+    );
     client.create_offer(
         &offer_id,
         &invoice_id,
@@ -1184,9 +1203,27 @@ fn test_get_invoices_by_originator() {
     let orig_a = Address::generate(&env);
     let orig_b = Address::generate(&env);
 
-    client.register_invoice(&symbol_short!("inv_oa1"), &orig_a, &10_000_000i128, &symbol_short!("XLM"), &3_000_000u64);
-    client.register_invoice(&symbol_short!("inv_oa2"), &orig_a, &20_000_000i128, &symbol_short!("XLM"), &3_000_000u64);
-    client.register_invoice(&symbol_short!("inv_ob1"), &orig_b, &30_000_000i128, &symbol_short!("XLM"), &3_000_000u64);
+    client.register_invoice(
+        &symbol_short!("inv_oa1"),
+        &orig_a,
+        &10_000_000i128,
+        &symbol_short!("XLM"),
+        &3_000_000u64,
+    );
+    client.register_invoice(
+        &symbol_short!("inv_oa2"),
+        &orig_a,
+        &20_000_000i128,
+        &symbol_short!("XLM"),
+        &3_000_000u64,
+    );
+    client.register_invoice(
+        &symbol_short!("inv_ob1"),
+        &orig_b,
+        &30_000_000i128,
+        &symbol_short!("XLM"),
+        &3_000_000u64,
+    );
 
     let a_invoices = client.get_invoices_by_originator(&orig_a);
     assert_eq!(a_invoices.len(), 2);
@@ -1206,9 +1243,29 @@ fn test_get_all_invoices_and_offers() {
     let orig = Address::generate(&env);
     let lender = Address::generate(&env);
 
-    client.register_invoice(&symbol_short!("inv_all1"), &orig, &10_000_000i128, &symbol_short!("XLM"), &3_000_000u64);
-    client.register_invoice(&symbol_short!("inv_all2"), &orig, &20_000_000i128, &symbol_short!("XLM"), &3_000_000u64);
-    client.create_offer(&symbol_short!("off_all1"), &symbol_short!("inv_all1"), &lender, &1_000i128, &symbol_short!("XLM"), &200u32, &86_400u64);
+    client.register_invoice(
+        &symbol_short!("inv_all1"),
+        &orig,
+        &10_000_000i128,
+        &symbol_short!("XLM"),
+        &3_000_000u64,
+    );
+    client.register_invoice(
+        &symbol_short!("inv_all2"),
+        &orig,
+        &20_000_000i128,
+        &symbol_short!("XLM"),
+        &3_000_000u64,
+    );
+    client.create_offer(
+        &symbol_short!("off_all1"),
+        &symbol_short!("inv_all1"),
+        &lender,
+        &1_000i128,
+        &symbol_short!("XLM"),
+        &200u32,
+        &86_400u64,
+    );
 
     assert_eq!(client.get_all_invoices().len(), 2);
     assert_eq!(client.get_all_offers().len(), 1);
@@ -1233,7 +1290,8 @@ fn test_update_invoice_amount() {
         &3_000_000u64,
     );
 
-    let updated = client.update_invoice_amount(&symbol_short!("inv_ua1"), &originator, &20_000_000i128);
+    let updated =
+        client.update_invoice_amount(&symbol_short!("inv_ua1"), &originator, &20_000_000i128);
     assert_eq!(updated.amount, 20_000_000i128);
 
     // Verify persistence
@@ -1277,8 +1335,22 @@ fn test_update_amount_on_financed_panics() {
     let token_id = setup_token(&env, &contract_id, &lender, 5_000i128);
     client.initialize(&originator, &token_id);
 
-    client.register_invoice(&symbol_short!("inv_ua2"), &originator, &50_000_000i128, &symbol_short!("XLM"), &3_000_000u64);
-    client.create_offer(&symbol_short!("off_ua2"), &symbol_short!("inv_ua2"), &lender, &5_000i128, &symbol_short!("XLM"), &300u32, &86_400u64);
+    client.register_invoice(
+        &symbol_short!("inv_ua2"),
+        &originator,
+        &50_000_000i128,
+        &symbol_short!("XLM"),
+        &3_000_000u64,
+    );
+    client.create_offer(
+        &symbol_short!("off_ua2"),
+        &symbol_short!("inv_ua2"),
+        &lender,
+        &5_000i128,
+        &symbol_short!("XLM"),
+        &300u32,
+        &86_400u64,
+    );
     client.accept_offer(&symbol_short!("off_ua2"), &originator);
 
     // Invoice is now Financed — amount update should panic
@@ -1295,15 +1367,29 @@ fn test_stats_increment_on_register_invoice() {
     let contract_id = env.register(InvoiceRegistryContract, ());
     let client = super::InvoiceRegistryContractClient::new(&env, &contract_id);
     let admin = Address::generate(&env);
-    let token_id = env.register_stellar_asset_contract_v2(Address::generate(&env)).address();
+    let token_id = env
+        .register_stellar_asset_contract_v2(Address::generate(&env))
+        .address();
     client.initialize(&admin, &token_id);
 
     let stats_before = client.get_stats();
     assert_eq!(stats_before.total_invoices, 0);
     assert_eq!(stats_before.total_offers, 0);
 
-    client.register_invoice(&symbol_short!("si1"), &admin, &10_000_000i128, &symbol_short!("XLM"), &2_000_000u64);
-    client.register_invoice(&symbol_short!("si2"), &admin, &20_000_000i128, &symbol_short!("XLM"), &2_000_000u64);
+    client.register_invoice(
+        &symbol_short!("si1"),
+        &admin,
+        &10_000_000i128,
+        &symbol_short!("XLM"),
+        &2_000_000u64,
+    );
+    client.register_invoice(
+        &symbol_short!("si2"),
+        &admin,
+        &20_000_000i128,
+        &symbol_short!("XLM"),
+        &2_000_000u64,
+    );
 
     let stats_after = client.get_stats();
     assert_eq!(stats_after.total_invoices, 2);
@@ -1322,8 +1408,22 @@ fn test_stats_increment_on_create_offer() {
     let token_id = setup_token(&env, &contract_id, &lender, 5_000i128);
     client.initialize(&admin, &token_id);
 
-    client.register_invoice(&symbol_short!("so1"), &admin, &10_000_000i128, &symbol_short!("XLM"), &2_000_000u64);
-    client.create_offer(&symbol_short!("off_so1"), &symbol_short!("so1"), &lender, &1_000i128, &symbol_short!("XLM"), &200u32, &86_400u64);
+    client.register_invoice(
+        &symbol_short!("so1"),
+        &admin,
+        &10_000_000i128,
+        &symbol_short!("XLM"),
+        &2_000_000u64,
+    );
+    client.create_offer(
+        &symbol_short!("off_so1"),
+        &symbol_short!("so1"),
+        &lender,
+        &1_000i128,
+        &symbol_short!("XLM"),
+        &200u32,
+        &86_400u64,
+    );
 
     let stats = client.get_stats();
     assert_eq!(stats.total_invoices, 1);
@@ -1340,7 +1440,9 @@ fn test_blacklist_and_unblacklist() {
     let contract_id = env.register(InvoiceRegistryContract, ());
     let client = super::InvoiceRegistryContractClient::new(&env, &contract_id);
     let admin = Address::generate(&env);
-    let token_id = env.register_stellar_asset_contract_v2(Address::generate(&env)).address();
+    let token_id = env
+        .register_stellar_asset_contract_v2(Address::generate(&env))
+        .address();
     let bad_actor = Address::generate(&env);
     client.initialize(&admin, &token_id);
 
@@ -1373,13 +1475,21 @@ fn test_blacklisted_cannot_register_invoice() {
     let contract_id = env.register(InvoiceRegistryContract, ());
     let client = super::InvoiceRegistryContractClient::new(&env, &contract_id);
     let admin = Address::generate(&env);
-    let token_id = env.register_stellar_asset_contract_v2(Address::generate(&env)).address();
+    let token_id = env
+        .register_stellar_asset_contract_v2(Address::generate(&env))
+        .address();
     let bad_actor = Address::generate(&env);
     client.initialize(&admin, &token_id);
 
     client.blacklist_address(&admin, &bad_actor);
     // Should panic
-    client.register_invoice(&symbol_short!("bl1"), &bad_actor, &10_000_000i128, &symbol_short!("XLM"), &2_000_000u64);
+    client.register_invoice(
+        &symbol_short!("bl1"),
+        &bad_actor,
+        &10_000_000i128,
+        &symbol_short!("XLM"),
+        &2_000_000u64,
+    );
 }
 
 #[test]
@@ -1395,10 +1505,24 @@ fn test_blacklisted_cannot_create_offer() {
     let token_id = setup_token(&env, &contract_id, &lender, 5_000i128);
     client.initialize(&admin, &token_id);
 
-    client.register_invoice(&symbol_short!("bl2"), &admin, &10_000_000i128, &symbol_short!("XLM"), &2_000_000u64);
+    client.register_invoice(
+        &symbol_short!("bl2"),
+        &admin,
+        &10_000_000i128,
+        &symbol_short!("XLM"),
+        &2_000_000u64,
+    );
     client.blacklist_address(&admin, &lender);
     // Should panic
-    client.create_offer(&symbol_short!("off_bl2"), &symbol_short!("bl2"), &lender, &1_000i128, &symbol_short!("XLM"), &200u32, &86_400u64);
+    client.create_offer(
+        &symbol_short!("off_bl2"),
+        &symbol_short!("bl2"),
+        &lender,
+        &1_000i128,
+        &symbol_short!("XLM"),
+        &200u32,
+        &86_400u64,
+    );
 }
 
 #[test]
@@ -1410,7 +1534,9 @@ fn test_blacklist_non_admin_panics() {
     let contract_id = env.register(InvoiceRegistryContract, ());
     let client = super::InvoiceRegistryContractClient::new(&env, &contract_id);
     let admin = Address::generate(&env);
-    let token_id = env.register_stellar_asset_contract_v2(Address::generate(&env)).address();
+    let token_id = env
+        .register_stellar_asset_contract_v2(Address::generate(&env))
+        .address();
     let non_admin = Address::generate(&env);
     let victim = Address::generate(&env);
     client.initialize(&admin, &token_id);
@@ -1418,7 +1544,6 @@ fn test_blacklist_non_admin_panics() {
     // non_admin tries to blacklist — should panic
     client.blacklist_address(&non_admin, &victim);
 }
-
 
 // ─── Tests for new query functions and constants (v0.2) ──────────────────────
 
@@ -1482,8 +1607,20 @@ fn test_get_invoices_and_offers_count() {
     let due_date: u64 = 1_735_689_600;
     let currency = symbol_short!("USDC");
 
-    client.register_invoice(&symbol_short!("i1"), &originator, &amount, &currency, &due_date);
-    client.register_invoice(&symbol_short!("i2"), &originator, &amount, &currency, &due_date);
+    client.register_invoice(
+        &symbol_short!("i1"),
+        &originator,
+        &amount,
+        &currency,
+        &due_date,
+    );
+    client.register_invoice(
+        &symbol_short!("i2"),
+        &originator,
+        &amount,
+        &currency,
+        &due_date,
+    );
     assert_eq!(client.get_invoices_count(), 2);
 
     client.create_offer(
@@ -1511,7 +1648,13 @@ fn test_get_offers_by_status_filters_correctly() {
     let due_date: u64 = 1_735_689_600;
     let currency = symbol_short!("USDC");
 
-    client.register_invoice(&symbol_short!("inv1"), &originator, &amount, &currency, &due_date);
+    client.register_invoice(
+        &symbol_short!("inv1"),
+        &originator,
+        &amount,
+        &currency,
+        &due_date,
+    );
     client.create_offer(
         &symbol_short!("off1"),
         &symbol_short!("inv1"),
@@ -1576,8 +1719,20 @@ fn test_get_invoices_due_before_timestamp() {
     let currency = symbol_short!("USDC");
 
     env.ledger().set_timestamp(1000);
-    client.register_invoice(&symbol_short!("soon"), &originator, &amount, &currency, &2000_u64);
-    client.register_invoice(&symbol_short!("later"), &originator, &amount, &currency, &9999_u64);
+    client.register_invoice(
+        &symbol_short!("soon"),
+        &originator,
+        &amount,
+        &currency,
+        &2000_u64,
+    );
+    client.register_invoice(
+        &symbol_short!("later"),
+        &originator,
+        &amount,
+        &currency,
+        &9999_u64,
+    );
 
     let early = client.get_invoices_due_before(&5000_u64);
     assert_eq!(early.len(), 1);
@@ -1600,7 +1755,13 @@ fn test_get_pending_offers_by_invoice_excludes_rejected() {
     let due_date: u64 = 1_735_689_600;
     let currency = symbol_short!("USDC");
 
-    client.register_invoice(&symbol_short!("inv1"), &originator, &amount, &currency, &due_date);
+    client.register_invoice(
+        &symbol_short!("inv1"),
+        &originator,
+        &amount,
+        &currency,
+        &due_date,
+    );
     client.create_offer(
         &symbol_short!("off1"),
         &symbol_short!("inv1"),
@@ -1639,7 +1800,6 @@ fn test_version_returns_nonempty_string() {
     assert!(ver.len() > 0);
 }
 
-
 // ─── Dispute and lender stats tests ─────────────────────────────────────────
 
 #[test]
@@ -1655,7 +1815,13 @@ fn test_raise_dispute_changes_status_to_disputed() {
     let due_date: u64 = 1_735_689_600;
     let currency = symbol_short!("USDC");
 
-    client.register_invoice(&symbol_short!("inv1"), &originator, &amount, &currency, &due_date);
+    client.register_invoice(
+        &symbol_short!("inv1"),
+        &originator,
+        &amount,
+        &currency,
+        &due_date,
+    );
     client.create_offer(
         &symbol_short!("off1"),
         &symbol_short!("inv1"),
@@ -1708,7 +1874,13 @@ fn test_resolve_dispute_restores_financed_status() {
     let amount: i128 = 1_000_000_000;
     let currency = symbol_short!("USDC");
 
-    client.register_invoice(&symbol_short!("inv1"), &originator, &amount, &currency, &1_735_689_600_u64);
+    client.register_invoice(
+        &symbol_short!("inv1"),
+        &originator,
+        &amount,
+        &currency,
+        &1_735_689_600_u64,
+    );
     client.create_offer(
         &symbol_short!("off1"),
         &symbol_short!("inv1"),
@@ -1724,11 +1896,7 @@ fn test_resolve_dispute_restores_financed_status() {
     client.raise_dispute(&symbol_short!("inv1"), &originator);
 
     // Admin resolves back to Financed
-    let resolved = client.resolve_dispute(
-        &admin,
-        &symbol_short!("inv1"),
-        &InvoiceStatus::Financed,
-    );
+    let resolved = client.resolve_dispute(&admin, &symbol_short!("inv1"), &InvoiceStatus::Financed);
     assert_eq!(resolved.status, InvoiceStatus::Financed);
 }
 
@@ -1745,7 +1913,13 @@ fn test_get_lender_stats_after_create_offer() {
     let offer_amount: i128 = 500_000_000;
     let currency = symbol_short!("USDC");
 
-    client.register_invoice(&symbol_short!("inv1"), &originator, &amount, &currency, &1_735_689_600_u64);
+    client.register_invoice(
+        &symbol_short!("inv1"),
+        &originator,
+        &amount,
+        &currency,
+        &1_735_689_600_u64,
+    );
     client.create_offer(
         &symbol_short!("off1"),
         &symbol_short!("inv1"),
@@ -1760,7 +1934,6 @@ fn test_get_lender_stats_after_create_offer() {
     assert_eq!(stats.total_offered, offer_amount);
     assert_eq!(stats.offers_pending, 1);
 }
-
 
 // ─── Pagination and batch tests ───────────────────────────────────────────────
 
@@ -1778,9 +1951,16 @@ fn test_get_invoices_paginated() {
 
     // Register 5 invoices
     for i in 0u32..5 {
-        let id = soroban_sdk::Symbol::new(&env, match i {
-            0 => "i0", 1 => "i1", 2 => "i2", 3 => "i3", _ => "i4",
-        });
+        let id = soroban_sdk::Symbol::new(
+            &env,
+            match i {
+                0 => "i0",
+                1 => "i1",
+                2 => "i2",
+                3 => "i3",
+                _ => "i4",
+            },
+        );
         client.register_invoice(&id, &originator, &amount, &currency, &due_date);
     }
 
@@ -1805,7 +1985,13 @@ fn test_get_offers_paginated() {
     let amount: i128 = 2_000_000_000;
     let currency = symbol_short!("USDC");
 
-    client.register_invoice(&symbol_short!("inv1"), &originator, &amount, &currency, &1_735_689_600_u64);
+    client.register_invoice(
+        &symbol_short!("inv1"),
+        &originator,
+        &amount,
+        &currency,
+        &1_735_689_600_u64,
+    );
 
     // Create 4 offers
     for (id, rate) in [("o1", 100u32), ("o2", 200), ("o3", 300), ("o4", 400)] {
@@ -1842,7 +2028,13 @@ fn test_batch_get_invoices_skips_missing() {
     let amount: i128 = 1_000_000_000;
     let currency = symbol_short!("USDC");
 
-    client.register_invoice(&symbol_short!("real"), &originator, &amount, &currency, &1_735_689_600_u64);
+    client.register_invoice(
+        &symbol_short!("real"),
+        &originator,
+        &amount,
+        &currency,
+        &1_735_689_600_u64,
+    );
 
     let mut ids = soroban_sdk::Vec::new(&env);
     ids.push_back(symbol_short!("real"));
@@ -1853,7 +2045,6 @@ fn test_batch_get_invoices_skips_missing() {
     assert_eq!(results.len(), 1);
     assert_eq!(results.get(0).unwrap().id, symbol_short!("real"));
 }
-
 
 // ─── Constant introspection and edge case tests ───────────────────────────────
 
@@ -1891,7 +2082,13 @@ fn test_resolve_dispute_to_disputed_panics() {
     let lender = Address::generate(&env);
     let currency = symbol_short!("USDC");
 
-    client.register_invoice(&symbol_short!("inv1"), &originator, &1_000_000_000_i128, &currency, &1_735_689_600_u64);
+    client.register_invoice(
+        &symbol_short!("inv1"),
+        &originator,
+        &1_000_000_000_i128,
+        &currency,
+        &1_735_689_600_u64,
+    );
     client.create_offer(
         &symbol_short!("off1"),
         &symbol_short!("inv1"),
@@ -1925,9 +2122,21 @@ fn test_get_invoices_due_before_excludes_repaid() {
     env.ledger().set_timestamp(1000);
 
     // Invoice due at 2000 — will be Pending
-    client.register_invoice(&symbol_short!("inv1"), &originator, &amount, &currency, &2000_u64);
+    client.register_invoice(
+        &symbol_short!("inv1"),
+        &originator,
+        &amount,
+        &currency,
+        &2000_u64,
+    );
     // Invoice due at 2000 — will be Financed then Repaid
-    client.register_invoice(&symbol_short!("inv2"), &originator, &amount, &currency, &2000_u64);
+    client.register_invoice(
+        &symbol_short!("inv2"),
+        &originator,
+        &amount,
+        &currency,
+        &2000_u64,
+    );
     client.create_offer(
         &symbol_short!("off1"),
         &symbol_short!("inv2"),
@@ -1944,7 +2153,12 @@ fn test_get_invoices_due_before_excludes_repaid() {
     // (3% yield) — mint the difference so the full repayment can clear.
     token::StellarAssetClient::new(&env, &token_id).mint(&originator, &15_000_000_i128);
     // Repay so inv2 moves to Repaid
-    client.repay_invoice(&symbol_short!("inv2"), &symbol_short!("off1"), &originator, &515_000_000_i128);
+    client.repay_invoice(
+        &symbol_short!("inv2"),
+        &symbol_short!("off1"),
+        &originator,
+        &515_000_000_i128,
+    );
 
     // Both have due_date=2000, but query at 5000 should only return inv1 (Pending)
     // inv2 is Repaid and should not appear
@@ -1952,7 +2166,6 @@ fn test_get_invoices_due_before_excludes_repaid() {
     assert_eq!(due.len(), 1);
     assert_eq!(due.get(0).unwrap().id, symbol_short!("inv1"));
 }
-
 
 // ─── Full lifecycle integration test ─────────────────────────────────────────
 
@@ -1974,13 +2187,23 @@ fn test_full_invoice_financing_lifecycle() {
     // ── 1. Setup ────────────────────────────────────────────────────────────
     let offer_a_amount: i128 = 4_000_000_000; // 400 USDC
     let offer_b_amount: i128 = 3_000_000_000; // 300 USDC
-    let token_id = setup_token(&env, &contract_id, &lender_a, offer_a_amount + offer_b_amount);
+    let token_id = setup_token(
+        &env,
+        &contract_id,
+        &lender_a,
+        offer_a_amount + offer_b_amount,
+    );
     client.initialize(&admin, &token_id);
     // Also mint to lender_b
     let asset_client = token::StellarAssetClient::new(&env, &token_id);
     asset_client.mint(&lender_b, &offer_b_amount);
     let token_client = token::TokenClient::new(&env, &token_id);
-    token_client.approve(&lender_b, &contract_id, &offer_b_amount, &(env.ledger().sequence() + 1000));
+    token_client.approve(
+        &lender_b,
+        &contract_id,
+        &offer_b_amount,
+        &(env.ledger().sequence() + 1000),
+    );
 
     // ── 2. Business registers an invoice ────────────────────────────────────
     let inv = client.register_invoice(
@@ -2046,7 +2269,6 @@ fn test_full_invoice_financing_lifecycle() {
     assert_eq!(stats.total_offers, 2);
 }
 
-
 // ─── Blacklist and stats interaction tests ───────────────────────────────────
 
 #[test]
@@ -2066,8 +2288,20 @@ fn test_stats_increment_in_full_lifecycle() {
     assert_eq!(stats0.total_invoices, 0);
     assert_eq!(stats0.total_offers, 0);
 
-    client.register_invoice(&symbol_short!("i1"), &originator, &amount, &currency, &due_date);
-    client.register_invoice(&symbol_short!("i2"), &originator, &amount, &currency, &due_date);
+    client.register_invoice(
+        &symbol_short!("i1"),
+        &originator,
+        &amount,
+        &currency,
+        &due_date,
+    );
+    client.register_invoice(
+        &symbol_short!("i2"),
+        &originator,
+        &amount,
+        &currency,
+        &due_date,
+    );
 
     let stats1 = client.get_stats();
     assert_eq!(stats1.total_invoices, 2);
@@ -2108,7 +2342,13 @@ fn test_blacklisted_cannot_raise_dispute() {
     let lender = Address::generate(&env);
     let currency = symbol_short!("USDC");
 
-    client.register_invoice(&symbol_short!("inv1"), &originator, &1_000_000_000_i128, &currency, &1_735_689_600_u64);
+    client.register_invoice(
+        &symbol_short!("inv1"),
+        &originator,
+        &1_000_000_000_i128,
+        &currency,
+        &1_735_689_600_u64,
+    );
     client.create_offer(
         &symbol_short!("off1"),
         &symbol_short!("inv1"),
@@ -2134,7 +2374,6 @@ fn test_blacklisted_cannot_raise_dispute() {
     let disputed = client.raise_dispute(&symbol_short!("inv1"), &originator);
     assert_eq!(disputed.status, super::InvoiceStatus::Disputed);
 }
-
 
 // ─── Protocol event tests ─────────────────────────────────────────────────────
 
@@ -2233,7 +2472,12 @@ fn test_repay_emits_event() {
     client.accept_offer(&symbol_short!("ev3_off"), &originator);
 
     // Partial repayment — originator holds the 500M principal from accept
-    client.repay_invoice(&symbol_short!("ev3"), &symbol_short!("ev3_off"), &originator, &100_000_000i128);
+    client.repay_invoice(
+        &symbol_short!("ev3"),
+        &symbol_short!("ev3_off"),
+        &originator,
+        &100_000_000i128,
+    );
     let events = env.events().all();
     assert!(!events.is_empty(), "repay_invoice should emit an event");
     let (emitter, _topics, _data) = events.last().unwrap();
@@ -2406,4 +2650,196 @@ fn test_create_offer_while_paused_panics() {
         &500u32,
         &86_400u64,
     );
+}
+
+// ─── Task 3: failure paths introduced by SEP-41 token movement ──────────────
+// These cover the two ways accept_offer / repay_invoice can fail now that real
+// tokens move: the counterparty simply lacks balance, or funds are sitting on
+// the wrong currency's token contract.
+
+#[test]
+#[should_panic(expected = "not enough allowance")]
+fn test_accept_offer_lender_insufficient_balance_panics() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let contract_id = env.register(InvoiceRegistryContract, ());
+    let client = super::InvoiceRegistryContractClient::new(&env, &contract_id);
+
+    let admin = Address::generate(&env);
+    let originator = Address::generate(&env);
+    let lender = Address::generate(&env);
+    let invoice_id = symbol_short!("inv_i1");
+    let offer_id = symbol_short!("off_i1");
+    let amount: i128 = 1_000_000_000;
+
+    // Lender approves the contract as spender but has zero balance — the
+    // transfer_from inside accept_offer must fail.
+    let token_id = setup_token(&env, &contract_id, &lender, 0);
+    client.initialize(&admin, &token_id);
+
+    client.register_invoice(
+        &invoice_id,
+        &originator,
+        &amount,
+        &symbol_short!("USDC"),
+        &(1_735_689_600u64),
+    );
+    client.create_offer(
+        &offer_id,
+        &invoice_id,
+        &lender,
+        &amount,
+        &symbol_short!("USDC"),
+        &300u32,
+        &(1_296_000u64),
+    );
+
+    client.accept_offer(&offer_id, &originator);
+}
+
+#[test]
+#[should_panic(expected = "not enough allowance")]
+fn test_accept_offer_wrong_currency_panics() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let contract_id = env.register(InvoiceRegistryContract, ());
+    let client = super::InvoiceRegistryContractClient::new(&env, &contract_id);
+
+    let admin = Address::generate(&env);
+    let originator = Address::generate(&env);
+    let lender = Address::generate(&env);
+    let invoice_id = symbol_short!("inv_i2");
+    let offer_id = symbol_short!("off_i2");
+    let amount: i128 = 1_000_000_000;
+
+    // Two currencies, two distinct token contracts. The lender funds the
+    // USDC token but the offer is denominated in XLM — so accept_offer tries
+    // to pull from the XLM token, where the lender has no balance.
+    let usdc_token = setup_token(&env, &contract_id, &lender, amount);
+    let xlm_admin = Address::generate(&env);
+    let xlm_sac = env.register_stellar_asset_contract_v2(xlm_admin);
+    let xlm_token = xlm_sac.address();
+
+    client.initialize(&admin, &usdc_token);
+    client.register_currency(&admin, &symbol_short!("USDC"), &usdc_token);
+    client.register_currency(&admin, &symbol_short!("XLM"), &xlm_token);
+
+    client.register_invoice(
+        &invoice_id,
+        &originator,
+        &amount,
+        &symbol_short!("XLM"),
+        &(1_735_689_600u64),
+    );
+    client.create_offer(
+        &offer_id,
+        &invoice_id,
+        &lender,
+        &amount,
+        &symbol_short!("XLM"),
+        &300u32,
+        &(1_296_000u64),
+    );
+
+    // Lender approved/funded only the USDC token; the XLM token has no funds.
+    client.accept_offer(&offer_id, &originator);
+}
+
+#[test]
+#[should_panic(expected = "Error(Contract, #10)")]
+fn test_repay_invoice_originator_insufficient_balance_panics() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let contract_id = env.register(InvoiceRegistryContract, ());
+    let client = super::InvoiceRegistryContractClient::new(&env, &contract_id);
+
+    let admin = Address::generate(&env);
+    let originator = Address::generate(&env);
+    let lender = Address::generate(&env);
+    let invoice_id = symbol_short!("inv_i3");
+    let offer_id = symbol_short!("off_i3");
+    let amount: i128 = 1_000_000_000;
+    let interest_rate: u32 = 500;
+
+    let token_id = setup_token(&env, &contract_id, &lender, amount);
+    client.initialize(&admin, &token_id);
+
+    client.register_invoice(
+        &invoice_id,
+        &originator,
+        &amount,
+        &symbol_short!("USDC"),
+        &(1_735_689_600u64),
+    );
+    client.create_offer(
+        &offer_id,
+        &invoice_id,
+        &lender,
+        &amount,
+        &symbol_short!("USDC"),
+        &interest_rate,
+        &(2_592_000u64),
+    );
+    client.accept_offer(&offer_id, &originator);
+
+    // Originator received principal at accept time but spends it before
+    // repaying (drain it via transfer to a burner).
+    let token_client = token::TokenClient::new(&env, &token_id);
+    let burner = Address::generate(&env);
+    token_client.transfer(&originator, &burner, &token_client.balance(&originator));
+
+    let total_due = amount + amount * (interest_rate as i128) / 10_000;
+    client.repay_invoice(&invoice_id, &offer_id, &originator, &total_due);
+}
+
+#[test]
+#[should_panic(expected = "Error(Contract, #10)")]
+fn test_repay_invoice_wrong_currency_panics() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let contract_id = env.register(InvoiceRegistryContract, ());
+    let client = super::InvoiceRegistryContractClient::new(&env, &contract_id);
+
+    let admin = Address::generate(&env);
+    let originator = Address::generate(&env);
+    let lender = Address::generate(&env);
+    let invoice_id = symbol_short!("inv_i4");
+    let offer_id = symbol_short!("off_i4");
+    let amount: i128 = 1_000_000_000;
+    let interest_rate: u32 = 500;
+
+    // Financing happens on the USDC token. The originator holds funds on the
+    // XLM token instead — repayment must fail because it settles on USDC.
+    let usdc_token = setup_token(&env, &contract_id, &lender, amount);
+    let xlm_admin = Address::generate(&env);
+    let xlm_sac = env.register_stellar_asset_contract_v2(xlm_admin);
+    let xlm_token = xlm_sac.address();
+
+    client.initialize(&admin, &usdc_token);
+    client.register_currency(&admin, &symbol_short!("USDC"), &usdc_token);
+    client.register_currency(&admin, &symbol_short!("XLM"), &xlm_token);
+
+    client.register_invoice(
+        &invoice_id,
+        &originator,
+        &amount,
+        &symbol_short!("USDC"),
+        &(1_735_689_600u64),
+    );
+    client.create_offer(
+        &offer_id,
+        &invoice_id,
+        &lender,
+        &amount,
+        &symbol_short!("USDC"),
+        &interest_rate,
+        &(2_592_000u64),
+    );
+    client.accept_offer(&offer_id, &originator);
+
+    // Originator funds the XLM token, not the USDC one used for the offer.
+    token::StellarAssetClient::new(&env, &xlm_token).mint(&originator, &amount);
+
+    let total_due = amount + amount * (interest_rate as i128) / 10_000;
+    client.repay_invoice(&invoice_id, &offer_id, &originator, &total_due);
 }

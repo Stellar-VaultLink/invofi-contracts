@@ -1,0 +1,36 @@
+name: Scout Security Analysis
+
+# Runs the CoinFabrik Soroban Scout static analyzer on every PR to master.
+# Fails CI if Scout detects security issues or deviations from best practices.
+# Manual dispatch allows re-running without a push.
+
+on:
+  pull_request:
+    branches: [master]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pull-requests: write
+
+jobs:
+  scout-audit:
+    name: Soroban Scout
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32v1-none
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: "."
+
+      - name: Run Scout Security Analysis
+        uses: coinfabrik/scout-actions@v3.2
+        with:
+          working_directory: "."
+          fail_on_error: "true"
+          verbose: "false"
