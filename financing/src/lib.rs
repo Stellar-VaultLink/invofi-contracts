@@ -346,7 +346,7 @@ impl FinancingContract {
             .get(&symbol_short!("registry"))
             .unwrap_or_else(|| panic!("Not initialized"));
         let registry_client = RegistryClient::new(&env, &registry_addr);
-        let mut invoice: Invoice = registry_client.get_invoice(&offer.invoice_id);
+        let invoice: Invoice = registry_client.get_invoice(&offer.invoice_id);
 
         if invoice.originator != invoice_originator {
             panic!("Only the invoice originator can accept offers");
@@ -373,7 +373,6 @@ impl FinancingContract {
         // Cross-contract: mark the invoice Financed in the registry via the
         // system transition (the financing contract is the authorized caller;
         // user auth does not propagate across contract boundaries in Soroban).
-        invoice.status = InvoiceStatus::Financed;
         registry_client.financing_marks_invoice_financed(&offer.invoice_id);
 
         let mut s = load_stats(&env);
