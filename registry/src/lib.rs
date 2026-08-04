@@ -121,6 +121,26 @@ impl RegistryContract {
             .set(&symbol_short!("admin"), &new_admin);
     }
 
+    /// Register the financing contract address. Admin only. The financing
+    /// contract is the only caller allowed to transition a Pending invoice to
+    /// Financed via `transition_invoice_status`.
+    pub fn set_financing_contract(env: Env, admin: Address, financing: Address) {
+        assert_admin(&env, &admin);
+        env.storage()
+            .instance()
+            .set(&symbol_short!("financing"), &financing);
+    }
+
+    /// Register the repayment contract address. Admin only. The repayment
+    /// contract is the only caller allowed to transition a Financed invoice
+    /// to Financed (partial) or Repaid (full) via `transition_invoice_status`.
+    pub fn set_repayment_contract(env: Env, admin: Address, repayment: Address) {
+        assert_admin(&env, &admin);
+        env.storage()
+            .instance()
+            .set(&symbol_short!("repayment"), &repayment);
+    }
+
     // ── Pause / unpause ──────────────────────────────────────────────────────
 
     /// Halt all state-mutating operations. Admin only.
@@ -345,6 +365,64 @@ impl RegistryContract {
             .unwrap_or_else(|| panic!("Invoice not found"));
         if invoice.status != InvoiceStatus::Financed {
             panic!("Invoice must be Financed for repayment status update");
+        }
+        invoice.status = if fully_repaid {
+            InvoiceStatus::Repaid
+        } else {
+            InvoiceStatus::Financed
+        };
+        invoices.set(id, invoice.clone());
+        save_invoices(&env, &invoices);
+        invoice
+    }
+
+    /// System transition: Pending -> Financed on offer acceptance.
+    /// Only the registered financing contract may call this. Soroban does not
+    /// forward *user* auth across contract boundaries, so the financing
+    /// contract is authorized by address via the host's implicit
+    /// contract-invoker auth (see Stellar docs — Authorization).
+    pub fn financing_marks_invoice_financed(env: Env, id: Symbol) -> Invoice {
+        let financing: Address = env
+            .storage()
+            .instance()
+            .get(&symbol_short!("financing"))
+            .unwrap_or_else(|| panic!("Financing contract not configured"));
+        financing.require_auth();
+
+        let mut invoices = load_invoices(&env);
+        let mut invoice = invoices
+            .get(id.clone())
+            .unwrap_or_else(|| panic!("Invoice not found"));
+        if invoice.status != InvoiceStatus::Pending {
+            panic!("Invoice must be Pending before financing");
+        }
+        invoice.status = InvoiceStatus::Financed;
+        invoices.set(id, invoice.clone());
+        save_invoices(&env, &invoices);
+        env.events().publish(
+            (symbol_short!("inv_sts"), invoice.id.clone()),
+            InvoiceStatus::Financed,
+        );
+        invoice
+    }
+
+    /// System transition: Financed -> Financed (partial) / Repaid (full) on
+    /// repayment. Only the registered repayment contract may call this,
+    /// authorized via implicit contract-invoker auth.
+    pub fn repayment_marks_invoice_repaid(env: Env, id: Symbol, fully_repaid: bool) -> Invoice {
+        let repayment: Address = env
+            .storage()
+            .instance()
+            .get(&symbol_short!("repayment"))
+            .unwrap_or_else(|| panic!("Repayment contract not configured"));
+        repayment.require_auth();
+
+        let mut invoices = load_invoices(&env);
+        let mut invoice = invoices
+            .get(id.clone())
+            .unwrap_or_else(|| panic!("Invoice not found"));
+        if invoice.status != InvoiceStatus::Financed {
+            panic!("Invoice must be Financed before repayment");
         }
         invoice.status = if fully_repaid {
             InvoiceStatus::Repaid

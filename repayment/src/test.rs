@@ -40,6 +40,11 @@ fn setup_contracts<'a>(
     // Register repayment contract with financing (for authorized callbacks)
     fin.set_repayment_contract(admin, &repayment_id);
 
+    // Register both contracts as trusted callers on the registry so the
+    // cross-contract status transitions (accept + repay) are allowed.
+    reg.set_repayment_contract(admin, &repayment_id);
+    reg.set_financing_contract(admin, &financing_id);
+
     (reg, fin, rep)
 }
 
@@ -97,6 +102,8 @@ fn test_repay_invoice_partial_then_full() {
     let rep = super::RepaymentContractClient::new(&env, &repayment_id);
     rep.initialize(&admin, &registry_id, &financing_id, &token_id);
     fin.set_repayment_contract(&admin, &repayment_id);
+    reg.set_repayment_contract(&admin, &repayment_id);
+    reg.set_financing_contract(&admin, &financing_id);
 
     // Register invoice
     reg.register_invoice(
@@ -179,6 +186,8 @@ fn test_repay_invoice_overpayment_panics() {
     let rep = super::RepaymentContractClient::new(&env, &repayment_id);
     rep.initialize(&admin, &registry_id, &financing_id, &token_id);
     fin.set_repayment_contract(&admin, &repayment_id);
+    reg.set_repayment_contract(&admin, &repayment_id);
+    reg.set_financing_contract(&admin, &financing_id);
 
     reg.register_invoice(
         &symbol_short!("inv_op"),
@@ -273,6 +282,8 @@ fn test_repay_zero_amount_panics() {
     let rep = super::RepaymentContractClient::new(&env, &repayment_id);
     rep.initialize(&admin, &registry_id, &financing_id, &token_id);
     fin.set_repayment_contract(&admin, &repayment_id);
+    reg.set_repayment_contract(&admin, &repayment_id);
+    reg.set_financing_contract(&admin, &financing_id);
 
     reg.register_invoice(
         &symbol_short!("inv_za"),
@@ -330,6 +341,8 @@ fn test_reclaim_invoice_after_grace_period() {
     let rep = super::RepaymentContractClient::new(&env, &repayment_id);
     rep.initialize(&admin, &registry_id, &financing_id, &token_id);
     fin.set_repayment_contract(&admin, &repayment_id);
+    reg.set_repayment_contract(&admin, &repayment_id);
+    reg.set_financing_contract(&admin, &financing_id);
 
     reg.register_invoice(
         &invoice_id,
@@ -393,6 +406,8 @@ fn test_reclaim_before_grace_period_panics() {
     let rep = super::RepaymentContractClient::new(&env, &repayment_id);
     rep.initialize(&admin, &registry_id, &financing_id, &token_id);
     fin.set_repayment_contract(&admin, &repayment_id);
+    reg.set_repayment_contract(&admin, &repayment_id);
+    reg.set_financing_contract(&admin, &financing_id);
 
     reg.register_invoice(
         &invoice_id,
@@ -445,6 +460,8 @@ fn test_reclaim_on_non_overdue_panics() {
     let rep = super::RepaymentContractClient::new(&env, &repayment_id);
     rep.initialize(&admin, &registry_id, &financing_id, &token_id);
     fin.set_repayment_contract(&admin, &repayment_id);
+    reg.set_repayment_contract(&admin, &repayment_id);
+    reg.set_financing_contract(&admin, &financing_id);
 
     reg.register_invoice(
         &symbol_short!("inv_nr"),
@@ -494,6 +511,8 @@ fn test_calculate_total_due() {
     let rep = super::RepaymentContractClient::new(&env, &repayment_id);
     rep.initialize(&admin, &registry_id, &financing_id, &token_id);
     fin.set_repayment_contract(&admin, &repayment_id);
+    reg.set_repayment_contract(&admin, &repayment_id);
+    reg.set_financing_contract(&admin, &financing_id);
 
     reg.register_invoice(
         &symbol_short!("inv_td"),
@@ -546,6 +565,8 @@ fn test_calculate_total_due_after_partial() {
     let rep = super::RepaymentContractClient::new(&env, &repayment_id);
     rep.initialize(&admin, &registry_id, &financing_id, &token_id);
     fin.set_repayment_contract(&admin, &repayment_id);
+    reg.set_repayment_contract(&admin, &repayment_id);
+    reg.set_financing_contract(&admin, &financing_id);
 
     reg.register_invoice(
         &symbol_short!("inv_tp"),
@@ -601,4 +622,60 @@ fn test_get_duration_limits() {
     let (min, max) = rep.get_duration_limits();
     assert_eq!(min, invofi_common::MIN_OFFER_DURATION_SECS);
     assert_eq!(max, invofi_common::MAX_OFFER_DURATION_SECS);
+}
+
+// ─── Task 4A: emergency pause / circuit breaker ──────────────────────────────
+
+#[test]
+#[should_panic(expected = "Contract is paused")]
+fn test_pause_blocks_repay_invoice() {
+    let env = Env::default();
+    env.mock_all_auths();
+    env.ledger().set_timestamp(1_000_000);
+
+    let admin = Address::generate(&env);
+    let originator = Address::generate(&env);
+    let lender = Address::generate(&env);
+    let invoice_id = symbol_short!("invp2");
+    let offer_id = symbol_short!("offp2");
+    let amount: i128 = 1_000_000_000;
+
+    let financing_id = env.register(FinancingContract, ());
+    let token_id = setup_token(&env, &financing_id, &lender, amount);
+
+    let registry_id = env.register(RegistryContract, ());
+    let reg = invofi_registry::RegistryContractClient::new(&env, &registry_id);
+    reg.initialize(&admin);
+    reg.set_financing_contract(&admin, &financing_id);
+
+    let fin = invofi_financing::FinancingContractClient::new(&env, &financing_id);
+    fin.initialize(&admin, &registry_id, &token_id);
+
+    let repayment_id = env.register(RepaymentContract, ());
+    let rep = super::RepaymentContractClient::new(&env, &repayment_id);
+    rep.initialize(&admin, &registry_id, &financing_id, &token_id);
+
+    fin.set_repayment_contract(&admin, &repayment_id);
+    reg.set_repayment_contract(&admin, &repayment_id);
+
+    reg.register_invoice(
+        &invoice_id,
+        &originator,
+        &amount,
+        &symbol_short!("USDC"),
+        &3_000_000u64,
+    );
+    fin.create_offer(
+        &offer_id,
+        &invoice_id,
+        &lender,
+        &amount,
+        &symbol_short!("USDC"),
+        &500u32,
+        &2_592_000u64,
+    );
+    fin.accept_offer(&offer_id, &originator);
+
+    rep.pause(&admin);
+    rep.repay_invoice(&invoice_id, &offer_id, &originator, &amount);
 }

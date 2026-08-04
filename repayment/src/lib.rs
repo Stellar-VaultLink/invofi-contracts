@@ -193,9 +193,10 @@ impl RepaymentContract {
         financing_client.update_lender_stats_repaid(&offer.lender, &fully_repaid);
         financing_client.update_stats_repaid(&amount, &fee_amount);
 
-        // Cross-contract: update invoice status in registry
+        // Cross-contract: mark the invoice repaid in the registry via the
+        // system transition (the repayment contract is the authorized caller).
         let updated_invoice =
-            registry_client.set_invoice_repaid_status(&invoice_id, &repayer, &fully_repaid);
+            registry_client.repayment_marks_invoice_repaid(&invoice_id, &fully_repaid);
 
         env.events().publish(
             (symbol_short!("inv_rep"), invoice_id),

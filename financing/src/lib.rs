@@ -370,13 +370,11 @@ impl FinancingContract {
         offers.set(offer_id, offer.clone());
         save_offers(&env, &offers);
 
-        // Cross-contract: update invoice status in registry
+        // Cross-contract: mark the invoice Financed in the registry via the
+        // system transition (the financing contract is the authorized caller;
+        // user auth does not propagate across contract boundaries in Soroban).
         invoice.status = InvoiceStatus::Financed;
-        registry_client.update_invoice_status(
-            &offer.invoice_id,
-            &invoice.originator,
-            &InvoiceStatus::Financed,
-        );
+        registry_client.financing_marks_invoice_financed(&offer.invoice_id);
 
         let mut s = load_stats(&env);
         s.total_financed += offer.amount;

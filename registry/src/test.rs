@@ -988,3 +988,51 @@ fn test_raise_dispute_on_pending_panics() {
 
     client.raise_dispute(&symbol_short!("inv_dsp2"), &originator);
 }
+
+// ─── Cross-contract caller guards (system status transitions) ────────────────
+
+#[test]
+#[should_panic(expected = "Financing contract not configured")]
+fn test_financing_transition_without_registration_panics() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let contract_id = env.register(RegistryContract, ());
+    let client = super::RegistryContractClient::new(&env, &contract_id);
+
+    let admin = Address::generate(&env);
+    let originator = Address::generate(&env);
+    client.initialize(&admin);
+    client.register_invoice(
+        &symbol_short!("inv001"),
+        &originator,
+        &1_000_000_000i128,
+        &symbol_short!("USDC"),
+        &1_735_689_600u64,
+    );
+
+    // No financing contract registered -> the system transition must panic.
+    client.financing_marks_invoice_financed(&symbol_short!("inv001"));
+}
+
+#[test]
+#[should_panic(expected = "Repayment contract not configured")]
+fn test_repayment_transition_without_registration_panics() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let contract_id = env.register(RegistryContract, ());
+    let client = super::RegistryContractClient::new(&env, &contract_id);
+
+    let admin = Address::generate(&env);
+    let originator = Address::generate(&env);
+    client.initialize(&admin);
+    client.register_invoice(
+        &symbol_short!("inv001"),
+        &originator,
+        &1_000_000_000i128,
+        &symbol_short!("USDC"),
+        &1_735_689_600u64,
+    );
+
+    // No repayment contract registered -> the system transition must panic.
+    client.repayment_marks_invoice_repaid(&symbol_short!("inv001"), &true);
+}

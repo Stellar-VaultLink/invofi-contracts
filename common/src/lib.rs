@@ -199,6 +199,16 @@ pub trait RegistryInterface {
     /// Mark a Financed invoice as Overdue. Callable by anyone after due_date.
     fn mark_invoice_overdue(env: Env, id: Symbol) -> Invoice;
 
+    /// System transition: Pending -> Financed, called by the financing
+    /// contract on offer acceptance. Authorized via implicit contract-invoker
+    /// auth on the registered financing address.
+    fn financing_marks_invoice_financed(env: Env, id: Symbol) -> Invoice;
+
+    /// System transition: Financed -> Financed (partial) / Repaid (full),
+    /// called by the repayment contract. Authorized via implicit
+    /// contract-invoker auth on the registered repayment address.
+    fn repayment_marks_invoice_repaid(env: Env, id: Symbol, fully_repaid: bool) -> Invoice;
+
     /// Transition a Financed invoice to Repaid or back to Financed (partial).
     /// Requires the repayer's auth. Only works on Financed invoices.
     fn set_invoice_repaid_status(

@@ -29,6 +29,10 @@ fn setup_contracts<'a>(
     let financing_client = super::FinancingContractClient::new(env, &financing_id);
     financing_client.initialize(admin, &registry_id, token);
 
+    // Register financing as a trusted caller on the registry so its
+    // cross-contract status transition (Pending -> Financed) is allowed.
+    registry_client.set_financing_contract(admin, &financing_id);
+
     (registry_client, financing_client)
 }
 
@@ -305,6 +309,7 @@ fn test_accept_offer() {
     let registry_id = env.register(RegistryContract, ());
     let reg = invofi_registry::RegistryContractClient::new(&env, &registry_id);
     reg.initialize(&admin);
+    reg.set_financing_contract(&admin, &financing_id);
 
     let fin = super::FinancingContractClient::new(&env, &financing_id);
     fin.initialize(&admin, &registry_id, &token_id);
@@ -833,4 +838,40 @@ fn test_get_offer_duration_limits() {
     let (min, max) = fin.get_offer_duration_limits();
     assert_eq!(min, invofi_common::MIN_OFFER_DURATION_SECS);
     assert_eq!(max, invofi_common::MAX_OFFER_DURATION_SECS);
+}
+
+// ─── Task 4A: emergency pause / circuit breaker ──────────────────────────────
+
+#[test]
+#[should_panic(expected = "Contract is paused")]
+fn test_pause_blocks_create_offer() {
+    let env = Env::default();
+    env.mock_all_auths();
+    env.ledger().set_timestamp(1_000_000);
+
+    let admin = Address::generate(&env);
+    let token = Address::generate(&env);
+    let (reg, fin) = setup_contracts(&env, &admin, &token);
+
+    let originator = Address::generate(&env);
+    let lender = Address::generate(&env);
+    let invoice_id = symbol_short!("invp1");
+    reg.register_invoice(
+        &invoice_id,
+        &originator,
+        &2_000_000_000i128,
+        &symbol_short!("USDC"),
+        &3_000_000u64,
+    );
+
+    fin.pause(&admin);
+    fin.create_offer(
+        &symbol_short!("offp1"),
+        &invoice_id,
+        &lender,
+        &2_000_000_000i128,
+        &symbol_short!("USDC"),
+        &500u32,
+        &2_592_000u64,
+    );
 }

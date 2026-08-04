@@ -1,4 +1,4 @@
-name: Deploy Contract to Testnet
+name: Deploy Contracts to Testnet
 
 on:
   workflow_dispatch:
@@ -13,11 +13,8 @@ on:
 
 jobs:
   deploy:
-    name: Build & Deploy Soroban Contract
+    name: Build & Deploy Soroban Contracts
     runs-on: ubuntu-latest
-    defaults:
-      run:
-        working-directory: invofi/apps/contracts
 
     steps:
       - uses: actions/checkout@v7
@@ -27,8 +24,6 @@ jobs:
           targets: wasm32v1-none,wasm32-unknown-unknown
 
       - uses: Swatinem/rust-cache@v2
-        with:
-          workspaces: invofi/apps/contracts
 
       - name: Install native build dependencies
         run: sudo apt-get update && sudo apt-get install -y libdbus-1-dev libudev-dev pkg-config
@@ -40,13 +35,11 @@ jobs:
         env:
           DEPLOYER_SECRET_KEY: ${{ secrets.STELLAR_DEPLOYER_SECRET_KEY }}
         run: |
-          stellar --version
           if [ -z "$DEPLOYER_SECRET_KEY" ]; then
             echo "::notice::STELLAR_DEPLOYER_SECRET_KEY not set — generating a fresh keypair for this run."
             stellar keys generate invofi-deployer --network ${{ inputs.network }}
           else
-            # --secret-key is an interactive prompt flag; CI must pass the key via env var
-            SOROBAN_SECRET_KEY="$DEPLOYER_SECRET_KEY" stellar keys add invofi-deployer
+            stellar keys add invofi-deployer --secret-key "$DEPLOYER_SECRET_KEY"
           fi
 
       - name: Fund deployer via Friendbot
@@ -55,27 +48,51 @@ jobs:
       - name: Build WASM
         run: stellar contract build
 
-      - name: Deploy contract
+      - name: Deploy registry + financing + repayment
         id: deploy
         run: |
-          WASM="target/wasm32v1-none/release/invofi_invoice_registry.wasm"
-          CONTRACT_ID=$(stellar contract deploy \
-            --wasm "$WASM" \
-            --source invofi-deployer \
-            --network ${{ inputs.network }})
-          echo "contract_id=$CONTRACT_ID" >> "$GITHUB_OUTPUT"
-          echo "CONTRACT_ID=$CONTRACT_ID" >> "$GITHUB_STEP_SUMMARY"
+          ADMIN_PUBLIC=$(stellar keys address invofi-deployer --network ${{ inputs.network }})
+          echo "admin_public=$ADMIN_PUBLIC" >> "$GITHUB_OUTPUT"
 
-      - name: Print instructions
+          REGISTRY_ID=$(stellar contract deploy --wasm target/wasm32v1-none/release/invofi_registry.wasm --source invofi-deployer --network ${{ inputs.network }})
+          FINANCING_ID=$(stellar contract deploy --wasm target/wasm32v1-none/release/invofi_financing.wasm --source invofi-deployer --network ${{ inputs.network }})
+          REPAYMENT_ID=$(stellar contract deploy --wasm target/wasm32v1-none/release/invofi_repayment.wasm --source invofi-deployer --network ${{ inputs.network }})
+
+          echo "registry_id=$REGISTRY_ID" >> "$GITHUB_OUTPUT"
+          echo "financing_id=$FINANCING_ID" >> "$GITHUB_OUTPUT"
+          echo "repayment_id=$REPAYMENT_ID" >> "$GITHUB_OUTPUT"
+
+          cat >> "$GITHUB_STEP_SUMMARY" <<OUTEOF
+          ## Deployed contracts (testnet)
+
+          | Contract | ID |
+          | --- | --- |
+          | registry | \`$REGISTRY_ID\` |
+          | financing | \`$FINANCING_ID\` |
+          | repayment | \`$REPAYMENT_ID\` |
+          | admin | \`$ADMIN_PUBLIC\` |
+
+          Set these in Vercel:
+          - NEXT_PUBLIC_REGISTRY_CONTRACT_ID
+          - NEXT_PUBLIC_FINANCING_CONTRACT_ID
+          - NEXT_PUBLIC_REPAYMENT_CONTRACT_ID
+          OUTEOF
+
+      - name: Initialize contracts and wire cross-contract callers
+        env:
+          REGISTRY_ID: ${{ steps.deploy.outputs.registry_id }}
+          FINANCING_ID: ${{ steps.deploy.outputs.financing_id }}
+          REPAYMENT_ID: ${{ steps.deploy.outputs.repayment_id }}
         run: |
-          echo "## Contract deployed successfully" >> "$GITHUB_STEP_SUMMARY"
-          echo "" >> "$GITHUB_STEP_SUMMARY"
-          echo "**CONTRACT_ID:** \`${{ steps.deploy.outputs.contract_id }}\`" >> "$GITHUB_STEP_SUMMARY"
-          echo "" >> "$GITHUB_STEP_SUMMARY"
-          echo "### Next steps" >> "$GITHUB_STEP_SUMMARY"
-          echo "1. Go to your Vercel project → Settings → Environment Variables" >> "$GITHUB_STEP_SUMMARY"
-          echo "2. Set \`NEXT_PUBLIC_CONTRACT_ID\` = \`${{ steps.deploy.outputs.contract_id }}\`" >> "$GITHUB_STEP_SUMMARY"
-          echo "3. Redeploy (or push a new commit) to pick up the new value." >> "$GITHUB_STEP_SUMMARY"
-          echo "" >> "$GITHUB_STEP_SUMMARY"
-          echo "> The deployer's public key can be retrieved with:" >> "$GITHUB_STEP_SUMMARY"
-          echo "> \`stellar keys address invofi-deployer\`" >> "$GITHUB_STEP_SUMMARY"
+          ADMIN_PUBLIC=${{ steps.deploy.outputs.admin_public }}
+          XLM_TOKEN=$(stellar contract id asset --asset native --network ${{ inputs.network }})
+          USDC_TOKEN=$(stellar contract id asset --asset USDC:GBBD47IF6LWK7P7MDEVSCWR7DPUWV3NY3DTQEVFL4NAT4AQH3ZLLFLA5 --network ${{ inputs.network }})
+
+          stellar contract invoke --id "$REGISTRY_ID" --source invofi-deployer --network ${{ inputs.network }} -- initialize --admin "$ADMIN_PUBLIC"
+          stellar contract invoke --id "$FINANCING_ID" --source invofi-deployer --network ${{ inputs.network }} -- initialize --admin "$ADMIN_PUBLIC" --registry "$REGISTRY_ID" --token "$XLM_TOKEN"
+          stellar contract invoke --id "$REPAYMENT_ID" --source invofi-deployer --network ${{ inputs.network }} -- initialize --admin "$ADMIN_PUBLIC" --registry "$REGISTRY_ID" --financing "$FINANCING_ID" --token "$XLM_TOKEN"
+
+          stellar contract invoke --id "$REGISTRY_ID" --source invofi-deployer --network ${{ inputs.network }} -- set_financing_contract --admin "$ADMIN_PUBLIC" --financing "$FINANCING_ID"
+          stellar contract invoke --id "$REGISTRY_ID" --source invofi-deployer --network ${{ inputs.network }} -- set_repayment_contract --admin "$ADMIN_PUBLIC" --repayment "$REPAYMENT_ID"
+          stellar contract invoke --id "$FINANCING_ID" --source invofi-deployer --network ${{ inputs.network }} -- set_repayment_contract --admin "$ADMIN_PUBLIC" --repayment "$REPAYMENT_ID"
+          stellar contract invoke --id "$FINANCING_ID" --source invofi-deployer --network ${{ inputs.network }} -- register_currency --admin "$ADMIN_PUBLIC" --currency USDC --token_addr "$USDC_TOKEN"
