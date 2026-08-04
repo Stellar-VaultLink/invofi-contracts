@@ -39,7 +39,8 @@ jobs:
             echo "::notice::STELLAR_DEPLOYER_SECRET_KEY not set — generating a fresh keypair for this run."
             stellar keys generate invofi-deployer --network ${{ inputs.network }}
           else
-            stellar keys add invofi-deployer --secret-key "$DEPLOYER_SECRET_KEY"
+            # --secret-key is deprecated and prompts interactively; pipe the key in.
+            printf '%s\n' "$DEPLOYER_SECRET_KEY" | stellar keys add invofi-deployer --secret-key
           fi
 
       - name: Fund deployer via Friendbot
