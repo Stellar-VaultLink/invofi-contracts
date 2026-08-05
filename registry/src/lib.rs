@@ -436,6 +436,36 @@ impl RegistryContract {
 
     // ── Overdue marking ─────────────────────────────────────────────────────
 
+    /// System transition: Overdue -> Defaulted on lender reclaim.
+    /// Only the registered repayment contract may call this, authorized via
+    /// implicit contract-invoker auth. Marks the invoice as a realized
+    /// credit loss, which is what triggers the insurance payout hook and the
+    /// originator's reputation default record.
+    pub fn repayment_marks_defaulted(env: Env, id: Symbol) -> Invoice {
+        let repayment: Address = env
+            .storage()
+            .instance()
+            .get(&symbol_short!("repayment"))
+            .unwrap_or_else(|| panic!("Repayment contract not configured"));
+        repayment.require_auth();
+
+        let mut invoices = load_invoices(&env);
+        let mut invoice = invoices
+            .get(id.clone())
+            .unwrap_or_else(|| panic!("Invoice not found"));
+        if invoice.status != InvoiceStatus::Overdue {
+            panic!("Invoice must be Overdue before defaulting");
+        }
+        invoice.status = InvoiceStatus::Defaulted;
+        invoices.set(id, invoice.clone());
+        save_invoices(&env, &invoices);
+        env.events().publish(
+            (symbol_short!("inv_def"), invoice.id.clone()),
+            invoice.originator.clone(),
+        );
+        invoice
+    }
+
     /// Mark a Financed invoice as Overdue. Can be called by anyone after
     /// due_date has passed. This is a public status transition that doesn't
     /// require originator auth — the time-based condition is sufficient.

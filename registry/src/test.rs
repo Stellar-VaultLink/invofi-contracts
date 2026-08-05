@@ -1036,3 +1036,74 @@ fn test_repayment_transition_without_registration_panics() {
     // No repayment contract registered -> the system transition must panic.
     client.repayment_marks_invoice_repaid(&symbol_short!("inv001"), &true);
 }
+
+// ─── Defaulted transition tests (Task 10) ───────────────────────────────────
+
+#[test]
+fn test_repayment_marks_defaulted_transition() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let contract_id = env.register(RegistryContract, ());
+    let client = super::RegistryContractClient::new(&env, &contract_id);
+
+    let admin = Address::generate(&env);
+    let originator = Address::generate(&env);
+    let repayment = Address::generate(&env);
+    let invoice_id = symbol_short!("inv_df1");
+    let due_date: u64 = 1_735_689_600;
+
+    client.initialize(&admin);
+    client.set_repayment_contract(&admin, &repayment);
+
+    client.register_invoice(
+        &invoice_id,
+        &originator,
+        &1_000_000_000i128,
+        &symbol_short!("USDC"),
+        &due_date,
+    );
+    // Financed via the originator escape hatch, then past due.
+    client.update_invoice_status(&invoice_id, &originator, &InvoiceStatus::Financed);
+    env.ledger().set_timestamp(due_date + 1);
+    client.mark_invoice_overdue(&invoice_id);
+    assert_eq!(
+        client.get_invoice(&invoice_id).status,
+        InvoiceStatus::Overdue
+    );
+
+    let invoice = client.repayment_marks_defaulted(&invoice_id);
+    assert_eq!(invoice.status, InvoiceStatus::Defaulted);
+    assert_eq!(
+        client.get_invoice(&invoice_id).status,
+        InvoiceStatus::Defaulted
+    );
+}
+
+#[test]
+#[should_panic(expected = "Invoice must be Overdue before defaulting")]
+fn test_repayment_marks_defaulted_requires_overdue() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let contract_id = env.register(RegistryContract, ());
+    let client = super::RegistryContractClient::new(&env, &contract_id);
+
+    let admin = Address::generate(&env);
+    let originator = Address::generate(&env);
+    let repayment = Address::generate(&env);
+    let invoice_id = symbol_short!("inv_df2");
+    let due_date: u64 = 1_735_689_600;
+
+    client.initialize(&admin);
+    client.set_repayment_contract(&admin, &repayment);
+
+    client.register_invoice(
+        &invoice_id,
+        &originator,
+        &1_000_000_000i128,
+        &symbol_short!("USDC"),
+        &due_date,
+    );
+    // Still Financed (never marked overdue) — default must panic.
+    client.update_invoice_status(&invoice_id, &originator, &InvoiceStatus::Financed);
+    client.repayment_marks_defaulted(&invoice_id);
+}

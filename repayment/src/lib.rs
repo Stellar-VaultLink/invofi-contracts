@@ -3,9 +3,9 @@
 use soroban_sdk::{contract, contractimpl, symbol_short, token, Address, Env, Symbol};
 
 use invofi_common::{
-    assert_not_paused, resolve_token, FinancingClient, FinancingOffer, Invoice, InvoiceStatus,
-    OfferStatus, RegistryClient, GRACE_PERIOD_SECS, MAX_OFFER_DURATION_SECS,
-    MIN_OFFER_DURATION_SECS,
+    assert_not_paused, resolve_token, FinancingClient, FinancingOffer, InsuranceClient, Invoice,
+    InvoiceStatus, OfferStatus, RegistryClient, ReputationClient, GRACE_PERIOD_SECS,
+    MAX_OFFER_DURATION_SECS, MIN_OFFER_DURATION_SECS,
 };
 
 // ─── Contract ────────────────────────────────────────────────────────────────
@@ -50,6 +50,50 @@ impl RepaymentContract {
             .instance()
             .get(&symbol_short!("admin"))
             .unwrap_or_else(|| panic!("Not initialized"))
+    }
+
+    /// Register the insurance contract address. Admin only. When configured,
+    /// reclaim (default) triggers a pool payout to the lender from the
+    /// insurance pool (Task 10).
+    pub fn set_insurance(env: Env, admin: Address, insurance: Address) {
+        admin.require_auth();
+        let current: Address = env
+            .storage()
+            .instance()
+            .get(&symbol_short!("admin"))
+            .unwrap_or_else(|| panic!("Not initialized"));
+        if current != admin {
+            panic!("Only the current admin can set the insurance contract");
+        }
+        env.storage()
+            .instance()
+            .set(&symbol_short!("insadd"), &insurance);
+    }
+
+    pub fn get_insurance(env: Env) -> Option<Address> {
+        env.storage().instance().get(&symbol_short!("insadd"))
+    }
+
+    /// Register the reputation contract address. Admin only. When configured,
+    /// full repayments and defaults update the originator's reputation score
+    /// (Task 11).
+    pub fn set_reputation(env: Env, admin: Address, reputation: Address) {
+        admin.require_auth();
+        let current: Address = env
+            .storage()
+            .instance()
+            .get(&symbol_short!("admin"))
+            .unwrap_or_else(|| panic!("Not initialized"));
+        if current != admin {
+            panic!("Only the current admin can set the reputation contract");
+        }
+        env.storage()
+            .instance()
+            .set(&symbol_short!("repadd"), &reputation);
+    }
+
+    pub fn get_reputation(env: Env) -> Option<Address> {
+        env.storage().instance().get(&symbol_short!("repadd"))
     }
 
     /// Transfers admin rights. Only current admin.
@@ -198,6 +242,18 @@ impl RepaymentContract {
         let updated_invoice =
             registry_client.repayment_marks_invoice_repaid(&invoice_id, &fully_repaid);
 
+        // Reputation (Task 11): record a successful outcome on full repayment.
+        // Only when a reputation contract is configured — deployments without
+        // one behave exactly as before.
+        if fully_repaid {
+            let reputation_opt: Option<Address> =
+                env.storage().instance().get(&symbol_short!("repadd"));
+            if let Some(reputation_addr) = reputation_opt {
+                let reputation_client = ReputationClient::new(&env, &reputation_addr);
+                reputation_client.record_outcome(&invoice.originator, &0);
+            }
+        }
+
         env.events().publish(
             (symbol_short!("inv_rep"), invoice_id),
             (offer_id, amount, fully_repaid),
@@ -273,9 +329,36 @@ impl RepaymentContract {
 
         offer.status = OfferStatus::Defaulted;
 
+        // Task 10: transition the invoice Overdue -> Defaulted in the registry
+        // (the repayment contract is the authorized caller). This is the
+        // protocol's realized-credit-loss signal.
+        registry_client.repayment_marks_defaulted(&invoice_id);
+
+        // Task 10: insurance payout hook. The lender's outstanding exposure is
+        // principal + yield - already repaid. The pool pays up to its
+        // available balance; pay_out returns what was actually paid (0 when
+        // the pool is empty). Skipped entirely when no insurance contract is
+        // configured.
+        let yield_amount = offer.amount * (offer.interest_rate as i128) / 10_000;
+        let remaining_due = (offer.amount + yield_amount - offer.amount_repaid).max(0);
+        let mut payout: i128 = 0;
+        let insurance_opt: Option<Address> = env.storage().instance().get(&symbol_short!("insadd"));
+        if let Some(insurance_addr) = insurance_opt {
+            let insurance_client = InsuranceClient::new(&env, &insurance_addr);
+            payout = insurance_client.pay_out(&offer.lender, &remaining_due);
+        }
+
+        // Task 11: reputation hook — record the originator's default.
+        let reputation_opt: Option<Address> =
+            env.storage().instance().get(&symbol_short!("repadd"));
+        if let Some(reputation_addr) = reputation_opt {
+            let reputation_client = ReputationClient::new(&env, &reputation_addr);
+            reputation_client.record_outcome(&invoice.originator, &1);
+        }
+
         env.events().publish(
             (symbol_short!("off_def"), offer.id.clone()),
-            (offer.invoice_id.clone(), offer.lender.clone()),
+            (offer.invoice_id.clone(), offer.lender.clone(), payout),
         );
         offer
     }

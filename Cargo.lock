@@ -785,7 +785,17 @@ version = "0.5.0"
 dependencies = [
  "invofi-common",
  "invofi-financing",
+ "invofi-insurance",
  "invofi-registry",
+ "invofi-reputation",
+ "soroban-sdk",
+]
+
+[[package]]
+name = "invofi-reputation"
+version = "0.1.0"
+dependencies = [
+ "invofi-common",
  "soroban-sdk",
 ]
 

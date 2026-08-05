@@ -1,12 +1,16 @@
 #![no_std]
 
-//! Insurance pool contract (Task 9).
+//! Insurance pool contract (Tasks 9 + 10).
 //!
 //! A flat-pool coverage reserve: stakers deposit the staking token and can
-//! withdraw anytime. Payout logic (Task 10) and yield-rate calculation are
-//! intentionally out of scope — this contract owns only stake accounting.
+//! withdraw anytime. When an invoice defaults, the repayment contract (the
+//! configured payout caller) calls `pay_out`, which compensates the lender
+//! from the pool up to the pool's available balance and reduces every
+//! staker's claim pro-rata so accounting stays exactly consistent (unstake
+//! can never exceed actual pool funds). Yield-rate calculation stays out of
+//! scope.
 
-use soroban_sdk::{contract, contractimpl, symbol_short, token, Address, Env, Map};
+use soroban_sdk::{contract, contractimpl, symbol_short, token, Address, Env, Map, Vec};
 
 use invofi_common::assert_not_paused;
 
@@ -113,6 +117,28 @@ impl InsuranceContract {
         load_token(&env)
     }
 
+    /// Configure the address allowed to trigger payouts — this is the
+    /// repayment contract. Admin only. Payouts are disabled until a caller
+    /// is configured (fail-closed).
+    pub fn set_payout_caller(env: Env, admin: Address, payout_caller: Address) {
+        admin.require_auth();
+        let current: Address = env
+            .storage()
+            .instance()
+            .get(&symbol_short!("admin"))
+            .unwrap_or_else(|| panic!("Not initialized"));
+        if current != admin {
+            panic!("Only the current admin can set the payout caller");
+        }
+        env.storage()
+            .instance()
+            .set(&symbol_short!("paycall"), &payout_caller);
+    }
+
+    pub fn get_payout_caller(env: Env) -> Option<Address> {
+        env.storage().instance().get(&symbol_short!("paycall"))
+    }
+
     // ── Pause / unpause (Task 4A circuit breaker) ───────────────────────────
 
     pub fn pause(env: Env, admin: Address) {
@@ -214,6 +240,76 @@ impl InsuranceContract {
 
         env.events()
             .publish((symbol_short!("pool_un"), staker.clone()), amount);
+    }
+
+    // ── Payout on default (Task 10) ────────────────────────────────────────
+
+    /// Pay `amount` to `beneficiary` from the pool, capped at the pool's
+    /// available balance. Only callable by the configured payout caller (the
+    /// repayment contract), authorized via implicit contract-invoker auth.
+    ///
+    /// Every staker's claim is reduced pro-rata by the payout ratio, and the
+    /// pool total drops by exactly the amount paid — so get_stake sums always
+    /// equal get_pool_total and unstake can never overdraw the pool. The
+    /// payout itself is capped at the pool total (pool-depleted case pays
+    /// everything available, then returns 0 on subsequent claims).
+    ///
+    /// Returns the amount actually paid (may be less than `amount` when the
+    /// pool is short).
+    pub fn pay_out(env: Env, beneficiary: Address, amount: i128) -> i128 {
+        assert_not_paused(&env);
+        let payout_caller: Address = env
+            .storage()
+            .instance()
+            .get(&symbol_short!("paycall"))
+            .unwrap_or_else(|| panic!("No payout caller configured"));
+        payout_caller.require_auth();
+        assert!(amount > 0, "payout amount must be greater than zero");
+
+        let pool_total = load_pool_total(&env);
+        let payout = amount.min(pool_total);
+        if payout <= 0 {
+            // Pool depleted — nothing to pay out.
+            return 0;
+        }
+
+        // Pro-rata reduction of staker balances. Iterates a key snapshot so
+        // the reduction math is deterministic; the final staker absorbs any
+        // integer-division remainder so reductions sum exactly to `payout`.
+        let mut stakes = load_stakes(&env);
+        let keys: Vec<Address> = stakes.keys();
+        let n = keys.len() as usize;
+        if n > 0 {
+            let mut reductions: i128 = 0;
+            for (i, key) in keys.iter().enumerate() {
+                let balance = stakes.get(key.clone()).unwrap_or(0);
+                let reduction = if i == n - 1 {
+                    payout - reductions
+                } else {
+                    (balance * payout / pool_total).min(payout - reductions)
+                };
+                let new_balance = balance - reduction;
+                if new_balance == 0 {
+                    stakes.remove(key.clone());
+                } else {
+                    stakes.set(key.clone(), new_balance);
+                }
+                reductions += reduction;
+            }
+            save_stakes(&env, &stakes);
+        }
+        save_pool_total(&env, pool_total - payout);
+
+        let token_addr = load_token(&env);
+        token::TokenClient::new(&env, &token_addr).transfer(
+            &env.current_contract_address(),
+            &beneficiary,
+            &payout,
+        );
+
+        env.events()
+            .publish((symbol_short!("pool_pay"), beneficiary.clone()), payout);
+        payout
     }
 
     // ── Query helpers ───────────────────────────────────────────────────────

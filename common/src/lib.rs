@@ -60,6 +60,7 @@ pub enum InvoiceStatus {
     Overdue = 3,
     Cancelled = 4,
     Disputed = 5,
+    Defaulted = 6,
 }
 
 /// A financing offer submitted by a lender against an invoice.
@@ -209,6 +210,11 @@ pub trait RegistryInterface {
     /// contract-invoker auth on the registered repayment address.
     fn repayment_marks_invoice_repaid(env: Env, id: Symbol, fully_repaid: bool) -> Invoice;
 
+    /// System transition: Overdue -> Defaulted, called by the repayment
+    /// contract when a lender reclaims (declares a default). Authorized via
+    /// implicit contract-invoker auth on the registered repayment address.
+    fn repayment_marks_defaulted(env: Env, id: Symbol) -> Invoice;
+
     /// Transition a Financed invoice to Repaid or back to Financed (partial).
     /// Requires the repayer's auth. Only works on Financed invoices.
     fn set_invoice_repaid_status(
@@ -256,4 +262,41 @@ pub trait FinancingInterface {
 
     /// Read the protocol fee in basis points.
     fn get_fee_bps(env: Env) -> u32;
+}
+
+// ─── Insurance Cross-Contract Interface ──────────────────────────────────────
+// Repayment calls this method on the Insurance contract when an invoice
+// defaults. The insurance contract stores the trusted payout caller (the
+// repayment contract) and requires its auth via implicit contract-invoker
+// auth, so pay_out can never be invoked by an arbitrary address.
+
+/// Client trait for the Insurance contract, used by Repayment for
+/// cross-contract payout calls. `#[contractclient]` generates a type-safe
+/// client from this trait.
+#[contractclient(name = "InsuranceClient")]
+pub trait InsuranceInterface {
+    /// Pay `amount` to `beneficiary` from the insurance pool, capped at the
+    /// pool's available balance. Only callable by the configured payout
+    /// caller (the repayment contract). Returns the amount actually paid.
+    fn pay_out(env: Env, beneficiary: Address, amount: i128) -> i128;
+}
+
+// ─── Reputation Cross-Contract Interface ─────────────────────────────────────
+// Repayment records an originator's outcome on the Reputation contract after
+// every fully-repaid invoice (success) and every default. The reputation
+// contract stores the trusted recorder (the repayment contract) and requires
+// its auth via implicit contract-invoker auth.
+
+/// Client trait for the Reputation contract, used by Repayment for
+/// cross-contract outcome recording. `#[contractclient]` generates a
+/// type-safe client from this trait.
+#[contractclient(name = "ReputationClient")]
+pub trait ReputationInterface {
+    /// Record an outcome for an originator. Only callable by the configured
+    /// recorder (the repayment contract). `outcome` is 0 = successful full
+    /// repayment, 1 = default.
+    fn record_outcome(env: Env, originator: Address, outcome: u32);
+
+    /// Read an originator's current reputation score (public, read-only).
+    fn get_score(env: Env, originator: Address) -> i128;
 }

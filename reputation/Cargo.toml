@@ -1,0 +1,20 @@
+[package]
+name = "invofi-reputation"
+version = "0.1.0"
+edition = "2021"
+description = "Soroban reputation contract for InvoFi — repayment outcome scoring per originator"
+license = "MIT"
+
+[lib]
+crate-type = ["cdylib", "lib"]
+
+[dependencies]
+soroban-sdk = { workspace = true }
+invofi-common = { path = "../common" }
+
+[dev-dependencies]
+soroban-sdk = { workspace = true, features = ["testutils"] }
+invofi-common = { path = "../common", features = ["testutils"] }
+
+[features]
+testutils = ["soroban-sdk/testutils", "invofi-common/testutils"]

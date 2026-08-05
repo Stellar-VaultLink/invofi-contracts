@@ -3,7 +3,35 @@
 All notable changes to InvoFi Contracts are documented here.
 Versioning follows [Semantic Versioning](https://semver.org/).
 
+## [0.6.0] – 2026-08-06
+
+### Added
+- **Insurance payout on default (Task 10)** — `reclaim_invoice` now triggers
+  `insurance.pay_out(lender, principal + yield − amount_repaid)` after the
+  grace period, capped at the pool's available balance and restricted to the
+  configured payout caller (the repayment contract). The invoice transitions
+  Overdue → Defaulted in the registry (`repayment_marks_defaulted` system
+  transition). Pro-rata staker reduction with deterministic remainder
+  handling; `pool_pay` protocol event carries the payout amount. Design in
+  `docs/adr/0003-insurance-payout.md`. Pool-depleted and no-insurance paths
+  are first-class (payout 0 / hook skipped).
+- **Reputation contract (Task 11)** — new `reputation/` crate: repayment
+  records `record_outcome(originator, 0|1)` after every full repayment and
+  default; `get_score` / `get_record` are public reads. Score =
+  `repayments − 2×defaults`, floored at 0 (ADR-0004). Recording fails closed
+  until a recorder (the repayment contract) is configured.
+
+### Verified (testnet)
+- Full on-chain E2E on a fresh 5-contract deployment: register → offer →
+  accept (XLM moved + POS minted) → full repay with interest (invoice Repaid,
+  reputation recorded: `{repayments: 1, defaults: 0}` → score 1) → insurance
+  stake of 50 XLM (pool total verified) → keeper marked a near-due Financed
+  invoice Overdue and a past-due one on the previous deployment. All
+  cross-contract wiring getters verified (`get_insurance`, `get_reputation`,
+  `get_payout_caller`, `get_recorder`).
+
 ## [0.5.0] – 2026-08-05
+
 
 ### Added
 - **Position tokens (Task 7)** — `accept_offer` now mints a SEP-41 position

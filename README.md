@@ -24,7 +24,7 @@ Smart-contract contributions happen here; frontend and SDK contributions happen 
 
 ## Overview
 
-InvoFi's protocol state is spread across four auditable Soroban contracts (plus the SEP-41
+InvoFi's protocol state is spread across **five** auditable Soroban contracts (plus the SEP-41
 position token), each with a narrow job:
 
 | Contract | Crate | Responsibility |
@@ -32,7 +32,8 @@ position token), each with a narrow job:
 | **registry** | `registry/` | Invoice lifecycle — register, cancel, status transitions, blacklist, disputes |
 | **financing** | `financing/` | Offers — create, withdraw, accept (moves principal **and mints the position token**), reject |
 | **repayment** | `repayment/` | Repayments (full/partial), mark overdue, reclaim/default |
-| **insurance** | `insurance/` | Coverage reserve — stake/unstake with flat pool accounting (payouts are Task 10) |
+| **insurance** | `insurance/` | Coverage reserve — stake/unstake, and **payout on default** capped at pool balance (Task 10) |
+| **reputation** | `reputation/` | Originator credit history — repayment outcomes → public score (Task 11) |
 
 Cross-contract calls are restricted: the registry only accepts status transitions from the
 registered financing/repayment contracts (implicit contract-invoker auth, per Stellar's
@@ -110,10 +111,12 @@ register_invoice()  →  create_offer()  →  accept_offer()
 | `get_pool_total()` | Anyone | Accounting total of staked funds |
 | `get_stakers_count()` | Anyone | Number of active stakers |
 | `get_contract_token_balance()` | Anyone | Actual on-chain balance — audit check that accounting matches |
+| `pay_out(beneficiary, amount)` | Payout caller only (repayment) | Pay up to `amount`, capped at pool balance; returns amount actually paid (Task 10) |
+| `get_payout_caller()` | Anyone | Read the configured payout caller |
 | `set_staking_token / pause / unpause / transfer_admin` | Admin | Admin controls |
 
-> Payout logic (Task 10) and yield-rate calculation are intentionally out of scope — flat pool
-> accounting only, matching the handoff plan.
+> Yield-rate calculation remains intentionally out of scope — the pool is flat accounting with
+> payout-on-default wired through `pay_out` (Task 10). See ADR-0003 for the payout design.
 
 ---
 
@@ -130,6 +133,16 @@ Stellar assets, a holder must establish a `POS` trustline before mint/transfer c
 the frontend's portfolio offers a one-click trustline helper.
 
 ---
+
+### Reputation — `reputation/` (Task 11)
+
+| Function | Auth | Description |
+|---|---|---|
+| `initialize(admin)` | Admin (once) | One-time setup |
+| `set_recorder(admin, recorder)` | Admin | Set the repayment contract as the only writer |
+| `record_outcome(originator, outcome)` | Recorder only | `0` = repaid, `1` = defaulted; updates outcome counts |
+| `get_score(originator)` | Anyone | `repayments − 2×defaults`, floored at 0 (ADR-0004) |
+| `get_record(originator)` | Anyone | Raw `{repayments, defaults}` counts — the source of truth |
 
 ## Protocol Events
 
@@ -152,6 +165,8 @@ Every state-mutating function publishes a Soroban contract event. Topics are
 | `pos_mint` | `accept_offer` (financing) | `(lender, amount)` — position token minted |
 | `pool_stk` | `stake` (insurance) | `amount` |
 | `pool_un` | `unstake` (insurance) | `amount` |
+| `pool_pay` | `pay_out` (insurance, Task 10) | `amount paid` |
+| `reputn` | `record_outcome` (reputation, Task 11) | `outcome` |
 
 ---
 

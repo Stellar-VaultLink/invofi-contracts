@@ -4,7 +4,9 @@ extern crate std;
 use super::RepaymentContract;
 use invofi_common::{InvoiceStatus, OfferStatus};
 use invofi_financing::FinancingContract;
+use invofi_insurance::InsuranceContract;
 use invofi_registry::RegistryContract;
+use invofi_reputation::ReputationContract;
 use soroban_sdk::{
     symbol_short,
     testutils::{Address as _, Ledger as _},
@@ -678,4 +680,183 @@ fn test_pause_blocks_repay_invoice() {
 
     rep.pause(&admin);
     rep.repay_invoice(&invoice_id, &offer_id, &originator, &amount);
+}
+
+// ─── Default-flow integration tests (Task 10 + 11) ───────────────────────────
+
+#[test]
+fn test_reclaim_triggers_defaulted_payout_and_reputation() {
+    let env = Env::default();
+    env.mock_all_auths();
+    env.ledger().set_timestamp(1_000_000);
+
+    let admin = Address::generate(&env);
+    let originator = Address::generate(&env);
+    let lender = Address::generate(&env);
+    let staker = Address::generate(&env);
+    let invoice_id = symbol_short!("inv_dfl");
+    let offer_id = symbol_short!("off_dfl");
+    let amount: i128 = 1_000_000_000;
+    let due_date: u64 = 1_735_689_600;
+
+    let financing_id = env.register(FinancingContract, ());
+    let token_id = setup_token(&env, &financing_id, &lender, amount);
+
+    let registry_id = env.register(RegistryContract, ());
+    let reg = invofi_registry::RegistryContractClient::new(&env, &registry_id);
+    reg.initialize(&admin);
+
+    let fin = invofi_financing::FinancingContractClient::new(&env, &financing_id);
+    fin.initialize(&admin, &registry_id, &token_id);
+
+    let repayment_id = env.register(RepaymentContract, ());
+    let rep = super::RepaymentContractClient::new(&env, &repayment_id);
+    rep.initialize(&admin, &registry_id, &financing_id, &token_id);
+    fin.set_repayment_contract(&admin, &repayment_id);
+    reg.set_repayment_contract(&admin, &repayment_id);
+    reg.set_financing_contract(&admin, &financing_id);
+
+    // Insurance pool, funded by a third-party staker with the same token
+    // the loan settles in (300M coverage against a 1.05B obligation).
+    let insurance_id = env.register(InsuranceContract, ());
+    let ins = invofi_insurance::InsuranceContractClient::new(&env, &insurance_id);
+    ins.initialize(&admin, &token_id);
+    let asset = token::StellarAssetClient::new(&env, &token_id);
+    asset.mint(&staker, &300_000_000);
+    let tok = token::TokenClient::new(&env, &token_id);
+    tok.approve(
+        &staker,
+        &insurance_id,
+        &300_000_000,
+        &(env.ledger().sequence() + 1000),
+    );
+    ins.stake(&staker, &300_000_000);
+    ins.set_payout_caller(&admin, &repayment_id);
+
+    // Reputation contract, recorder = repayment.
+    let reputation_id = env.register(ReputationContract, ());
+    let repu = invofi_reputation::ReputationContractClient::new(&env, &reputation_id);
+    repu.initialize(&admin);
+    repu.set_recorder(&admin, &repayment_id);
+
+    // Wire repayment -> insurance + reputation.
+    rep.set_insurance(&admin, &insurance_id);
+    rep.set_reputation(&admin, &reputation_id);
+
+    reg.register_invoice(
+        &invoice_id,
+        &originator,
+        &amount,
+        &symbol_short!("USDC"),
+        &due_date,
+    );
+    fin.create_offer(
+        &offer_id,
+        &invoice_id,
+        &lender,
+        &amount,
+        &symbol_short!("USDC"),
+        &500u32,
+        &(2_592_000u64),
+    );
+    fin.accept_offer(&offer_id, &originator);
+
+    // Past due + grace period, then mark overdue.
+    env.ledger()
+        .set_timestamp(due_date + invofi_common::GRACE_PERIOD_SECS + 1);
+    rep.mark_overdue(&invoice_id);
+
+    // Lender's principal moved out on acceptance — zero balance before reclaim.
+    assert_eq!(tok.balance(&lender), 0);
+
+    let reclaimed = rep.reclaim_invoice(&invoice_id, &offer_id, &lender);
+    assert_eq!(reclaimed.status, OfferStatus::Defaulted);
+
+    // 1. Invoice transitioned Overdue -> Defaulted in the registry.
+    let invoice = reg.get_invoice(&invoice_id);
+    assert_eq!(invoice.status, InvoiceStatus::Defaulted);
+
+    // 2. Lender received the insurance payout, capped at the pool (300M).
+    let total_due = amount + amount * 500 / 10_000; // 1_050_000_000
+    assert!(total_due > 300_000_000);
+    assert_eq!(tok.balance(&lender), 300_000_000);
+
+    // 3. Pool drained exactly: accounting total, token balance, staker claim.
+    assert_eq!(ins.get_pool_total(), 0);
+    assert_eq!(ins.get_stake(&staker), 0);
+    assert_eq!(ins.get_contract_token_balance(), 0);
+
+    // 4. Reputation: one default recorded -> score floored at 0.
+    assert_eq!(repu.get_score(&originator), 0);
+    let rec = repu.get_record(&originator);
+    assert_eq!(rec.repayments, 0);
+    assert_eq!(rec.defaults, 1);
+}
+
+#[test]
+fn test_full_repay_records_reputation_success() {
+    let env = Env::default();
+    env.mock_all_auths();
+    env.ledger().set_timestamp(1_000_000);
+
+    let admin = Address::generate(&env);
+    let originator = Address::generate(&env);
+    let lender = Address::generate(&env);
+    let invoice_id = symbol_short!("inv_rs");
+    let offer_id = symbol_short!("off_rs");
+    let amount: i128 = 1_000_000_000;
+    let due_date: u64 = 1_735_689_600;
+
+    let financing_id = env.register(FinancingContract, ());
+    let token_id = setup_token(&env, &financing_id, &lender, amount);
+
+    let registry_id = env.register(RegistryContract, ());
+    let reg = invofi_registry::RegistryContractClient::new(&env, &registry_id);
+    reg.initialize(&admin);
+
+    let fin = invofi_financing::FinancingContractClient::new(&env, &financing_id);
+    fin.initialize(&admin, &registry_id, &token_id);
+
+    let repayment_id = env.register(RepaymentContract, ());
+    let rep = super::RepaymentContractClient::new(&env, &repayment_id);
+    rep.initialize(&admin, &registry_id, &financing_id, &token_id);
+    fin.set_repayment_contract(&admin, &repayment_id);
+    reg.set_repayment_contract(&admin, &repayment_id);
+    reg.set_financing_contract(&admin, &financing_id);
+
+    let reputation_id = env.register(ReputationContract, ());
+    let repu = invofi_reputation::ReputationContractClient::new(&env, &reputation_id);
+    repu.initialize(&admin);
+    repu.set_recorder(&admin, &repayment_id);
+    rep.set_reputation(&admin, &reputation_id);
+
+    reg.register_invoice(
+        &invoice_id,
+        &originator,
+        &amount,
+        &symbol_short!("USDC"),
+        &due_date,
+    );
+    fin.create_offer(
+        &offer_id,
+        &invoice_id,
+        &lender,
+        &amount,
+        &symbol_short!("USDC"),
+        &500u32,
+        &(2_592_000u64),
+    );
+    fin.accept_offer(&offer_id, &originator);
+
+    // Originator repays principal + 5% yield in full.
+    let total_due = amount + amount * 500 / 10_000;
+    let asset = token::StellarAssetClient::new(&env, &token_id);
+    asset.mint(&originator, &total_due);
+    rep.repay_invoice(&invoice_id, &offer_id, &originator, &total_due);
+
+    // Reputation: one successful repayment -> score 1.
+    assert_eq!(repu.get_score(&originator), 1);
+    let rec = repu.get_record(&originator);
+    assert_eq!(rec.repayments, 1);
+    assert_eq!(rec.defaults, 0);
 }

@@ -236,3 +236,141 @@ fn test_set_staking_token_admin_only() {
     client.set_staking_token(&admin, &new_token);
     assert_eq!(client.get_staking_token(), new_token);
 }
+
+// ─── Payout tests (Task 10) ─────────────────────────────────────────────────
+
+#[test]
+fn test_payout_after_default_covers_claim() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let admin = Address::generate(&env);
+    let payout_caller = Address::generate(&env);
+    let beneficiary = Address::generate(&env);
+    let (token_id, insurance_id, client) = setup(&env, &admin);
+
+    // Pool: 1M staked by a single staker.
+    let staker = Address::generate(&env);
+    mint_and_approve(&env, &token_id, &insurance_id, &staker, 1_000_000);
+    client.stake(&staker, &1_000_000);
+
+    // Configure the repayment contract as payout caller.
+    client.set_payout_caller(&admin, &payout_caller);
+    assert_eq!(client.get_payout_caller(), Some(payout_caller.clone()));
+
+    // Default triggers a 400k payout claim — fully covered.
+    let paid = client.pay_out(&beneficiary, &400_000);
+    assert_eq!(paid, 400_000);
+
+    // Pool accounting: pool 600k, staker claim 600k, lender funded.
+    assert_eq!(client.get_pool_total(), 600_000);
+    assert_eq!(client.get_stake(&staker), 600_000);
+    assert_eq!(client.get_contract_token_balance(), 600_000);
+    let token_client = token::TokenClient::new(&env, &token_id);
+    assert_eq!(token_client.balance(&beneficiary), 400_000);
+}
+
+#[test]
+fn test_payout_pool_depleted_pays_whats_left() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let admin = Address::generate(&env);
+    let payout_caller = Address::generate(&env);
+    let beneficiary = Address::generate(&env);
+    let (token_id, insurance_id, client) = setup(&env, &admin);
+
+    let staker = Address::generate(&env);
+    mint_and_approve(&env, &token_id, &insurance_id, &staker, 100_000);
+    client.stake(&staker, &100_000);
+    client.set_payout_caller(&admin, &payout_caller);
+
+    // Claim (1M) far exceeds the pool (100k) — lender gets everything left.
+    let paid = client.pay_out(&beneficiary, &1_000_000);
+    assert_eq!(paid, 100_000);
+
+    assert_eq!(client.get_pool_total(), 0);
+    assert_eq!(client.get_stake(&staker), 0);
+    assert_eq!(client.get_stakers_count(), 0);
+    assert_eq!(client.get_contract_token_balance(), 0);
+    let token_client = token::TokenClient::new(&env, &token_id);
+    assert_eq!(token_client.balance(&beneficiary), 100_000);
+
+    // Subsequent claim against an empty pool pays nothing.
+    assert_eq!(client.pay_out(&beneficiary, &1_000_000), 0);
+}
+
+#[test]
+fn test_payout_pro_rata_multiple_stakers_exact() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let admin = Address::generate(&env);
+    let payout_caller = Address::generate(&env);
+    let beneficiary = Address::generate(&env);
+    let (token_id, insurance_id, client) = setup(&env, &admin);
+
+    // Pool 4M split 1M / 3M.
+    let staker_a = Address::generate(&env);
+    let staker_b = Address::generate(&env);
+    mint_and_approve(&env, &token_id, &insurance_id, &staker_a, 1_000_000);
+    mint_and_approve(&env, &token_id, &insurance_id, &staker_b, 3_000_000);
+    client.stake(&staker_a, &1_000_000);
+    client.stake(&staker_b, &3_000_000);
+    client.set_payout_caller(&admin, &payout_caller);
+
+    // 2M payout -> each staker loses exactly their pro-rata share.
+    let paid = client.pay_out(&beneficiary, &2_000_000);
+    assert_eq!(paid, 2_000_000);
+
+    assert_eq!(client.get_pool_total(), 2_000_000);
+    assert_eq!(client.get_stake(&staker_a), 500_000); // 25% of the loss
+    assert_eq!(client.get_stake(&staker_b), 1_500_000); // 75% of the loss
+    assert_eq!(client.get_contract_token_balance(), 2_000_000);
+    let token_client = token::TokenClient::new(&env, &token_id);
+    assert_eq!(token_client.balance(&beneficiary), 2_000_000);
+}
+
+#[test]
+#[should_panic(expected = "No payout caller configured")]
+fn test_payout_without_caller_panics() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let admin = Address::generate(&env);
+    let beneficiary = Address::generate(&env);
+    let (_, _, client) = setup(&env, &admin);
+
+    client.pay_out(&beneficiary, &1_000);
+}
+
+#[test]
+#[should_panic(expected = "payout amount must be greater than zero")]
+fn test_payout_zero_amount_panics() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let admin = Address::generate(&env);
+    let payout_caller = Address::generate(&env);
+    let beneficiary = Address::generate(&env);
+    let (_, _, client) = setup(&env, &admin);
+    client.set_payout_caller(&admin, &payout_caller);
+
+    client.pay_out(&beneficiary, &0);
+}
+
+#[test]
+#[should_panic(expected = "Contract is paused")]
+fn test_paused_blocks_payout() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let admin = Address::generate(&env);
+    let payout_caller = Address::generate(&env);
+    let beneficiary = Address::generate(&env);
+    let (_, _, client) = setup(&env, &admin);
+    client.set_payout_caller(&admin, &payout_caller);
+    client.pause(&admin);
+
+    client.pay_out(&beneficiary, &1_000);
+}
