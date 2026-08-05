@@ -1,0 +1,238 @@
+#![cfg(test)]
+extern crate std;
+
+use super::InsuranceContract;
+use soroban_sdk::{testutils::Address as _, token, Address, Env};
+
+/// Deploy the insurance contract + a staking token, and initialize.
+fn setup<'a>(
+    env: &'a Env,
+    admin: &Address,
+) -> (Address, Address, super::InsuranceContractClient<'a>) {
+    let sac = env.register_stellar_asset_contract_v2(admin.clone());
+    let token_id = sac.address();
+
+    let insurance_id = env.register(InsuranceContract, ());
+    let client = super::InsuranceContractClient::new(env, &insurance_id);
+    client.initialize(admin, &token_id);
+
+    (token_id, insurance_id, client)
+}
+
+/// Mint `amount` of the staking token to `who` and approve the insurance
+/// contract as spender (the same flow a real staker runs on-chain).
+fn mint_and_approve(
+    env: &Env,
+    token_id: &Address,
+    insurance_id: &Address,
+    who: &Address,
+    amount: i128,
+) {
+    let asset = token::StellarAssetClient::new(env, token_id);
+    asset.mint(who, &amount);
+    let t = token::TokenClient::new(env, token_id);
+    t.approve(
+        who,
+        insurance_id,
+        &amount,
+        &(env.ledger().sequence() + 1000),
+    );
+}
+
+// ─── Accounting tests ────────────────────────────────────────────────────────
+
+#[test]
+fn test_stake_multiple_stakers_accounting() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let admin = Address::generate(&env);
+    let (token_id, insurance_id, client) = setup(&env, &admin);
+
+    let staker_a = Address::generate(&env);
+    let staker_b = Address::generate(&env);
+    mint_and_approve(&env, &token_id, &insurance_id, &staker_a, 1_000_000);
+    mint_and_approve(&env, &token_id, &insurance_id, &staker_b, 2_500_000);
+
+    client.stake(&staker_a, &1_000_000);
+    client.stake(&staker_b, &2_500_000);
+
+    // DoD: per-staker balances and the pool total are all correct.
+    assert_eq!(client.get_stake(&staker_a), 1_000_000);
+    assert_eq!(client.get_stake(&staker_b), 2_500_000);
+    assert_eq!(client.get_pool_total(), 3_500_000);
+    assert_eq!(client.get_stakers_count(), 2);
+
+    // The actual token balance held by the contract matches the accounting.
+    let token_client = token::TokenClient::new(&env, &token_id);
+    assert_eq!(token_client.balance(&insurance_id), 3_500_000);
+    assert_eq!(client.get_contract_token_balance(), 3_500_000);
+
+    // Both stakers emptied their wallets into the pool.
+    assert_eq!(token_client.balance(&staker_a), 0);
+    assert_eq!(token_client.balance(&staker_b), 0);
+}
+
+#[test]
+fn test_unstake_partial_then_full() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let admin = Address::generate(&env);
+    let (token_id, insurance_id, client) = setup(&env, &admin);
+
+    let staker = Address::generate(&env);
+    mint_and_approve(&env, &token_id, &insurance_id, &staker, 1_000_000);
+    client.stake(&staker, &1_000_000);
+
+    // Partial unstake: 600_000 of 1_000_000 remains staked.
+    client.unstake(&staker, &400_000);
+    assert_eq!(client.get_stake(&staker), 600_000);
+    assert_eq!(client.get_pool_total(), 600_000);
+    let token_client = token::TokenClient::new(&env, &token_id);
+    assert_eq!(token_client.balance(&staker), 400_000);
+    assert_eq!(client.get_contract_token_balance(), 600_000);
+
+    // Full unstake: balance is zeroed and the staker drops out of the ledger.
+    client.unstake(&staker, &600_000);
+    assert_eq!(client.get_stake(&staker), 0);
+    assert_eq!(client.get_pool_total(), 0);
+    assert_eq!(client.get_stakers_count(), 0);
+    assert_eq!(token_client.balance(&staker), 1_000_000);
+    assert_eq!(client.get_contract_token_balance(), 0);
+}
+
+#[test]
+fn test_stake_increases_existing_balance() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let admin = Address::generate(&env);
+    let (token_id, insurance_id, client) = setup(&env, &admin);
+
+    let staker = Address::generate(&env);
+    mint_and_approve(&env, &token_id, &insurance_id, &staker, 1_000_000);
+    client.stake(&staker, &400_000);
+    client.stake(&staker, &600_000);
+
+    assert_eq!(client.get_stake(&staker), 1_000_000);
+    assert_eq!(client.get_pool_total(), 1_000_000);
+    assert_eq!(client.get_stakers_count(), 1);
+}
+
+// ─── Failure paths ───────────────────────────────────────────────────────────
+
+#[test]
+#[should_panic(expected = "Insufficient stake")]
+fn test_unstake_exceeds_stake_panics() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let admin = Address::generate(&env);
+    let (token_id, insurance_id, client) = setup(&env, &admin);
+
+    let staker = Address::generate(&env);
+    mint_and_approve(&env, &token_id, &insurance_id, &staker, 1_000_000);
+    client.stake(&staker, &500_000);
+
+    client.unstake(&staker, &600_000);
+}
+
+#[test]
+#[should_panic(expected = "Insufficient stake")]
+fn test_unstake_without_stake_panics() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let admin = Address::generate(&env);
+    let (_, _, client) = setup(&env, &admin);
+
+    let stranger = Address::generate(&env);
+    client.unstake(&stranger, &1_000);
+}
+
+#[test]
+#[should_panic(expected = "stake amount must be greater than zero")]
+fn test_stake_zero_panics() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let admin = Address::generate(&env);
+    let (_, _, client) = setup(&env, &admin);
+
+    let staker = Address::generate(&env);
+    client.stake(&staker, &0);
+}
+
+#[test]
+#[should_panic(expected = "unstake amount must be greater than zero")]
+fn test_unstake_zero_panics() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let admin = Address::generate(&env);
+    let (_, _, client) = setup(&env, &admin);
+
+    let staker = Address::generate(&env);
+    client.unstake(&staker, &0);
+}
+
+#[test]
+#[should_panic(expected = "Contract is paused")]
+fn test_paused_blocks_stake() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let admin = Address::generate(&env);
+    let (token_id, insurance_id, client) = setup(&env, &admin);
+
+    let staker = Address::generate(&env);
+    mint_and_approve(&env, &token_id, &insurance_id, &staker, 1_000_000);
+
+    client.pause(&admin);
+    assert!(client.contract_is_paused());
+    client.stake(&staker, &1_000_000);
+}
+
+#[test]
+#[should_panic(expected = "Contract is paused")]
+fn test_paused_blocks_unstake() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let admin = Address::generate(&env);
+    let (token_id, insurance_id, client) = setup(&env, &admin);
+
+    let staker = Address::generate(&env);
+    mint_and_approve(&env, &token_id, &insurance_id, &staker, 1_000_000);
+    client.stake(&staker, &1_000_000);
+
+    client.pause(&admin);
+    client.unstake(&staker, &100_000);
+}
+
+#[test]
+#[should_panic(expected = "Not initialized")]
+fn test_operations_require_initialization() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let staker = Address::generate(&env);
+    let insurance_id = env.register(InsuranceContract, ());
+    let client = super::InsuranceContractClient::new(&env, &insurance_id);
+
+    client.stake(&staker, &1_000);
+}
+
+#[test]
+fn test_set_staking_token_admin_only() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let admin = Address::generate(&env);
+    let (_, _, client) = setup(&env, &admin);
+
+    let new_token = Address::generate(&env);
+    client.set_staking_token(&admin, &new_token);
+    assert_eq!(client.get_staking_token(), new_token);
+}

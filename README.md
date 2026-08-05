@@ -24,120 +24,117 @@ Smart-contract contributions happen here; frontend and SDK contributions happen 
 
 ## Overview
 
-`InvoiceRegistryContract` governs the full lifecycle of invoice financing on Stellar — from registration through partial repayment, dispute resolution, and overdue handling. All state lives on-chain; no intermediary holds funds.
+InvoFi's protocol state is spread across four auditable Soroban contracts (plus the SEP-41
+position token), each with a narrow job:
+
+| Contract | Crate | Responsibility |
+|---|---|---|
+| **registry** | `registry/` | Invoice lifecycle — register, cancel, status transitions, blacklist, disputes |
+| **financing** | `financing/` | Offers — create, withdraw, accept (moves principal **and mints the position token**), reject |
+| **repayment** | `repayment/` | Repayments (full/partial), mark overdue, reclaim/default |
+| **insurance** | `insurance/` | Coverage reserve — stake/unstake with flat pool accounting (payouts are Task 10) |
+
+Cross-contract calls are restricted: the registry only accepts status transitions from the
+registered financing/repayment contracts (implicit contract-invoker auth, per Stellar's
+Authorization docs), and financing only accepts repayment callbacks from the registered
+repayment contract. User auth never propagates across contract boundaries.
 
 ```
 register_invoice()  →  create_offer()  →  accept_offer()
        ↓                                        ↓
-  [Pending]                              funds to business
+  [Pending]                 funds to business + POS minted to lender (Task 7)
        ↓                                        ↓
-  reject_offer()                         [Financed]
-  stays Pending                               ↓
+  reject_offer()                            [Financed]
+  stays Pending                                 ↓
                              repay_invoice() (partial or full)
-                                               ↓
-                                   [Repaid] ← balance cleared
-                                   [Overdue] ← mark_overdue()
-                                               ↓
-                         reclaim_invoice() (after 7-day grace)
-                                    offer → [Defaulted]
-
-                        raise_dispute() → [Disputed]
-                        resolve_dispute() → [Financed] or [Cancelled]
+                                                 ↓
+                                     [Repaid] ← balance cleared
+                                     [Overdue] ← mark_overdue()
+                                                 ↓
+                           reclaim_invoice() (after 7-day grace)
+                                      offer → [Defaulted]
 ```
 
 ---
 
 ## Contract Functions
 
-### Core
+### Registry — `registry/`
 
 | Function | Auth | Description |
 |---|---|---|
-| `initialize(admin, token)` | Anyone (once) | One-time setup — sets admin and SEP-41 token |
-| `register_invoice(id, originator, amount, currency, due_date)` | Originator | Register invoice; rejects if `amount < MIN_INVOICE_AMOUNT` or `due_date <= now` |
+| `initialize(admin)` | Admin (once) | One-time setup |
+| `register_invoice(id, originator, amount, currency, due_date)` | Originator | Register invoice; rejects dust (< 10 XLM) and past-due dates |
 | `get_invoice(id)` | Anyone | Read invoice state |
 | `cancel_invoice(id, originator)` | Originator | Cancel a Pending invoice |
-| `update_invoice_status(id, status)` | Originator | Manual status override |
-| `create_offer(offer_id, invoice_id, lender, amount, currency, rate, duration)` | Lender | Submit offer; validates amount, rate, `duration <= MAX_OFFER_DURATION_SECS` |
-| `get_offer(id)` | Anyone | Read offer state |
-| `accept_offer(offer_id, originator)` | Originator | Accept offer — transfers principal to business; invoice → Financed |
-| `reject_offer(offer_id, originator)` | Originator | Reject a pending offer |
-| `repay_invoice(invoice_id, offer_id, repayer, amount)` | Originator | Partial or full repayment; offer → Repaid when balance cleared |
-| `mark_overdue(invoice_id)` | Anyone | Mark a past-due Financed invoice Overdue |
-| `reclaim_invoice(invoice_id, offer_id, lender)` | Lender | After 7-day grace period, marks offer Defaulted |
-| `calculate_total_due(offer_id)` | Anyone | Remaining principal + accrued yield |
+| `set_financing_contract(admin, addr)` / `set_repayment_contract(admin, addr)` | Admin | Authorize the only cross-contract callers |
+| `financing_marks_invoice_financed(id)` | financing | System transition: Pending → Financed |
+| `repayment_marks_invoice_repaid(id, fully_repaid)` | repayment | System transition: Financed → Financed/Repaid |
+| `mark_invoice_overdue(id)` | Anyone | Overdue once due_date passes |
+| `raise_dispute / resolve_dispute` | Originator / Admin | Dispute lifecycle |
+| `blacklist_address / unblacklist_address / is_blacklisted` | Admin | Address blocking |
+| `set_rate / set_fee / transfer_admin / pause / unpause` | Admin | Admin controls |
 
-### Query Helpers
+### Financing — `financing/`
 
 | Function | Auth | Description |
 |---|---|---|
-| `get_invoices_by_status(status)` | Anyone | All invoices with a given status |
-| `get_invoices_by_currency(currency)` | Anyone | Invoices denominated in a given asset symbol |
-| `get_invoices_due_before(timestamp)` | Anyone | Open invoices with `due_date < timestamp` |
-| `get_invoices_count()` | Anyone | Total invoices ever registered |
-| `get_invoices_paginated(offset, limit)` | Anyone | Page through all invoices |
-| `batch_get_invoices(ids)` | Anyone | Fetch multiple invoices by ID; skips missing IDs |
-| `get_offers_by_invoice(invoice_id)` | Anyone | All offers for an invoice |
-| `get_offers_by_lender(lender)` | Anyone | All offers by a lender |
-| `get_offers_by_status(status)` | Anyone | All offers matching a status |
-| `get_pending_offers_by_invoice(invoice_id)` | Anyone | Only Pending offers on an invoice |
-| `get_offers_count()` | Anyone | Total offers ever created |
-| `get_offers_paginated(offset, limit)` | Anyone | Page through all offers |
+| `initialize(admin, registry, token)` | Admin (once) | Wire to registry + default settlement token |
+| `create_offer(offer_id, invoice_id, lender, amount, currency, rate, duration)` | Lender | Submit an offer (validates amount/rate/duration bounds) |
+| `withdraw_offer / reject_offer` | Lender / Originator | Withdraw or reject a Pending offer |
+| `accept_offer(offer_id, originator)` | Originator | Pulls principal lender → business **and mints the lender's position token** (Task 7) |
+| `register_currency(admin, currency, token)` | Admin | Add a settlement currency — one registry entry, no code branch per currency |
+| `set_position_token(admin, token)` | Admin | Configure the SEP-41 position-token contract (ADR-0002) |
+| `get_position_token()` | Anyone | Read the configured position token |
+| `update_offer_status / update_offer_amount_repaid / update_lender_stats_repaid / update_stats_repaid` | repayment | Repayment callbacks (registered caller only) |
+| `pause / unpause / transfer_admin` | Admin | Admin controls |
 
-### Lender Analytics
+### Repayment — `repayment/`
 
 | Function | Auth | Description |
 |---|---|---|
-| `get_lender_stats(lender)` | Anyone | `LenderStats` — total_offered, total_accepted, offers_pending, offers_repaid |
-| `get_lender_active_total(lender)` | Anyone | Sum of amounts across all Accepted offers for a lender |
+| `initialize(admin, registry, financing, token)` | Admin (once) | Wire to registry + financing |
+| `repay_invoice(invoice_id, offer_id, repayer, amount)` | Originator | Full or partial repayment (principal + yield) |
+| `mark_overdue(invoice_id)` | Anyone | Flag a past-due Financed invoice |
+| `reclaim_invoice(invoice_id, offer_id, lender)` | Lender | After the 7-day grace period → offer Defaulted |
+| `calculate_total_due(offer_id)` | Anyone | Principal + accrued yield |
 
-### Dispute Resolution
-
-| Function | Auth | Description |
-|---|---|---|
-| `raise_dispute(invoice_id, originator)` | Originator | Mark a Financed invoice Disputed |
-| `resolve_dispute(admin, invoice_id, target_status)` | Admin | Resolve Disputed invoice to Financed or Cancelled |
-
-### Protocol Stats
+### Insurance — `insurance/` (Task 9)
 
 | Function | Auth | Description |
 |---|---|---|
-| `get_stats()` | Anyone | `ProtocolStats` — total_invoices, total_offers, total_financed, total_repaid, total_fee_revenue |
+| `initialize(admin, token)` | Admin (once) | Set admin + staking token |
+| `stake(staker, amount)` | Staker | Deposit the staking token into the pool (approve + pull pattern) |
+| `unstake(staker, amount)` | Staker | Withdraw; the pool pays back directly |
+| `get_stake(staker)` | Anyone | Staker's balance |
+| `get_pool_total()` | Anyone | Accounting total of staked funds |
+| `get_stakers_count()` | Anyone | Number of active stakers |
+| `get_contract_token_balance()` | Anyone | Actual on-chain balance — audit check that accounting matches |
+| `set_staking_token / pause / unpause / transfer_admin` | Admin | Admin controls |
 
-### Admin Controls
+> Payout logic (Task 10) and yield-rate calculation are intentionally out of scope — flat pool
+> accounting only, matching the handoff plan.
 
-| Function | Auth | Description |
-|---|---|---|
-| `set_rate(admin, tier, rate_bps)` | Admin | Set yield rate for risk tier A/B/C |
-| `get_rate(tier)` | Anyone | Read yield rate for tier |
-| `set_fee(admin, fee_bps)` | Admin | Set protocol fee (max 500 bps = 5%) |
-| `get_fee()` | Anyone | Read current fee |
-| `transfer_admin(admin, new_admin)` | Admin | Rotate admin address |
-| `get_admin()` | Anyone | Read admin address |
-| `get_token()` | Anyone | Read SEP-41 token address |
-| `pause(admin)` | Admin | Halt all state-mutating operations |
-| `unpause(admin)` | Admin | Resume normal operation |
-| `contract_is_paused()` | Anyone | Query pause state |
-| `blacklist_address(admin, target)` | Admin | Block address from registering invoices/offers |
-| `unblacklist_address(admin, target)` | Admin | Remove block |
-| `is_blacklisted(address)` | Anyone | Query blacklist |
-| `get_blacklist()` | Anyone | Return full blacklist |
+---
 
-### Introspection
+## Position Tokens (Tasks 7 & 8)
 
-| Function | Auth | Description |
-|---|---|---|
-| `version()` | Anyone | Contract semver string |
-| `get_min_invoice_amount()` | Anyone | `MIN_INVOICE_AMOUNT` constant |
-| `get_offer_duration_limits()` | Anyone | `(MIN_OFFER_DURATION_SECS, MAX_OFFER_DURATION_SECS)` |
+On `accept_offer`, the financing contract mints a **SEP-41 position token** to the lender, 1:1
+with the offer amount (one token per base unit of principal — see [ADR-0002](./docs/adr/0002-position-tokens.md)).
+The token is a **Stellar Asset Contract** (`POS`, issued by the protocol deployer) whose admin is
+the financing contract, so minting is authorized via implicit contract-invoker auth.
+
+Position tokens are plain SEP-41 assets: any wallet can hold and transfer them (Task 8), and
+they represent the lender's claim on the financed invoice until it is repaid. Because they are
+Stellar assets, a holder must establish a `POS` trustline before mint/transfer can credit them —
+the frontend's portfolio offers a one-click trustline helper.
 
 ---
 
 ## Protocol Events
 
-Every state-mutating function publishes a Soroban contract event (v0.3.0+).
-Topics are `(event_name, subject_id)` — indexers can filter by invoice or
-offer id without decoding payloads.
+Every state-mutating function publishes a Soroban contract event. Topics are
+`(event_name, subject_id)` — indexers can filter by invoice or offer id without decoding payloads.
 
 | Event | Emitted by | Data payload |
 |---|---|---|
@@ -152,6 +149,9 @@ offer id without decoding payloads.
 | `inv_cxl` | `cancel_invoice` | `originator` |
 | `inv_dsp` | `raise_dispute` | `originator` |
 | `inv_rsl` | `resolve_dispute` | `new_status` |
+| `pos_mint` | `accept_offer` (financing) | `(lender, amount)` — position token minted |
+| `pool_stk` | `stake` (insurance) | `amount` |
+| `pool_un` | `unstake` (insurance) | `amount` |
 
 ---
 
@@ -172,7 +172,7 @@ offer id without decoding payloads.
 # Build
 cargo build --target wasm32v1-none --release
 
-# Run tests (30+ tests)
+# Run tests (96 tests across registry / financing / repayment / insurance)
 cargo test
 
 # Check WASM size stays under 256 KB

@@ -875,3 +875,116 @@ fn test_pause_blocks_create_offer() {
         &2_592_000u64,
     );
 }
+
+// ─── Position token minting tests (Task 7) ──────────────────────────────────
+
+#[test]
+fn test_accept_offer_mints_position_token() {
+    let env = Env::default();
+    env.mock_all_auths();
+    env.ledger().set_timestamp(1_000_000);
+
+    let admin = Address::generate(&env);
+    let originator = Address::generate(&env);
+    let lender = Address::generate(&env);
+    let invoice_id = symbol_short!("invp2");
+    let offer_id = symbol_short!("offp2");
+    let amount: i128 = 1_000_000_000;
+
+    let financing_id = env.register(FinancingContract, ());
+    let token_id = setup_token(&env, &financing_id, &lender, amount);
+
+    // The position token's admin is the financing contract, so accept_offer
+    // can mint claim tokens on the lender's behalf (ADR-0002).
+    let pos_sac = env.register_stellar_asset_contract_v2(financing_id.clone());
+    let pos_token_id = pos_sac.address();
+
+    let registry_id = env.register(RegistryContract, ());
+    let reg = invofi_registry::RegistryContractClient::new(&env, &registry_id);
+    reg.initialize(&admin);
+    reg.set_financing_contract(&admin, &financing_id);
+
+    let fin = super::FinancingContractClient::new(&env, &financing_id);
+    fin.initialize(&admin, &registry_id, &token_id);
+    assert!(fin.get_position_token().is_none());
+    fin.set_position_token(&admin, &pos_token_id);
+    assert_eq!(fin.get_position_token(), Some(pos_token_id.clone()));
+
+    reg.register_invoice(
+        &invoice_id,
+        &originator,
+        &amount,
+        &symbol_short!("USDC"),
+        &3_000_000u64,
+    );
+    fin.create_offer(
+        &offer_id,
+        &invoice_id,
+        &lender,
+        &amount,
+        &symbol_short!("USDC"),
+        &300u32,
+        &1_296_000u64,
+    );
+
+    fin.accept_offer(&offer_id, &originator);
+
+    // DoD: lender's position-token balance equals the offer amount.
+    let pos_client = token::TokenClient::new(&env, &pos_token_id);
+    assert_eq!(pos_client.balance(&lender), amount);
+    // And the principal currency is untouched (already moved to originator).
+    let token_client = token::TokenClient::new(&env, &token_id);
+    assert_eq!(token_client.balance(&lender), 0);
+    assert_eq!(token_client.balance(&originator), amount);
+}
+
+#[test]
+fn test_accept_offer_without_position_token_still_works() {
+    // Backward compatibility: a deployment without a configured position
+    // token keeps financing working exactly as before (no mint attempted).
+    let env = Env::default();
+    env.mock_all_auths();
+    env.ledger().set_timestamp(1_000_000);
+
+    let admin = Address::generate(&env);
+    let originator = Address::generate(&env);
+    let lender = Address::generate(&env);
+    let invoice_id = symbol_short!("invp3");
+    let offer_id = symbol_short!("offp3");
+    let amount: i128 = 1_000_000_000;
+
+    let financing_id = env.register(FinancingContract, ());
+    let token_id = setup_token(&env, &financing_id, &lender, amount);
+
+    let registry_id = env.register(RegistryContract, ());
+    let reg = invofi_registry::RegistryContractClient::new(&env, &registry_id);
+    reg.initialize(&admin);
+    reg.set_financing_contract(&admin, &financing_id);
+
+    let fin = super::FinancingContractClient::new(&env, &financing_id);
+    fin.initialize(&admin, &registry_id, &token_id);
+    assert!(fin.get_position_token().is_none());
+
+    reg.register_invoice(
+        &invoice_id,
+        &originator,
+        &amount,
+        &symbol_short!("USDC"),
+        &3_000_000u64,
+    );
+    fin.create_offer(
+        &offer_id,
+        &invoice_id,
+        &lender,
+        &amount,
+        &symbol_short!("USDC"),
+        &300u32,
+        &1_296_000u64,
+    );
+
+    let accepted = fin.accept_offer(&offer_id, &originator);
+    assert_eq!(accepted.status, OfferStatus::Accepted);
+
+    let token_client = token::TokenClient::new(&env, &token_id);
+    assert_eq!(token_client.balance(&originator), amount);
+}

@@ -164,6 +164,35 @@ impl FinancingContract {
         invofi_common::get_currency_token(&env, &currency)
     }
 
+    // ── Position tokens (Task 7) ─────────────────────────────────────────────
+
+    /// Configure the SEP-41 position-token contract that represents lenders'
+    /// claims on financed invoices. Admin only.
+    ///
+    /// The token contract MUST be initialized with this financing contract as
+    /// its admin, so accept_offer can mint claim tokens on the lender's
+    /// behalf (the token's admin.require_auth() resolves via implicit
+    /// contract-invoker auth — see ADR-0002).
+    pub fn set_position_token(env: Env, admin: Address, token: Address) {
+        admin.require_auth();
+        let current: Address = env
+            .storage()
+            .instance()
+            .get(&symbol_short!("admin"))
+            .unwrap_or_else(|| panic!("Not initialized"));
+        if current != admin {
+            panic!("Only the current admin can set the position token");
+        }
+        env.storage()
+            .instance()
+            .set(&symbol_short!("postok"), &token);
+    }
+
+    /// Returns the configured position-token contract, if any.
+    pub fn get_position_token(env: Env) -> Option<Address> {
+        env.storage().instance().get(&symbol_short!("postok"))
+    }
+
     // ── Pause / unpause ──────────────────────────────────────────────────────
 
     pub fn pause(env: Env, admin: Address) {
@@ -374,6 +403,24 @@ impl FinancingContract {
         // system transition (the financing contract is the authorized caller;
         // user auth does not propagate across contract boundaries in Soroban).
         registry_client.financing_marks_invoice_financed(&offer.invoice_id);
+
+        // Mint the lender's position token representing their claim on this
+        // financed invoice (1:1 with the offer amount — see ADR-0002). The
+        // token's admin is this financing contract, so the mint resolves via
+        // implicit contract-invoker auth. If no position token is configured
+        // (legacy deployments), financing still works unchanged.
+        if let Some(pos_token) = env.storage().instance().get(&symbol_short!("postok")) {
+            // SDK 22's StellarAssetInterface exposes mint(to, amount); the
+            // token contract authorizes its admin (this financing contract)
+            // internally via require_auth, which resolves through implicit
+            // contract-invoker auth when we call it cross-contract.
+            let pos_client = token::StellarAssetClient::new(&env, &pos_token);
+            pos_client.mint(&offer.lender, &offer.amount);
+            env.events().publish(
+                (symbol_short!("pos_mint"), offer.id.clone()),
+                (offer.lender.clone(), offer.amount),
+            );
+        }
 
         let mut s = load_stats(&env);
         s.total_financed += offer.amount;

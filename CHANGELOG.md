@@ -3,6 +3,30 @@
 All notable changes to InvoFi Contracts are documented here.
 Versioning follows [Semantic Versioning](https://semver.org/).
 
+## [0.5.0] – 2026-08-05
+
+### Added
+- **Position tokens (Task 7)** — `accept_offer` now mints a SEP-41 position
+  token to the lender, 1:1 with the offer amount. New admin-gated
+  `set_position_token` / `get_position_token` on the financing contract; the
+  token (a Stellar Asset Contract issued as `POS`) is admin'ed to the financing
+  contract so minting authorizes via implicit contract-invoker auth. Design and
+  granularity documented in `docs/adr/0002-position-tokens.md`. The mint is
+  optional — deployments without a configured position token work unchanged.
+- **Insurance pool (Task 9)** — new `insurance/` crate: `stake` / `unstake`
+  with flat pool accounting (per-staker `Map<Address, i128>` + pool total),
+  pause guard, and audit helper `get_contract_token_balance`. Payouts and yield
+  rates deliberately deferred (Task 10). 11 new tests.
+- **Position-token transfer (Task 8)** — position tokens are standard SEP-41
+  assets, so transfers use the token contract's own `transfer`; frontend
+  portfolio gains a "Transfer Position" form and a one-click `POS` trustline
+  helper (holders must hold a trustline, standard Stellar asset behavior).
+
+### Verified (testnet)
+- Full on-chain lifecycle re-verified on a fresh deployment: register → offer →
+  accept (principal moved **and** POS minted) → position transfer between two
+  wallets → insurance stake/partial-unstake. Contract IDs in the invofi README.
+
 ## [0.4.0] – 2026-08-03
 
 ### Added

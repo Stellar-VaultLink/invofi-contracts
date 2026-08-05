@@ -62,10 +62,12 @@ jobs:
           REGISTRY_ID=$(stellar contract deploy --wasm target/wasm32v1-none/release/invofi_registry.wasm --source invofi-deployer --network ${{ inputs.network }})
           FINANCING_ID=$(stellar contract deploy --wasm target/wasm32v1-none/release/invofi_financing.wasm --source invofi-deployer --network ${{ inputs.network }})
           REPAYMENT_ID=$(stellar contract deploy --wasm target/wasm32v1-none/release/invofi_repayment.wasm --source invofi-deployer --network ${{ inputs.network }})
+          INSURANCE_ID=$(stellar contract deploy --wasm target/wasm32v1-none/release/invofi_insurance.wasm --source invofi-deployer --network ${{ inputs.network }})
 
           echo "registry_id=$REGISTRY_ID" >> "$GITHUB_OUTPUT"
           echo "financing_id=$FINANCING_ID" >> "$GITHUB_OUTPUT"
           echo "repayment_id=$REPAYMENT_ID" >> "$GITHUB_OUTPUT"
+          echo "insurance_id=$INSURANCE_ID" >> "$GITHUB_OUTPUT"
 
           cat >> "$GITHUB_STEP_SUMMARY" <<OUTEOF
           ## Deployed contracts (testnet)
@@ -75,6 +77,8 @@ jobs:
           | registry | \`$REGISTRY_ID\` |
           | financing | \`$FINANCING_ID\` |
           | repayment | \`$REPAYMENT_ID\` |
+          | insurance | \`$INSURANCE_ID\` |
+          | position token (POS) | deployed + admin'ed to financing in the next step |
           | admin | \`$ADMIN_PUBLIC\` |
 
           Set these in Vercel:
@@ -88,6 +92,7 @@ jobs:
           REGISTRY_ID: ${{ steps.deploy.outputs.registry_id }}
           FINANCING_ID: ${{ steps.deploy.outputs.financing_id }}
           REPAYMENT_ID: ${{ steps.deploy.outputs.repayment_id }}
+          INSURANCE_ID: ${{ steps.deploy.outputs.insurance_id }}
         run: |
           ADMIN_PUBLIC=${{ steps.deploy.outputs.admin_public }}
           XLM_TOKEN=$(stellar contract id asset --asset native --network ${{ inputs.network }})
@@ -96,8 +101,27 @@ jobs:
           stellar contract invoke --id "$REGISTRY_ID" --source invofi-deployer --network ${{ inputs.network }} -- initialize --admin "$ADMIN_PUBLIC"
           stellar contract invoke --id "$FINANCING_ID" --source invofi-deployer --network ${{ inputs.network }} -- initialize --admin "$ADMIN_PUBLIC" --registry "$REGISTRY_ID" --token "$XLM_TOKEN"
           stellar contract invoke --id "$REPAYMENT_ID" --source invofi-deployer --network ${{ inputs.network }} -- initialize --admin "$ADMIN_PUBLIC" --registry "$REGISTRY_ID" --financing "$FINANCING_ID" --token "$XLM_TOKEN"
+          stellar contract invoke --id "$INSURANCE_ID" --source invofi-deployer --network ${{ inputs.network }} -- initialize --admin "$ADMIN_PUBLIC" --token "$XLM_TOKEN"
 
           stellar contract invoke --id "$REGISTRY_ID" --source invofi-deployer --network ${{ inputs.network }} -- set_financing_contract --admin "$ADMIN_PUBLIC" --financing "$FINANCING_ID"
           stellar contract invoke --id "$REGISTRY_ID" --source invofi-deployer --network ${{ inputs.network }} -- set_repayment_contract --admin "$ADMIN_PUBLIC" --repayment "$REPAYMENT_ID"
           stellar contract invoke --id "$FINANCING_ID" --source invofi-deployer --network ${{ inputs.network }} -- set_repayment_contract --admin "$ADMIN_PUBLIC" --repayment "$REPAYMENT_ID"
+          stellar contract invoke --id "$FINANCING_ID" --source invofi-deployer --network ${{ inputs.network }} -- register_currency --admin "$ADMIN_PUBLIC" --currency XLM --token_addr "$XLM_TOKEN"
           stellar contract invoke --id "$FINANCING_ID" --source invofi-deployer --network ${{ inputs.network }} -- register_currency --admin "$ADMIN_PUBLIC" --currency USDC --token_addr "$USDC_TOKEN"
+
+          # Position token: POS is deterministic per issuer, so compute its ID and
+          # only deploy if missing (a re-run with the same deployer reuses the
+          # already-deployed SAC instead of failing with "contract already exists").
+          POS_ID=$(stellar contract id asset --asset "POS:$ADMIN_PUBLIC" --network ${{ inputs.network }})
+          if ! stellar contract info --id "$POS_ID" interface --network ${{ inputs.network }} >/dev/null 2>&1; then
+            stellar contract asset deploy --asset "POS:$ADMIN_PUBLIC" --source invofi-deployer --network ${{ inputs.network }}
+          fi
+          # Hand POS admin to the financing contract. On a re-run this is a no-op
+          # only when the deployer still owns the SAC; if a previous run handed it
+          # to an older financing contract, the step fails loudly with a clear
+          # message rather than silently minting from the wrong admin.
+          stellar contract invoke --id "$POS_ID" --source invofi-deployer --network ${{ inputs.network }} -- set_admin --new_admin "$FINANCING_ID"
+          stellar contract invoke --id "$FINANCING_ID" --source invofi-deployer --network ${{ inputs.network }} -- set_position_token --admin "$ADMIN_PUBLIC" --token "$POS_ID"
+
+          echo "position_token_id=$POS_ID" >> "$GITHUB_OUTPUT"
+          echo "position_token=$POS_ID" >> "$GITHUB_STEP_SUMMARY"
