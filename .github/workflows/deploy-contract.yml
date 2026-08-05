@@ -39,8 +39,12 @@ jobs:
             echo "::notice::STELLAR_DEPLOYER_SECRET_KEY not set — generating a fresh keypair for this run."
             stellar keys generate invofi-deployer --network ${{ inputs.network }}
           else
-            # --secret-key is deprecated and prompts interactively; pipe the key in.
-            printf '%s\n' "$DEPLOYER_SECRET_KEY" | stellar keys add invofi-deployer --secret-key
+            # stellar-cli 23 only accepts keys via interactive prompts (not
+            # usable in CI), so write the identity file directly — the exact
+            # format `stellar keys generate` produces. The secret may be a
+            # 24-word mnemonic or an S... secret key.
+            mkdir -p "$HOME/.config/stellar/identity"
+            printf 'seed_phrase = "%s"\n' "$DEPLOYER_SECRET_KEY" > "$HOME/.config/stellar/identity/invofi-deployer.toml"
           fi
 
       - name: Fund deployer via Friendbot
