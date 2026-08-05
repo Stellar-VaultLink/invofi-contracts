@@ -321,6 +321,10 @@ impl RegistryContract {
         invoice.amount = new_amount;
         invoices.set(invoice_id, invoice.clone());
         save_invoices(&env, &invoices);
+        env.events().publish(
+            (symbol_short!("inv_amt"), invoice.id.clone()),
+            new_amount,
+        );
         invoice
     }
 
@@ -373,6 +377,8 @@ impl RegistryContract {
         };
         invoices.set(id, invoice.clone());
         save_invoices(&env, &invoices);
+        env.events()
+            .publish((symbol_short!("inv_sts"), invoice.id.clone()), invoice.status.clone());
         invoice
     }
 
@@ -431,6 +437,8 @@ impl RegistryContract {
         };
         invoices.set(id, invoice.clone());
         save_invoices(&env, &invoices);
+        env.events()
+            .publish((symbol_short!("inv_sts"), invoice.id.clone()), invoice.status.clone());
         invoice
     }
 

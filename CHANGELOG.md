@@ -20,6 +20,11 @@ Versioning follows [Semantic Versioning](https://semver.org/).
   default; `get_score` / `get_record` are public reads. Score =
   `repayments − 2×defaults`, floored at 0 (ADR-0004). Recording fails closed
   until a recorder (the repayment contract) is configured.
+- **Event-completeness audit (Task 13)** — every state-mutating registry
+  function now publishes a structured event. Added `inv_amt`
+  (`update_invoice_amount`) and `inv_sts` emissions from
+  `set_invoice_repaid_status` / `repayment_marks_invoice_repaid`, so the
+  indexer can reconstruct the full invoice lifecycle from events alone.
 
 ### Verified (testnet)
 - Full on-chain E2E on a fresh 5-contract deployment: register → offer →

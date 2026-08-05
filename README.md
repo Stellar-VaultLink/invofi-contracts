@@ -152,6 +152,8 @@ Every state-mutating function publishes a Soroban contract event. Topics are
 | Event | Emitted by | Data payload |
 |---|---|---|
 | `inv_reg` | `register_invoice` | `(originator, amount, due_date)` |
+| `inv_amt` | `update_invoice_amount` | `new_amount` |
+| `inv_sts` | status transitions (update / finance / repay) | `InvoiceStatus` |
 | `off_new` | `create_offer` | `(invoice_id, lender, amount, interest_rate)` |
 | `off_acc` | `accept_offer` | `(invoice_id, lender, amount)` |
 | `off_rej` | `reject_offer` | `invoice_id` |
