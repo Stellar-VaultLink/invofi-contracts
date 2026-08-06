@@ -18,7 +18,7 @@ InvoFi is split across two repositories so the fast-moving app layer and the slo
 | [**invofi**](https://github.com/Stellar-VaultLink/invofi) | Next.js frontend (`apps/frontend`), SDK, docs, scripts | App-layer changes constantly, Node/npm CI, no audit dependency |
 | **invofi-contracts** (this repo) | All Soroban Rust contracts — registry, financing, repayment, insurance, reputation, common | Stable, auditable, slow-moving history; Rust-only CI; the repo that goes through the SCF Audit Bank |
 
-Smart-contract contributions happen here; frontend and SDK contributions happen in [invofi](https://github.com/Stellar-VaultLink/invofi).
+Smart-contract contributions happen here; frontend and SDK contributions happen in [invofi](https://github.com/Stellar-VaultLink/invofi). The frontend supports **Freighter and LOBSTR** wallets via an approved-wallet allowlist (`approved-wallets.ts`, Task 6A) — approving a third wallet is a one-line config change.
 
 ---
 
@@ -189,7 +189,7 @@ Every state-mutating function publishes a Soroban contract event. Topics are
 # Build
 cargo build --target wasm32v1-none --release
 
-# Run tests (96 tests across registry / financing / repayment / insurance)
+# Run tests (110 tests across registry / financing / repayment / insurance / reputation)
 cargo test
 
 # Check WASM size stays under 256 KB
@@ -200,6 +200,27 @@ bash scripts/deploy.sh
 ```
 
 Or trigger the **[Deploy Contract](https://github.com/Stellar-VaultLink/invofi-contracts/actions/workflows/deploy-contract.yml)** GitHub Actions workflow for a one-click Testnet deploy.
+
+---
+
+## Roadmap
+
+### Shipped
+
+- [x] Five auditable contract crates with restricted cross-contract auth (Tasks 4–5)
+- [x] SEP-41 token movement — `accept_offer` (lender → business), `repay_invoice` (principal + yield)
+- [x] Position tokens (Task 7), transferable positions (Task 8), insurance stake/unstake (Task 9)
+- [x] Insurance payout on default (Task 10), reputation scoring (Task 11)
+- [x] Emergency pause / circuit breaker (Task 4A), full protocol event coverage (Task 13)
+- [x] Deployer-bound `__constructor` initialization (issue #75), CI: tests + clippy + Soroban Scout
+
+### Open
+
+- [ ] Mainnet deployment
+- [ ] Independent security audit (SCF Audit Bank)
+- [ ] Overdue-penalty interest
+- [ ] Multisig admin governance
+- [ ] Contract upgradeability with timelock
 
 ---
 
