@@ -2,6 +2,20 @@
 
 All notable changes to InvoFi Contracts are documented here.
 Versioning follows [Semantic Versioning](https://semver.org/).
+Commit messages follow [Conventional Commits](https://www.conventionalcommits.org/)
+and are enforced by commitlint in CI (Task 19).
+
+## [Unreleased] – 2026-08-06
+
+### Docs
+- **README refresh (Task 18)** — roadmap section (shipped vs open), wallet
+  support note (Freighter + LOBSTR via the approved-wallet allowlist), and
+  corrected test count (110 across all five crates).
+- **Compliance link (Task 17)** — README now points at
+  `docs/compliance.md` in the main repo (KYC/SEP-12 roadmap, jurisdictions,
+  securities-by-design analysis).
+- **Commitlint gate (Task 19)** — CI now rejects PRs whose commits are not
+  Conventional Commits, matching the app repo.
 
 ## [0.6.1] – 2026-08-06
 
