@@ -3,7 +3,7 @@
 > **Status:** Engineering self-review — **this is NOT a substitute for a
 > professional security audit.** It is a documented line-by-line re-read of
 > the token-movement and pause code against a fixed checklist, intended as
-> honest evidence of care for the Wave 8 / SCF application. A real audit
+> honest evidence of care for the protocol's funding applications. A real audit
 > (e.g. via the SCF Audit Bank) remains a prerequisite for mainnet.
 >
 > Scope: `accept_offer` (Task 1), `repay_invoice` (Task 2), and the
