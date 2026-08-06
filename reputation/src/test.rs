@@ -6,9 +6,8 @@ use soroban_sdk::{testutils::Address as _, Address, Env};
 
 /// Deploy the reputation contract and initialize.
 fn setup<'a>(env: &'a Env, admin: &Address) -> super::ReputationContractClient<'a> {
-    let rep_id = env.register(ReputationContract, ());
+    let rep_id = env.register(ReputationContract, (admin.clone(),));
     let client = super::ReputationContractClient::new(env, &rep_id);
-    client.initialize(admin);
     client
 }
 

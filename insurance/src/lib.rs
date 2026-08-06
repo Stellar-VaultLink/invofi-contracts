@@ -59,9 +59,12 @@ impl InsuranceContract {
     // ── Initialization / admin ──────────────────────────────────────────────
 
     /// One-time setup. Sets the admin and the staking token (the SEP-41
-    /// contract that stakers deposit). Must be called once after deployment.
-    pub fn initialize(env: Env, admin: Address, token: Address) {
-        admin.require_auth();
+    /// contract that stakers deposit).
+    ///
+    /// Runs as the contract **constructor**: it is executed atomically as part
+    /// of the deploy operation, which only the deployer can authorize. There
+    /// is therefore no separate initialize() call to front-run (issue #75).
+    pub fn __constructor(env: Env, admin: Address, token: Address) {
         if env.storage().instance().has(&symbol_short!("admin")) {
             panic!("Already initialized");
         }

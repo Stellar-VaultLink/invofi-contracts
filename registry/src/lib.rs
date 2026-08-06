@@ -92,10 +92,14 @@ pub struct RegistryContract;
 impl RegistryContract {
     // ── Admin / initialization ───────────────────────────────────────────────
 
-    /// One-time setup. Sets the admin address. Must be called once right after
-    /// deployment, before any invoice can be registered.
-    pub fn initialize(env: Env, admin: Address) {
-        admin.require_auth();
+    /// One-time setup. Sets the admin address.
+    ///
+    /// Runs as the contract **constructor**: it is executed atomically as part
+    /// of the deploy operation, which only the deployer can authorize. There
+    /// is therefore no separate initialize() call to front-run — a fresh
+    /// deployment can never be hijacked by a third party setting themselves
+    /// as admin (issue #75).
+    pub fn __constructor(env: Env, admin: Address) {
         if env.storage().instance().has(&symbol_short!("admin")) {
             panic!("Already initialized");
         }

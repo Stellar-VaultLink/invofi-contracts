@@ -12,9 +12,8 @@ fn setup<'a>(
     let sac = env.register_stellar_asset_contract_v2(admin.clone());
     let token_id = sac.address();
 
-    let insurance_id = env.register(InsuranceContract, ());
+    let insurance_id = env.register(InsuranceContract, (admin.clone(), token_id.clone()));
     let client = super::InsuranceContractClient::new(env, &insurance_id);
-    client.initialize(admin, &token_id);
 
     (token_id, insurance_id, client)
 }
@@ -212,16 +211,17 @@ fn test_paused_blocks_unstake() {
 }
 
 #[test]
-#[should_panic(expected = "Not initialized")]
-fn test_operations_require_initialization() {
+fn test_constructor_binds_admin_and_staking_token() {
     let env = Env::default();
     env.mock_all_auths();
 
-    let staker = Address::generate(&env);
-    let insurance_id = env.register(InsuranceContract, ());
-    let client = super::InsuranceContractClient::new(&env, &insurance_id);
+    let admin = Address::generate(&env);
+    let (token_id, _insurance_id, client) = setup(&env, &admin);
 
-    client.stake(&staker, &1_000);
+    // Admin and staking token are bound atomically at deploy — there is no
+    // separate initialize() call a third party could front-run (issue #75).
+    assert_eq!(client.get_admin(), admin);
+    assert_eq!(client.get_staking_token(), token_id);
 }
 
 #[test]

@@ -21,13 +21,12 @@ fn setup_contracts<'a>(
     invofi_registry::RegistryContractClient<'a>,
     super::FinancingContractClient<'a>,
 ) {
-    let registry_id = env.register(RegistryContract, ());
+    let registry_id = env.register(RegistryContract, (admin.clone(),));
     let registry_client = invofi_registry::RegistryContractClient::new(env, &registry_id);
-    registry_client.initialize(admin);
 
-    let financing_id = env.register(FinancingContract, ());
+    let financing_id =
+        env.register(FinancingContract, (admin.clone(), registry_id.clone(), token.clone()));
     let financing_client = super::FinancingContractClient::new(env, &financing_id);
-    financing_client.initialize(admin, &registry_id, token);
 
     // Register financing as a trusted caller on the registry so its
     // cross-contract status transition (Pending -> Financed) is allowed.
@@ -36,25 +35,27 @@ fn setup_contracts<'a>(
     (registry_client, financing_client)
 }
 
-/// Deploy a test SEP-41 token, mint `amount` to `lender`, and approve the
-/// financing contract as spender.
-fn setup_token(env: &Env, financing_id: &Address, lender: &Address, amount: i128) -> Address {
+/// Deploy a fresh test SEP-41 token and return its contract address.
+fn create_token(env: &Env) -> Address {
     let token_admin = Address::generate(env);
     let sac = env.register_stellar_asset_contract_v2(token_admin);
-    let token_id = sac.address();
+    sac.address()
+}
 
-    let asset_client = token::StellarAssetClient::new(env, &token_id);
-    asset_client.mint(lender, &amount);
+/// Mint `amount` to `who` and approve `spender` to move those funds (the same
+/// flow a real lender runs on-chain before `accept_offer`).
+fn mint_and_approve(
+    env: &Env,
+    token_id: &Address,
+    spender: &Address,
+    who: &Address,
+    amount: i128,
+) {
+    let asset_client = token::StellarAssetClient::new(env, token_id);
+    asset_client.mint(who, &amount);
 
-    let token_client = token::TokenClient::new(env, &token_id);
-    token_client.approve(
-        lender,
-        financing_id,
-        &amount,
-        &(env.ledger().sequence() + 1000),
-    );
-
-    token_id
+    let token_client = token::TokenClient::new(env, token_id);
+    token_client.approve(who, spender, &amount, &(env.ledger().sequence() + 1000));
 }
 
 // ─── Offer CRUD tests ────────────────────────────────────────────────────────
@@ -265,7 +266,7 @@ fn test_blacklisted_cannot_create_offer() {
 
     let admin = Address::generate(&env);
     let lender = Address::generate(&env);
-    let token = setup_token(&env, &Address::generate(&env), &lender, 5_000i128);
+    let token = create_token(&env);
     let (reg, fin) = setup_contracts(&env, &admin, &token);
 
     reg.register_invoice(
@@ -303,16 +304,18 @@ fn test_accept_offer() {
     let offer_id = symbol_short!("off002");
     let amount: i128 = 1_000_000_000;
 
-    let financing_id = env.register(FinancingContract, ());
-    let token_id = setup_token(&env, &financing_id, &lender, amount);
-
-    let registry_id = env.register(RegistryContract, ());
+    let token_id = create_token(&env);
+    let registry_id = env.register(RegistryContract, (admin.clone(),));
     let reg = invofi_registry::RegistryContractClient::new(&env, &registry_id);
-    reg.initialize(&admin);
-    reg.set_financing_contract(&admin, &financing_id);
 
+    let financing_id = env.register(
+        FinancingContract,
+        (admin.clone(), registry_id.clone(), token_id.clone()),
+    );
     let fin = super::FinancingContractClient::new(&env, &financing_id);
-    fin.initialize(&admin, &registry_id, &token_id);
+
+    reg.set_financing_contract(&admin, &financing_id);
+    mint_and_approve(&env, &token_id, &financing_id, &lender, amount);
 
     reg.register_invoice(
         &invoice_id,
@@ -740,7 +743,14 @@ fn test_update_offer_status_and_amount_repaid() {
     );
 
     // Register a fake repayment contract (auth is mocked)
-    let repayment_id = env.register(super::FinancingContract, ());
+    let repayment_id = env.register(
+        super::FinancingContract,
+        (
+            Address::generate(&env),
+            Address::generate(&env),
+            Address::generate(&env),
+        ),
+    );
     fin.set_repayment_contract(&admin, &repayment_id);
 
     // Simulate repayment callback
@@ -785,7 +795,14 @@ fn test_update_lender_stats_repaid() {
     assert_eq!(stats_before.offers_repaid, 0);
 
     // Register a fake repayment contract (auth is mocked)
-    let repayment_id = env.register(super::FinancingContract, ());
+    let repayment_id = env.register(
+        super::FinancingContract,
+        (
+            Address::generate(&env),
+            Address::generate(&env),
+            Address::generate(&env),
+        ),
+    );
     fin.set_repayment_contract(&admin, &repayment_id);
 
     fin.update_lender_stats_repaid(&lender, &true);
@@ -808,7 +825,14 @@ fn test_update_stats_repaid_and_get_fee_bps() {
     assert_eq!(fin.get_fee_bps(), 0);
 
     // Register a fake repayment contract (auth is mocked)
-    let repayment_id = env.register(super::FinancingContract, ());
+    let repayment_id = env.register(
+        super::FinancingContract,
+        (
+            Address::generate(&env),
+            Address::generate(&env),
+            Address::generate(&env),
+        ),
+    );
     fin.set_repayment_contract(&admin, &repayment_id);
 
     // Simulate stats update
@@ -824,16 +848,30 @@ fn test_update_stats_repaid_and_get_fee_bps() {
 fn test_version_returns_nonempty_string() {
     let env = Env::default();
     env.mock_all_auths();
-    let financing_id = env.register(FinancingContract, ());
+    let financing_id = env.register(
+        FinancingContract,
+        (
+            Address::generate(&env),
+            Address::generate(&env),
+            Address::generate(&env),
+        ),
+    );
     let fin = super::FinancingContractClient::new(&env, &financing_id);
     let ver = fin.version();
-    assert!(ver.len() > 0);
+    assert!(!ver.is_empty());
 }
 
 #[test]
 fn test_get_offer_duration_limits() {
     let env = Env::default();
-    let financing_id = env.register(FinancingContract, ());
+    let financing_id = env.register(
+        FinancingContract,
+        (
+            Address::generate(&env),
+            Address::generate(&env),
+            Address::generate(&env),
+        ),
+    );
     let fin = super::FinancingContractClient::new(&env, &financing_id);
     let (min, max) = fin.get_offer_duration_limits();
     assert_eq!(min, invofi_common::MIN_OFFER_DURATION_SECS);
@@ -891,21 +929,23 @@ fn test_accept_offer_mints_position_token() {
     let offer_id = symbol_short!("offp2");
     let amount: i128 = 1_000_000_000;
 
-    let financing_id = env.register(FinancingContract, ());
-    let token_id = setup_token(&env, &financing_id, &lender, amount);
+    let token_id = create_token(&env);
+    let registry_id = env.register(RegistryContract, (admin.clone(),));
+    let reg = invofi_registry::RegistryContractClient::new(&env, &registry_id);
+
+    let financing_id = env.register(
+        FinancingContract,
+        (admin.clone(), registry_id.clone(), token_id.clone()),
+    );
+    let fin = super::FinancingContractClient::new(&env, &financing_id);
 
     // The position token's admin is the financing contract, so accept_offer
     // can mint claim tokens on the lender's behalf (ADR-0002).
     let pos_sac = env.register_stellar_asset_contract_v2(financing_id.clone());
     let pos_token_id = pos_sac.address();
 
-    let registry_id = env.register(RegistryContract, ());
-    let reg = invofi_registry::RegistryContractClient::new(&env, &registry_id);
-    reg.initialize(&admin);
+    mint_and_approve(&env, &token_id, &financing_id, &lender, amount);
     reg.set_financing_contract(&admin, &financing_id);
-
-    let fin = super::FinancingContractClient::new(&env, &financing_id);
-    fin.initialize(&admin, &registry_id, &token_id);
     assert!(fin.get_position_token().is_none());
     fin.set_position_token(&admin, &pos_token_id);
     assert_eq!(fin.get_position_token(), Some(pos_token_id.clone()));
@@ -953,16 +993,18 @@ fn test_accept_offer_without_position_token_still_works() {
     let offer_id = symbol_short!("offp3");
     let amount: i128 = 1_000_000_000;
 
-    let financing_id = env.register(FinancingContract, ());
-    let token_id = setup_token(&env, &financing_id, &lender, amount);
-
-    let registry_id = env.register(RegistryContract, ());
+    let token_id = create_token(&env);
+    let registry_id = env.register(RegistryContract, (admin.clone(),));
     let reg = invofi_registry::RegistryContractClient::new(&env, &registry_id);
-    reg.initialize(&admin);
-    reg.set_financing_contract(&admin, &financing_id);
 
+    let financing_id = env.register(
+        FinancingContract,
+        (admin.clone(), registry_id.clone(), token_id.clone()),
+    );
     let fin = super::FinancingContractClient::new(&env, &financing_id);
-    fin.initialize(&admin, &registry_id, &token_id);
+
+    reg.set_financing_contract(&admin, &financing_id);
+    mint_and_approve(&env, &token_id, &financing_id, &lender, amount);
     assert!(fin.get_position_token().is_none());
 
     reg.register_invoice(

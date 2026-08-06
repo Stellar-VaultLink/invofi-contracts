@@ -64,7 +64,7 @@ register_invoice()  →  create_offer()  →  accept_offer()
 
 | Function | Auth | Description |
 |---|---|---|
-| `initialize(admin)` | Admin (once) | One-time setup |
+| `__constructor(admin)` | Deployer (at deploy) | Sets admin atomically in the deploy operation — no `initialize()` to front-run (ADR-0005) |
 | `register_invoice(id, originator, amount, currency, due_date)` | Originator | Register invoice; rejects dust (< 10 XLM) and past-due dates |
 | `get_invoice(id)` | Anyone | Read invoice state |
 | `cancel_invoice(id, originator)` | Originator | Cancel a Pending invoice |
@@ -80,7 +80,7 @@ register_invoice()  →  create_offer()  →  accept_offer()
 
 | Function | Auth | Description |
 |---|---|---|
-| `initialize(admin, registry, token)` | Admin (once) | Wire to registry + default settlement token |
+| `__constructor(admin, registry, token)` | Deployer (at deploy) | Wire to registry + default settlement token (ADR-0005) |
 | `create_offer(offer_id, invoice_id, lender, amount, currency, rate, duration)` | Lender | Submit an offer (validates amount/rate/duration bounds) |
 | `withdraw_offer / reject_offer` | Lender / Originator | Withdraw or reject a Pending offer |
 | `accept_offer(offer_id, originator)` | Originator | Pulls principal lender → business **and mints the lender's position token** (Task 7) |
@@ -94,7 +94,7 @@ register_invoice()  →  create_offer()  →  accept_offer()
 
 | Function | Auth | Description |
 |---|---|---|
-| `initialize(admin, registry, financing, token)` | Admin (once) | Wire to registry + financing |
+| `__constructor(admin, registry, financing, token)` | Deployer (at deploy) | Wire to registry + financing (ADR-0005) |
 | `repay_invoice(invoice_id, offer_id, repayer, amount)` | Originator | Full or partial repayment (principal + yield) |
 | `mark_overdue(invoice_id)` | Anyone | Flag a past-due Financed invoice |
 | `reclaim_invoice(invoice_id, offer_id, lender)` | Lender | After the 7-day grace period → offer Defaulted |
@@ -104,7 +104,7 @@ register_invoice()  →  create_offer()  →  accept_offer()
 
 | Function | Auth | Description |
 |---|---|---|
-| `initialize(admin, token)` | Admin (once) | Set admin + staking token |
+| `__constructor(admin, token)` | Deployer (at deploy) | Set admin + staking token (ADR-0005) |
 | `stake(staker, amount)` | Staker | Deposit the staking token into the pool (approve + pull pattern) |
 | `unstake(staker, amount)` | Staker | Withdraw; the pool pays back directly |
 | `get_stake(staker)` | Anyone | Staker's balance |
@@ -138,7 +138,7 @@ the frontend's portfolio offers a one-click trustline helper.
 
 | Function | Auth | Description |
 |---|---|---|
-| `initialize(admin)` | Admin (once) | One-time setup |
+| `__constructor(admin)` | Deployer (at deploy) | Sets admin atomically in the deploy operation (ADR-0005) |
 | `set_recorder(admin, recorder)` | Admin | Set the repayment contract as the only writer |
 | `record_outcome(originator, outcome)` | Recorder only | `0` = repaid, `1` = defaulted; updates outcome counts |
 | `get_score(originator)` | Anyone | `repayments − 2×defaults`, floored at 0 (ADR-0004) |

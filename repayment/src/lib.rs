@@ -17,17 +17,19 @@ pub struct RepaymentContract;
 impl RepaymentContract {
     // ── Initialization ───────────────────────────────────────────────────────
 
-    /// Initialize the repayment contract. Stores the registry, financing,
-    /// and token addresses for cross-contract calls. Admin is the same as
-    /// the registry/financing admin.
-    pub fn initialize(
+    /// One-time setup. Stores the registry, financing, and token addresses for
+    /// cross-contract calls. Admin is the same as the registry/financing admin.
+    ///
+    /// Runs as the contract **constructor**: it is executed atomically as part
+    /// of the deploy operation, which only the deployer can authorize. There
+    /// is therefore no separate initialize() call to front-run (issue #75).
+    pub fn __constructor(
         env: Env,
         admin: Address,
         registry: Address,
         financing: Address,
         token: Address,
     ) {
-        admin.require_auth();
         if env.storage().instance().has(&symbol_short!("admin")) {
             panic!("Already initialized");
         }

@@ -25,19 +25,25 @@ fn setup_contracts<'a>(
     super::RepaymentContractClient<'a>,
 ) {
     // Registry
-    let registry_id = env.register(RegistryContract, ());
+    let registry_id = env.register(RegistryContract, (admin.clone(),));
     let reg = invofi_registry::RegistryContractClient::new(env, &registry_id);
-    reg.initialize(admin);
 
     // Financing
-    let financing_id = env.register(FinancingContract, ());
+    let financing_id =
+        env.register(FinancingContract, (admin.clone(), registry_id.clone(), token.clone()));
     let fin = invofi_financing::FinancingContractClient::new(env, &financing_id);
-    fin.initialize(admin, &registry_id, token);
 
     // Repayment
-    let repayment_id = env.register(RepaymentContract, ());
+    let repayment_id = env.register(
+        RepaymentContract,
+        (
+            admin.clone(),
+            registry_id.clone(),
+            financing_id.clone(),
+            token.clone(),
+        ),
+    );
     let rep = super::RepaymentContractClient::new(env, &repayment_id);
-    rep.initialize(admin, &registry_id, &financing_id, token);
 
     // Register repayment contract with financing (for authorized callbacks)
     fin.set_repayment_contract(admin, &repayment_id);
@@ -50,25 +56,27 @@ fn setup_contracts<'a>(
     (reg, fin, rep)
 }
 
-/// Deploy a test SEP-41 token, mint `amount` to `lender`, and approve the
-/// financing contract as spender.
-fn setup_token(env: &Env, financing_id: &Address, lender: &Address, amount: i128) -> Address {
+/// Deploy a fresh test SEP-41 token and return its contract address.
+fn create_token(env: &Env) -> Address {
     let token_admin = Address::generate(env);
     let sac = env.register_stellar_asset_contract_v2(token_admin);
-    let token_id = sac.address();
+    sac.address()
+}
 
-    let asset_client = token::StellarAssetClient::new(env, &token_id);
-    asset_client.mint(lender, &amount);
+/// Mint `amount` to `who` and approve `spender` to move those funds (the same
+/// flow a real lender runs on-chain before `accept_offer`).
+fn mint_and_approve(
+    env: &Env,
+    token_id: &Address,
+    spender: &Address,
+    who: &Address,
+    amount: i128,
+) {
+    let asset_client = token::StellarAssetClient::new(env, token_id);
+    asset_client.mint(who, &amount);
 
-    let token_client = token::TokenClient::new(env, &token_id);
-    token_client.approve(
-        lender,
-        financing_id,
-        &amount,
-        &(env.ledger().sequence() + 1000),
-    );
-
-    token_id
+    let token_client = token::TokenClient::new(env, token_id);
+    token_client.approve(who, spender, &amount, &(env.ledger().sequence() + 1000));
 }
 
 // ─── Full lifecycle tests ───────────────────────────────────────────────────
@@ -90,19 +98,28 @@ fn test_repay_invoice_partial_then_full() {
     let total_due = amount + yield_amount;
 
     // Deploy all three contracts
-    let financing_id = env.register(FinancingContract, ());
-    let token_id = setup_token(&env, &financing_id, &lender, amount);
-
-    let registry_id = env.register(RegistryContract, ());
+    let token_id = create_token(&env);
+    let registry_id = env.register(RegistryContract, (admin.clone(),));
     let reg = invofi_registry::RegistryContractClient::new(&env, &registry_id);
-    reg.initialize(&admin);
 
+    let financing_id = env.register(
+        FinancingContract,
+        (admin.clone(), registry_id.clone(), token_id.clone()),
+    );
     let fin = invofi_financing::FinancingContractClient::new(&env, &financing_id);
-    fin.initialize(&admin, &registry_id, &token_id);
 
-    let repayment_id = env.register(RepaymentContract, ());
+    let repayment_id = env.register(
+        RepaymentContract,
+        (
+            admin.clone(),
+            registry_id.clone(),
+            financing_id.clone(),
+            token_id.clone(),
+        ),
+    );
     let rep = super::RepaymentContractClient::new(&env, &repayment_id);
-    rep.initialize(&admin, &registry_id, &financing_id, &token_id);
+
+    mint_and_approve(&env, &token_id, &financing_id, &lender, amount);
     fin.set_repayment_contract(&admin, &repayment_id);
     reg.set_repayment_contract(&admin, &repayment_id);
     reg.set_financing_contract(&admin, &financing_id);
@@ -174,19 +191,28 @@ fn test_repay_invoice_overpayment_panics() {
     let yield_amount = amount * (interest_rate as i128) / 10_000;
     let total_due = amount + yield_amount;
 
-    let financing_id = env.register(FinancingContract, ());
-    let token_id = setup_token(&env, &financing_id, &lender, amount);
-
-    let registry_id = env.register(RegistryContract, ());
+    let token_id = create_token(&env);
+    let registry_id = env.register(RegistryContract, (admin.clone(),));
     let reg = invofi_registry::RegistryContractClient::new(&env, &registry_id);
-    reg.initialize(&admin);
 
+    let financing_id = env.register(
+        FinancingContract,
+        (admin.clone(), registry_id.clone(), token_id.clone()),
+    );
     let fin = invofi_financing::FinancingContractClient::new(&env, &financing_id);
-    fin.initialize(&admin, &registry_id, &token_id);
 
-    let repayment_id = env.register(RepaymentContract, ());
+    let repayment_id = env.register(
+        RepaymentContract,
+        (
+            admin.clone(),
+            registry_id.clone(),
+            financing_id.clone(),
+            token_id.clone(),
+        ),
+    );
     let rep = super::RepaymentContractClient::new(&env, &repayment_id);
-    rep.initialize(&admin, &registry_id, &financing_id, &token_id);
+
+    mint_and_approve(&env, &token_id, &financing_id, &lender, amount);
     fin.set_repayment_contract(&admin, &repayment_id);
     reg.set_repayment_contract(&admin, &repayment_id);
     reg.set_financing_contract(&admin, &financing_id);
@@ -270,19 +296,28 @@ fn test_repay_zero_amount_panics() {
     let lender = Address::generate(&env);
     let amount: i128 = 1_000_000_000;
 
-    let financing_id = env.register(FinancingContract, ());
-    let token_id = setup_token(&env, &financing_id, &lender, amount);
-
-    let registry_id = env.register(RegistryContract, ());
+    let token_id = create_token(&env);
+    let registry_id = env.register(RegistryContract, (admin.clone(),));
     let reg = invofi_registry::RegistryContractClient::new(&env, &registry_id);
-    reg.initialize(&admin);
 
+    let financing_id = env.register(
+        FinancingContract,
+        (admin.clone(), registry_id.clone(), token_id.clone()),
+    );
     let fin = invofi_financing::FinancingContractClient::new(&env, &financing_id);
-    fin.initialize(&admin, &registry_id, &token_id);
 
-    let repayment_id = env.register(RepaymentContract, ());
+    let repayment_id = env.register(
+        RepaymentContract,
+        (
+            admin.clone(),
+            registry_id.clone(),
+            financing_id.clone(),
+            token_id.clone(),
+        ),
+    );
     let rep = super::RepaymentContractClient::new(&env, &repayment_id);
-    rep.initialize(&admin, &registry_id, &financing_id, &token_id);
+
+    mint_and_approve(&env, &token_id, &financing_id, &lender, amount);
     fin.set_repayment_contract(&admin, &repayment_id);
     reg.set_repayment_contract(&admin, &repayment_id);
     reg.set_financing_contract(&admin, &financing_id);
@@ -329,19 +364,28 @@ fn test_reclaim_invoice_after_grace_period() {
     let amount: i128 = 1_000_000_000;
     let due_date: u64 = 1_735_689_600;
 
-    let financing_id = env.register(FinancingContract, ());
-    let token_id = setup_token(&env, &financing_id, &lender, amount);
-
-    let registry_id = env.register(RegistryContract, ());
+    let token_id = create_token(&env);
+    let registry_id = env.register(RegistryContract, (admin.clone(),));
     let reg = invofi_registry::RegistryContractClient::new(&env, &registry_id);
-    reg.initialize(&admin);
 
+    let financing_id = env.register(
+        FinancingContract,
+        (admin.clone(), registry_id.clone(), token_id.clone()),
+    );
     let fin = invofi_financing::FinancingContractClient::new(&env, &financing_id);
-    fin.initialize(&admin, &registry_id, &token_id);
 
-    let repayment_id = env.register(RepaymentContract, ());
+    let repayment_id = env.register(
+        RepaymentContract,
+        (
+            admin.clone(),
+            registry_id.clone(),
+            financing_id.clone(),
+            token_id.clone(),
+        ),
+    );
     let rep = super::RepaymentContractClient::new(&env, &repayment_id);
-    rep.initialize(&admin, &registry_id, &financing_id, &token_id);
+
+    mint_and_approve(&env, &token_id, &financing_id, &lender, amount);
     fin.set_repayment_contract(&admin, &repayment_id);
     reg.set_repayment_contract(&admin, &repayment_id);
     reg.set_financing_contract(&admin, &financing_id);
@@ -394,19 +438,28 @@ fn test_reclaim_before_grace_period_panics() {
     let amount: i128 = 1_000_000_000;
     let due_date: u64 = 1_735_689_600;
 
-    let financing_id = env.register(FinancingContract, ());
-    let token_id = setup_token(&env, &financing_id, &lender, amount);
-
-    let registry_id = env.register(RegistryContract, ());
+    let token_id = create_token(&env);
+    let registry_id = env.register(RegistryContract, (admin.clone(),));
     let reg = invofi_registry::RegistryContractClient::new(&env, &registry_id);
-    reg.initialize(&admin);
 
+    let financing_id = env.register(
+        FinancingContract,
+        (admin.clone(), registry_id.clone(), token_id.clone()),
+    );
     let fin = invofi_financing::FinancingContractClient::new(&env, &financing_id);
-    fin.initialize(&admin, &registry_id, &token_id);
 
-    let repayment_id = env.register(RepaymentContract, ());
+    let repayment_id = env.register(
+        RepaymentContract,
+        (
+            admin.clone(),
+            registry_id.clone(),
+            financing_id.clone(),
+            token_id.clone(),
+        ),
+    );
     let rep = super::RepaymentContractClient::new(&env, &repayment_id);
-    rep.initialize(&admin, &registry_id, &financing_id, &token_id);
+
+    mint_and_approve(&env, &token_id, &financing_id, &lender, amount);
     fin.set_repayment_contract(&admin, &repayment_id);
     reg.set_repayment_contract(&admin, &repayment_id);
     reg.set_financing_contract(&admin, &financing_id);
@@ -448,19 +501,28 @@ fn test_reclaim_on_non_overdue_panics() {
     let amount: i128 = 1_000_000_000;
     let due_date: u64 = 3_000_000;
 
-    let financing_id = env.register(FinancingContract, ());
-    let token_id = setup_token(&env, &financing_id, &lender, amount);
-
-    let registry_id = env.register(RegistryContract, ());
+    let token_id = create_token(&env);
+    let registry_id = env.register(RegistryContract, (admin.clone(),));
     let reg = invofi_registry::RegistryContractClient::new(&env, &registry_id);
-    reg.initialize(&admin);
 
+    let financing_id = env.register(
+        FinancingContract,
+        (admin.clone(), registry_id.clone(), token_id.clone()),
+    );
     let fin = invofi_financing::FinancingContractClient::new(&env, &financing_id);
-    fin.initialize(&admin, &registry_id, &token_id);
 
-    let repayment_id = env.register(RepaymentContract, ());
+    let repayment_id = env.register(
+        RepaymentContract,
+        (
+            admin.clone(),
+            registry_id.clone(),
+            financing_id.clone(),
+            token_id.clone(),
+        ),
+    );
     let rep = super::RepaymentContractClient::new(&env, &repayment_id);
-    rep.initialize(&admin, &registry_id, &financing_id, &token_id);
+
+    mint_and_approve(&env, &token_id, &financing_id, &lender, amount);
     fin.set_repayment_contract(&admin, &repayment_id);
     reg.set_repayment_contract(&admin, &repayment_id);
     reg.set_financing_contract(&admin, &financing_id);
@@ -499,19 +561,28 @@ fn test_calculate_total_due() {
     let originator = Address::generate(&env);
     let lender = Address::generate(&env);
 
-    let financing_id = env.register(FinancingContract, ());
-    let token_id = setup_token(&env, &financing_id, &lender, 10_000i128);
-
-    let registry_id = env.register(RegistryContract, ());
+    let token_id = create_token(&env);
+    let registry_id = env.register(RegistryContract, (admin.clone(),));
     let reg = invofi_registry::RegistryContractClient::new(&env, &registry_id);
-    reg.initialize(&admin);
 
+    let financing_id = env.register(
+        FinancingContract,
+        (admin.clone(), registry_id.clone(), token_id.clone()),
+    );
     let fin = invofi_financing::FinancingContractClient::new(&env, &financing_id);
-    fin.initialize(&admin, &registry_id, &token_id);
 
-    let repayment_id = env.register(RepaymentContract, ());
+    let repayment_id = env.register(
+        RepaymentContract,
+        (
+            admin.clone(),
+            registry_id.clone(),
+            financing_id.clone(),
+            token_id.clone(),
+        ),
+    );
     let rep = super::RepaymentContractClient::new(&env, &repayment_id);
-    rep.initialize(&admin, &registry_id, &financing_id, &token_id);
+
+    mint_and_approve(&env, &token_id, &financing_id, &lender, 10_000i128);
     fin.set_repayment_contract(&admin, &repayment_id);
     reg.set_repayment_contract(&admin, &repayment_id);
     reg.set_financing_contract(&admin, &financing_id);
@@ -553,19 +624,28 @@ fn test_calculate_total_due_after_partial() {
     let yield_amount = amount * (interest_rate as i128) / 10_000;
     let total_due = amount + yield_amount;
 
-    let financing_id = env.register(FinancingContract, ());
-    let token_id = setup_token(&env, &financing_id, &lender, amount);
-
-    let registry_id = env.register(RegistryContract, ());
+    let token_id = create_token(&env);
+    let registry_id = env.register(RegistryContract, (admin.clone(),));
     let reg = invofi_registry::RegistryContractClient::new(&env, &registry_id);
-    reg.initialize(&admin);
 
+    let financing_id = env.register(
+        FinancingContract,
+        (admin.clone(), registry_id.clone(), token_id.clone()),
+    );
     let fin = invofi_financing::FinancingContractClient::new(&env, &financing_id);
-    fin.initialize(&admin, &registry_id, &token_id);
 
-    let repayment_id = env.register(RepaymentContract, ());
+    let repayment_id = env.register(
+        RepaymentContract,
+        (
+            admin.clone(),
+            registry_id.clone(),
+            financing_id.clone(),
+            token_id.clone(),
+        ),
+    );
     let rep = super::RepaymentContractClient::new(&env, &repayment_id);
-    rep.initialize(&admin, &registry_id, &financing_id, &token_id);
+
+    mint_and_approve(&env, &token_id, &financing_id, &lender, amount);
     fin.set_repayment_contract(&admin, &repayment_id);
     reg.set_repayment_contract(&admin, &repayment_id);
     reg.set_financing_contract(&admin, &financing_id);
@@ -610,16 +690,32 @@ fn test_calculate_total_due_after_partial() {
 fn test_version_returns_nonempty_string() {
     let env = Env::default();
     env.mock_all_auths();
-    let repayment_id = env.register(RepaymentContract, ());
+    let repayment_id = env.register(
+        RepaymentContract,
+        (
+            Address::generate(&env),
+            Address::generate(&env),
+            Address::generate(&env),
+            Address::generate(&env),
+        ),
+    );
     let rep = super::RepaymentContractClient::new(&env, &repayment_id);
     let ver = rep.version();
-    assert!(ver.len() > 0);
+    assert!(!ver.is_empty());
 }
 
 #[test]
 fn test_get_duration_limits() {
     let env = Env::default();
-    let repayment_id = env.register(RepaymentContract, ());
+    let repayment_id = env.register(
+        RepaymentContract,
+        (
+            Address::generate(&env),
+            Address::generate(&env),
+            Address::generate(&env),
+            Address::generate(&env),
+        ),
+    );
     let rep = super::RepaymentContractClient::new(&env, &repayment_id);
     let (min, max) = rep.get_duration_limits();
     assert_eq!(min, invofi_common::MIN_OFFER_DURATION_SECS);
@@ -642,23 +738,31 @@ fn test_pause_blocks_repay_invoice() {
     let offer_id = symbol_short!("offp2");
     let amount: i128 = 1_000_000_000;
 
-    let financing_id = env.register(FinancingContract, ());
-    let token_id = setup_token(&env, &financing_id, &lender, amount);
-
-    let registry_id = env.register(RegistryContract, ());
+    let token_id = create_token(&env);
+    let registry_id = env.register(RegistryContract, (admin.clone(),));
     let reg = invofi_registry::RegistryContractClient::new(&env, &registry_id);
-    reg.initialize(&admin);
-    reg.set_financing_contract(&admin, &financing_id);
 
+    let financing_id = env.register(
+        FinancingContract,
+        (admin.clone(), registry_id.clone(), token_id.clone()),
+    );
     let fin = invofi_financing::FinancingContractClient::new(&env, &financing_id);
-    fin.initialize(&admin, &registry_id, &token_id);
 
-    let repayment_id = env.register(RepaymentContract, ());
+    let repayment_id = env.register(
+        RepaymentContract,
+        (
+            admin.clone(),
+            registry_id.clone(),
+            financing_id.clone(),
+            token_id.clone(),
+        ),
+    );
     let rep = super::RepaymentContractClient::new(&env, &repayment_id);
-    rep.initialize(&admin, &registry_id, &financing_id, &token_id);
 
+    mint_and_approve(&env, &token_id, &financing_id, &lender, amount);
     fin.set_repayment_contract(&admin, &repayment_id);
     reg.set_repayment_contract(&admin, &repayment_id);
+    reg.set_financing_contract(&admin, &financing_id);
 
     reg.register_invoice(
         &invoice_id,
@@ -699,28 +803,36 @@ fn test_reclaim_triggers_defaulted_payout_and_reputation() {
     let amount: i128 = 1_000_000_000;
     let due_date: u64 = 1_735_689_600;
 
-    let financing_id = env.register(FinancingContract, ());
-    let token_id = setup_token(&env, &financing_id, &lender, amount);
-
-    let registry_id = env.register(RegistryContract, ());
+    let token_id = create_token(&env);
+    let registry_id = env.register(RegistryContract, (admin.clone(),));
     let reg = invofi_registry::RegistryContractClient::new(&env, &registry_id);
-    reg.initialize(&admin);
 
+    let financing_id = env.register(
+        FinancingContract,
+        (admin.clone(), registry_id.clone(), token_id.clone()),
+    );
     let fin = invofi_financing::FinancingContractClient::new(&env, &financing_id);
-    fin.initialize(&admin, &registry_id, &token_id);
 
-    let repayment_id = env.register(RepaymentContract, ());
+    let repayment_id = env.register(
+        RepaymentContract,
+        (
+            admin.clone(),
+            registry_id.clone(),
+            financing_id.clone(),
+            token_id.clone(),
+        ),
+    );
     let rep = super::RepaymentContractClient::new(&env, &repayment_id);
-    rep.initialize(&admin, &registry_id, &financing_id, &token_id);
+
+    mint_and_approve(&env, &token_id, &financing_id, &lender, amount);
     fin.set_repayment_contract(&admin, &repayment_id);
     reg.set_repayment_contract(&admin, &repayment_id);
     reg.set_financing_contract(&admin, &financing_id);
 
     // Insurance pool, funded by a third-party staker with the same token
     // the loan settles in (300M coverage against a 1.05B obligation).
-    let insurance_id = env.register(InsuranceContract, ());
+    let insurance_id = env.register(InsuranceContract, (admin.clone(), token_id.clone()));
     let ins = invofi_insurance::InsuranceContractClient::new(&env, &insurance_id);
-    ins.initialize(&admin, &token_id);
     let asset = token::StellarAssetClient::new(&env, &token_id);
     asset.mint(&staker, &300_000_000);
     let tok = token::TokenClient::new(&env, &token_id);
@@ -734,9 +846,8 @@ fn test_reclaim_triggers_defaulted_payout_and_reputation() {
     ins.set_payout_caller(&admin, &repayment_id);
 
     // Reputation contract, recorder = repayment.
-    let reputation_id = env.register(ReputationContract, ());
+    let reputation_id = env.register(ReputationContract, (admin.clone(),));
     let repu = invofi_reputation::ReputationContractClient::new(&env, &reputation_id);
-    repu.initialize(&admin);
     repu.set_recorder(&admin, &repayment_id);
 
     // Wire repayment -> insurance + reputation.
@@ -807,26 +918,34 @@ fn test_full_repay_records_reputation_success() {
     let amount: i128 = 1_000_000_000;
     let due_date: u64 = 1_735_689_600;
 
-    let financing_id = env.register(FinancingContract, ());
-    let token_id = setup_token(&env, &financing_id, &lender, amount);
-
-    let registry_id = env.register(RegistryContract, ());
+    let token_id = create_token(&env);
+    let registry_id = env.register(RegistryContract, (admin.clone(),));
     let reg = invofi_registry::RegistryContractClient::new(&env, &registry_id);
-    reg.initialize(&admin);
 
+    let financing_id = env.register(
+        FinancingContract,
+        (admin.clone(), registry_id.clone(), token_id.clone()),
+    );
     let fin = invofi_financing::FinancingContractClient::new(&env, &financing_id);
-    fin.initialize(&admin, &registry_id, &token_id);
 
-    let repayment_id = env.register(RepaymentContract, ());
+    let repayment_id = env.register(
+        RepaymentContract,
+        (
+            admin.clone(),
+            registry_id.clone(),
+            financing_id.clone(),
+            token_id.clone(),
+        ),
+    );
     let rep = super::RepaymentContractClient::new(&env, &repayment_id);
-    rep.initialize(&admin, &registry_id, &financing_id, &token_id);
+
+    mint_and_approve(&env, &token_id, &financing_id, &lender, amount);
     fin.set_repayment_contract(&admin, &repayment_id);
     reg.set_repayment_contract(&admin, &repayment_id);
     reg.set_financing_contract(&admin, &financing_id);
 
-    let reputation_id = env.register(ReputationContract, ());
+    let reputation_id = env.register(ReputationContract, (admin.clone(),));
     let repu = invofi_reputation::ReputationContractClient::new(&env, &reputation_id);
-    repu.initialize(&admin);
     repu.set_recorder(&admin, &repayment_id);
     rep.set_reputation(&admin, &reputation_id);
 

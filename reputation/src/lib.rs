@@ -55,8 +55,11 @@ impl ReputationContract {
     // ── Initialization / admin ──────────────────────────────────────────────
 
     /// One-time setup. Sets the admin address.
-    pub fn initialize(env: Env, admin: Address) {
-        admin.require_auth();
+    ///
+    /// Runs as the contract **constructor**: it is executed atomically as part
+    /// of the deploy operation, which only the deployer can authorize. There
+    /// is therefore no separate initialize() call to front-run (issue #75).
+    pub fn __constructor(env: Env, admin: Address) {
         if env.storage().instance().has(&symbol_short!("admin")) {
             panic!("Already initialized");
         }

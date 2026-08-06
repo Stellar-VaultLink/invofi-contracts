@@ -3,6 +3,29 @@
 All notable changes to InvoFi Contracts are documented here.
 Versioning follows [Semantic Versioning](https://semver.org/).
 
+## [0.6.1] – 2026-08-06
+
+### Security
+- **Deployer-bound initialization (issue #75)** — `initialize()` removed from
+  every contract (registry, financing, repayment, insurance, reputation). All
+  one-time setup now runs in the Soroban **constructor** (`__constructor`),
+  which executes atomically inside the deploy operation and can only be
+  authorized by the deployer. This eliminates the front-running window where a
+  third party could call `initialize` on a freshly deployed contract and
+  become admin. Design in `docs/adr/0005-deployer-bound-initialization.md`.
+- **Deploy workflow hardened** — `deploy-contract.yml` now passes constructor
+  args at deploy time (`stellar contract deploy -- --admin … --registry …`)
+  in dependency order (registry → financing → repayment → insurance →
+  reputation); the separate post-deploy initialize step is removed, and
+  reputation (previously missing) is deployed + wired (`set_insurance`,
+  `set_reputation`, `set_payout_caller`, `set_recorder`). `deploy.sh` updated
+  to match.
+- **Regression tests** — new `test_constructor_binds_admin_at_deploy` and
+  `test_constructor_cannot_be_reinvoked` (registry) and
+  `test_constructor_binds_admin_and_staking_token` (insurance) prove the
+  admin is bound at deploy and that a post-deploy `__constructor` invoke
+  fails. All 110 tests pass with constructor-based test deployment.
+
 ## [0.6.0] – 2026-08-06
 
 ### Added

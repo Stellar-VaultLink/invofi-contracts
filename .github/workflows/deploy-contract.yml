@@ -53,21 +53,30 @@ jobs:
       - name: Build WASM
         run: stellar contract build
 
-      - name: Deploy registry + financing + repayment
+      - name: Deploy contracts with constructor-bound admin
         id: deploy
         run: |
           ADMIN_PUBLIC=$(stellar keys address invofi-deployer --network ${{ inputs.network }})
           echo "admin_public=$ADMIN_PUBLIC" >> "$GITHUB_OUTPUT"
 
-          REGISTRY_ID=$(stellar contract deploy --wasm target/wasm32v1-none/release/invofi_registry.wasm --source invofi-deployer --network ${{ inputs.network }})
-          FINANCING_ID=$(stellar contract deploy --wasm target/wasm32v1-none/release/invofi_financing.wasm --source invofi-deployer --network ${{ inputs.network }})
-          REPAYMENT_ID=$(stellar contract deploy --wasm target/wasm32v1-none/release/invofi_repayment.wasm --source invofi-deployer --network ${{ inputs.network }})
-          INSURANCE_ID=$(stellar contract deploy --wasm target/wasm32v1-none/release/invofi_insurance.wasm --source invofi-deployer --network ${{ inputs.network }})
+          # Constructors (issue #75): admin + wiring are bound atomically inside
+          # the deploy operation, which only the deployer can authorize. There is
+          # no separate initialize() call a third party could front-run. Deploy
+          # in dependency order — financing/repayment reference earlier IDs.
+          XLM_TOKEN=$(stellar contract id asset --asset native --network ${{ inputs.network }})
+          USDC_TOKEN=$(stellar contract id asset --asset USDC:GBBD47IF6LWK7P7MDEVSCWR7DPUWV3NY3DTQEVFL4NAT4AQH3ZLLFLA5 --network ${{ inputs.network }})
+
+          REGISTRY_ID=$(stellar contract deploy --wasm target/wasm32v1-none/release/invofi_registry.wasm --source invofi-deployer --network ${{ inputs.network }} -- --admin "$ADMIN_PUBLIC")
+          FINANCING_ID=$(stellar contract deploy --wasm target/wasm32v1-none/release/invofi_financing.wasm --source invofi-deployer --network ${{ inputs.network }} -- --admin "$ADMIN_PUBLIC" --registry "$REGISTRY_ID" --token "$XLM_TOKEN")
+          REPAYMENT_ID=$(stellar contract deploy --wasm target/wasm32v1-none/release/invofi_repayment.wasm --source invofi-deployer --network ${{ inputs.network }} -- --admin "$ADMIN_PUBLIC" --registry "$REGISTRY_ID" --financing "$FINANCING_ID" --token "$XLM_TOKEN")
+          INSURANCE_ID=$(stellar contract deploy --wasm target/wasm32v1-none/release/invofi_insurance.wasm --source invofi-deployer --network ${{ inputs.network }} -- --admin "$ADMIN_PUBLIC" --token "$XLM_TOKEN")
+          REPUTATION_ID=$(stellar contract deploy --wasm target/wasm32v1-none/release/invofi_reputation.wasm --source invofi-deployer --network ${{ inputs.network }} -- --admin "$ADMIN_PUBLIC")
 
           echo "registry_id=$REGISTRY_ID" >> "$GITHUB_OUTPUT"
           echo "financing_id=$FINANCING_ID" >> "$GITHUB_OUTPUT"
           echo "repayment_id=$REPAYMENT_ID" >> "$GITHUB_OUTPUT"
           echo "insurance_id=$INSURANCE_ID" >> "$GITHUB_OUTPUT"
+          echo "reputation_id=$REPUTATION_ID" >> "$GITHUB_OUTPUT"
 
           cat >> "$GITHUB_STEP_SUMMARY" <<OUTEOF
           ## Deployed contracts (testnet)
@@ -78,8 +87,9 @@ jobs:
           | financing | \`$FINANCING_ID\` |
           | repayment | \`$REPAYMENT_ID\` |
           | insurance | \`$INSURANCE_ID\` |
+          | reputation | \`$REPUTATION_ID\` |
           | position token (POS) | deployed + admin'ed to financing in the next step |
-          | admin | \`$ADMIN_PUBLIC\` |
+          | admin (constructor-bound) | \`$ADMIN_PUBLIC\` |
 
           Set these in Vercel:
           - NEXT_PUBLIC_REGISTRY_CONTRACT_ID
@@ -87,21 +97,20 @@ jobs:
           - NEXT_PUBLIC_REPAYMENT_CONTRACT_ID
           OUTEOF
 
-      - name: Initialize contracts and wire cross-contract callers
+      - name: Wire cross-contract callers and currencies
         env:
           REGISTRY_ID: ${{ steps.deploy.outputs.registry_id }}
           FINANCING_ID: ${{ steps.deploy.outputs.financing_id }}
           REPAYMENT_ID: ${{ steps.deploy.outputs.repayment_id }}
           INSURANCE_ID: ${{ steps.deploy.outputs.insurance_id }}
+          REPUTATION_ID: ${{ steps.deploy.outputs.reputation_id }}
         run: |
           ADMIN_PUBLIC=${{ steps.deploy.outputs.admin_public }}
           XLM_TOKEN=$(stellar contract id asset --asset native --network ${{ inputs.network }})
           USDC_TOKEN=$(stellar contract id asset --asset USDC:GBBD47IF6LWK7P7MDEVSCWR7DPUWV3NY3DTQEVFL4NAT4AQH3ZLLFLA5 --network ${{ inputs.network }})
 
-          stellar contract invoke --id "$REGISTRY_ID" --source invofi-deployer --network ${{ inputs.network }} -- initialize --admin "$ADMIN_PUBLIC"
-          stellar contract invoke --id "$FINANCING_ID" --source invofi-deployer --network ${{ inputs.network }} -- initialize --admin "$ADMIN_PUBLIC" --registry "$REGISTRY_ID" --token "$XLM_TOKEN"
-          stellar contract invoke --id "$REPAYMENT_ID" --source invofi-deployer --network ${{ inputs.network }} -- initialize --admin "$ADMIN_PUBLIC" --registry "$REGISTRY_ID" --financing "$FINANCING_ID" --token "$XLM_TOKEN"
-          stellar contract invoke --id "$INSURANCE_ID" --source invofi-deployer --network ${{ inputs.network }} -- initialize --admin "$ADMIN_PUBLIC" --token "$XLM_TOKEN"
+          # No initialize() calls: constructors already bound admin/wiring at
+          # deploy. Only the admin-gated cross-contract wiring remains.
 
           stellar contract invoke --id "$REGISTRY_ID" --source invofi-deployer --network ${{ inputs.network }} -- set_financing_contract --admin "$ADMIN_PUBLIC" --financing "$FINANCING_ID"
           stellar contract invoke --id "$REGISTRY_ID" --source invofi-deployer --network ${{ inputs.network }} -- set_repayment_contract --admin "$ADMIN_PUBLIC" --repayment "$REPAYMENT_ID"
@@ -122,6 +131,13 @@ jobs:
           # message rather than silently minting from the wrong admin.
           stellar contract invoke --id "$POS_ID" --source invofi-deployer --network ${{ inputs.network }} -- set_admin --new_admin "$FINANCING_ID"
           stellar contract invoke --id "$FINANCING_ID" --source invofi-deployer --network ${{ inputs.network }} -- set_position_token --admin "$ADMIN_PUBLIC" --token "$POS_ID"
+
+          # Insurance payout caller + reputation recorder: repayment is the only
+          # authorized caller on both.
+          stellar contract invoke --id "$REPAYMENT_ID" --source invofi-deployer --network ${{ inputs.network }} -- set_insurance --admin "$ADMIN_PUBLIC" --insurance "$INSURANCE_ID"
+          stellar contract invoke --id "$REPAYMENT_ID" --source invofi-deployer --network ${{ inputs.network }} -- set_reputation --admin "$ADMIN_PUBLIC" --reputation "$REPUTATION_ID"
+          stellar contract invoke --id "$INSURANCE_ID" --source invofi-deployer --network ${{ inputs.network }} -- set_payout_caller --admin "$ADMIN_PUBLIC" --payout_caller "$REPAYMENT_ID"
+          stellar contract invoke --id "$REPUTATION_ID" --source invofi-deployer --network ${{ inputs.network }} -- set_recorder --admin "$ADMIN_PUBLIC" --recorder "$REPAYMENT_ID"
 
           echo "position_token_id=$POS_ID" >> "$GITHUB_OUTPUT"
           echo "position_token=$POS_ID" >> "$GITHUB_STEP_SUMMARY"
