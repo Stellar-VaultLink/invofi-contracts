@@ -207,6 +207,10 @@ Or trigger the **[Deploy Contract](https://github.com/Stellar-VaultLink/invofi-c
 
 See [CHANGELOG.md](./CHANGELOG.md) for version history.
 
+## Compliance
+
+See the [compliance & regulatory posture](https://github.com/Stellar-VaultLink/invofi/blob/main/docs/compliance.md) in the main repo — KYC/SEP-12 roadmap, jurisdictions avoided at launch, and the securities-by-design analysis.
+
 ## Maintainers
 
 - [@samjay8](https://github.com/samjay8) — project maintainer and protocol owner
