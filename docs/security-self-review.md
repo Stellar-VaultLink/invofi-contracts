@@ -137,7 +137,7 @@ authorization:
   so a third-party contract cannot invoke system transitions.
 
 **Verdict:** no exploitable reentrancy path found in the reviewed functions.
-Two hardening follow-ups are noted for the audit phase (§7).
+Three hardening follow-ups are noted for the audit phase (§7).
 
 ---
 
