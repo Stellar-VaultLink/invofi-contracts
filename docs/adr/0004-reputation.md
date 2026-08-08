@@ -50,3 +50,11 @@ raw counts into a simple, transparent, publicly-readable score.
   action after the grace period — and is covered by the contract test
   suite; a live default requires an invoice to pass its 7-day grace
   period, which is impractical on testnet.
+
+## Related issues (backlog)
+
+- [#83 — Reputation: cache score as a scalar for cheap get_score reads](https://github.com/Stellar-VaultLink/invofi-contracts/issues/83) — the
+  decision records raw counts as source of truth; this caches the derived
+  score for cheap reads without changing the source of truth.
+- [#100 — Emit ReputationChanged event on every score update](https://github.com/Stellar-VaultLink/invofi-contracts/issues/100) — surfaces score
+  updates to the frontend and indexers (adds a row to the events table).

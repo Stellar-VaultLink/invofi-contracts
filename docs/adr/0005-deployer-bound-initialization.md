@@ -67,3 +67,13 @@ Details:
   `set_position_token`, `register_currency`, …).
 - Live instances deployed before this ADR remain admin-bound to the deployer
   (`GBDDLOWR6…` verified on all five testnet contracts, issue #75 follow-up).
+
+## Related issues (backlog)
+
+- [#96 — On-chain contract_version getter for deployment verification](https://github.com/Stellar-VaultLink/invofi-contracts/issues/96) — gives
+  operators a way to verify which WASM version is live, complementing the
+  constructor-bound admin.
+- [#104 — Docs: manual end-to-end lifecycle walkthrough with stellar-cli](https://github.com/Stellar-VaultLink/invofi-contracts/issues/104) — documents
+  the order-sensitive deploy + wiring flow for fresh hands.
+- [#105 — CI: byte-for-byte WASM determinism check on every build](https://github.com/Stellar-VaultLink/invofi-contracts/issues/105) — makes
+  constructor-based deploys reproducible and auditable.

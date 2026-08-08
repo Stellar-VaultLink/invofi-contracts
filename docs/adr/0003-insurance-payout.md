@@ -62,3 +62,15 @@ defaults-safe behavior over generosity.
   offer/position-token/repayment lifecycle; the Overdue -> Defaulted
   transition is exercised by tests and awaits a live reclaim once a
   Financed invoice passes its grace period.
+
+## Related issues (backlog)
+
+- [#82 — Insurance: payout-cap and pool-depleted regression tests](https://github.com/Stellar-VaultLink/invofi-contracts/issues/82) — directly
+  exercises decision #3 (capped payout, empty pool → 0).
+- [#101 — Insurance: enforce a documented minimum stake amount](https://github.com/Stellar-VaultLink/invofi-contracts/issues/101) — bounds pool
+  participation before value moves.
+- [#102 — Insurance: staker balance overflow and rounding bounds tests](https://github.com/Stellar-VaultLink/invofi-contracts/issues/102) — verifies the
+  pro-rata reduction math in decision #5 (including the remainder
+  absorption rule).
+- [#94 — End-to-end balance conservation test across the full lifecycle](https://github.com/Stellar-VaultLink/invofi-contracts/issues/94) — stake →
+  payout → pool depletion must conserve balances.
