@@ -29,8 +29,8 @@ implements, verifies, or extends. Each ADR ends with a *Related issues
 | Deployment & verification | #96, #104, #105 | [ADR-0005](./0005-deployer-bound-initialization.md) |
 | Protocol events spec | #90, #95, #100 | [README → Protocol Events](../README.md#protocol-events) |
 | Offer / invoice lifecycle | #77, #78, #79, #92 | README → Contract Functions |
-| Indexer & keeper integration | #84, #91, #98 | [invofi/docs/adr/0002-event-indexer](https://github.com/Stellar-VaultLink/invofi/blob/main/docs/adr/0002-event-indexer.md) |
-| Hardening / tests / misc | #86, #89, #93, #99, #103, #106 | [security-self-review](../security-self-review.md) |
+| Indexer & keeper integration | #84, #91, #98, #106 | [invofi/docs/adr/0002-event-indexer](https://github.com/Stellar-VaultLink/invofi/blob/main/docs/adr/0002-event-indexer.md) |
+| Hardening / tests / misc | #86, #89, #93, #99, #103 | [security-self-review](../security-self-review.md) |
 
 ## Why ADRs
 
