@@ -10,6 +10,8 @@
 
 ## Checklist
 - [ ] `cargo test` passes
+- [ ] `cargo clippy -- -D warnings` passes (CI)
+- [ ] Soroban Scout security analysis passes (CI)
 - [ ] `stellar contract build` succeeds
 - [ ] New functions have corresponding tests
 - [ ] Breaking changes are documented

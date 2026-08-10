@@ -1,7 +1,7 @@
 ---
 name: Bug Report
 about: Report a contract bug or unexpected behaviour
-title: "fix: "
+title: "bug: "
 labels: bug
 assignees: ''
 ---
