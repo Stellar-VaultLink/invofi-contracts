@@ -1,11 +1,11 @@
 # ADR-0003 — Insurance payout on default
 
-**Status:** Accepted (2026-08-06) · **Task:** 10 (insurance payout hook)
+**Status:** Accepted (2026-08-06)
 
 ## Context
 
-Task 9 built a staking pool (insurance/) with flat pool accounting but no
-payout logic. Task 10 wires that pool to the protocol's realized-credit-loss
+The insurance crate built a staking pool with flat pool accounting but no
+payout logic. The payout hook wires that pool to the protocol's realized-credit-loss
 event: when a Financed invoice is never repaid and the lender reclaims
 after the 7-day grace period, the lender should be made whole up to the
 pool's available balance. This is the highest-risk code in the plan because
@@ -41,7 +41,7 @@ defaults-safe behavior over generosity.
    integer-division remainder so reductions sum exactly to the payout.
    Stakers with zeroed balances are removed from the map.
 
-6. **Pause-guarded.** `pay_out` checks the shared pause flag (Task 4A); a
+6. **Pause-guarded.** `pay_out` checks the shared pause flag; a
    paused pool rejects payouts.
 
 7. **Optional wiring.** If no insurance contract is configured, the payout

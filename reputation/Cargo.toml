@@ -1,6 +1,6 @@
 [package]
 name = "invofi-reputation"
-version = "0.1.0"
+version = "0.7.0"
 edition = "2021"
 description = "Soroban reputation contract for InvoFi — repayment outcome scoring per originator"
 license = "MIT"

@@ -1,6 +1,6 @@
 # ADR-0004 — Originator reputation scoring
 
-**Status:** Accepted (2026-08-06) · **Task:** 11 (reputation contract)
+**Status:** Accepted (2026-08-06)
 
 ## Context
 
@@ -31,8 +31,7 @@ raw counts into a simple, transparent, publicly-readable score.
 4. **Reading: no auth.** `get_score` / `get_record` are callable by anyone
    — the frontend can display a score without signing.
 
-5. **Pause-guarded writes.** `record_outcome` checks the shared pause flag
-   (Task 4A).
+5. **Pause-guarded writes.** `record_outcome` checks the shared pause flag.
 
 6. **Explicitly deferred (follow-up issue):** an amount-weighted or
    recency-decayed model, and migration of existing on-chain history into a

@@ -3,18 +3,20 @@
 All notable changes to InvoFi Contracts are documented here.
 Versioning follows [Semantic Versioning](https://semver.org/).
 Commit messages follow [Conventional Commits](https://www.conventionalcommits.org/)
-and are enforced by commitlint in CI (Task 19).
+and are enforced by commitlint in CI.
 
-## [Unreleased] – 2026-08-06
+## [Unreleased]
+
+## [0.7.0] – 2026-08-06
 
 ### Docs
-- **README refresh (Task 18)** — roadmap section (shipped vs open), wallet
+- **README refresh** — roadmap section (shipped vs open), wallet
   support note (Freighter + LOBSTR via the approved-wallet allowlist), and
   corrected test count (110 across all five crates).
-- **Compliance link (Task 17)** — README now points at
+- **Compliance link** — README now points at
   `docs/compliance.md` in the main repo (KYC/SEP-12 roadmap, jurisdictions,
   securities-by-design analysis).
-- **Commitlint gate (Task 19)** — CI now rejects PRs whose commits are not
+- **Commitlint gate** — CI now rejects PRs whose commits are not
   Conventional Commits, matching the app repo.
 
 ## [0.6.1] – 2026-08-06
@@ -43,7 +45,7 @@ and are enforced by commitlint in CI (Task 19).
 ## [0.6.0] – 2026-08-06
 
 ### Added
-- **Insurance payout on default (Task 10)** — `reclaim_invoice` now triggers
+- **Insurance payout on default** — `reclaim_invoice` now triggers
   `insurance.pay_out(lender, principal + yield − amount_repaid)` after the
   grace period, capped at the pool's available balance and restricted to the
   configured payout caller (the repayment contract). The invoice transitions
@@ -52,12 +54,12 @@ and are enforced by commitlint in CI (Task 19).
   handling; `pool_pay` protocol event carries the payout amount. Design in
   `docs/adr/0003-insurance-payout.md`. Pool-depleted and no-insurance paths
   are first-class (payout 0 / hook skipped).
-- **Reputation contract (Task 11)** — new `reputation/` crate: repayment
+- **Reputation contract** — new `reputation/` crate: repayment
   records `record_outcome(originator, 0|1)` after every full repayment and
   default; `get_score` / `get_record` are public reads. Score =
   `repayments − 2×defaults`, floored at 0 (ADR-0004). Recording fails closed
   until a recorder (the repayment contract) is configured.
-- **Event-completeness audit (Task 13)** — every state-mutating registry
+- **Event-completeness audit** — every state-mutating registry
   function now publishes a structured event. Added `inv_amt`
   (`update_invoice_amount`) and `inv_sts` emissions from
   `set_invoice_repaid_status` / `repayment_marks_invoice_repaid`, so the
@@ -76,18 +78,18 @@ and are enforced by commitlint in CI (Task 19).
 
 
 ### Added
-- **Position tokens (Task 7)** — `accept_offer` now mints a SEP-41 position
+- **Position tokens** — `accept_offer` now mints a SEP-41 position
   token to the lender, 1:1 with the offer amount. New admin-gated
   `set_position_token` / `get_position_token` on the financing contract; the
   token (a Stellar Asset Contract issued as `POS`) is admin'ed to the financing
   contract so minting authorizes via implicit contract-invoker auth. Design and
   granularity documented in `docs/adr/0002-position-tokens.md`. The mint is
   optional — deployments without a configured position token work unchanged.
-- **Insurance pool (Task 9)** — new `insurance/` crate: `stake` / `unstake`
+- **Insurance pool** — new `insurance/` crate: `stake` / `unstake`
   with flat pool accounting (per-staker `Map<Address, i128>` + pool total),
   pause guard, and audit helper `get_contract_token_balance`. Payouts and yield
-  rates deliberately deferred (Task 10). 11 new tests.
-- **Position-token transfer (Task 8)** — position tokens are standard SEP-41
+  rates deliberately deferred. 11 new tests.
+- **Position-token transfer** — position tokens are standard SEP-41
   assets, so transfers use the token contract's own `transfer`; frontend
   portfolio gains a "Transfer Position" form and a one-click `POS` trustline
   helper (holders must hold a trustline, standard Stellar asset behavior).

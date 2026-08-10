@@ -1,4 +1,4 @@
-# Security Self-Review — Tasks 1, 2 & 4A
+# Security Self-Review
 
 > **Status:** Engineering self-review — **this is NOT a substitute for a
 > professional security audit.** It is a documented line-by-line re-read of
@@ -6,8 +6,8 @@
 > honest evidence of care for the protocol's funding applications. A real audit
 > (e.g. via the SCF Audit Bank) remains a prerequisite for mainnet.
 >
-> Scope: `accept_offer` (Task 1), `repay_invoice` (Task 2), and the
-> emergency pause (Task 4A). Review date: 2026-08-06. Reviewed against
+> Scope: `accept_offer`, `repay_invoice`, and the
+> emergency pause. Review date: 2026-08-06. Reviewed against
 > `master` at `2fc4d4d` (post issue-#75 constructor fix).
 
 ---
@@ -24,7 +24,7 @@
 
 ---
 
-## 1. Task 1 — `accept_offer` (financing/src/lib.rs:363)
+## 1. `accept_offer` (financing/src/lib.rs:363)
 
 ### 1.1 Auth (checklist #1)
 
@@ -46,10 +46,10 @@ be swapped by a caller (only by admin at deploy, via `__constructor`).
 `offer.status = Accepted; funded_at = now` are written (401–403) **after** the
 fund transfer, and the registry transition `financing_marks_invoice_financed`
 (408) only accepts calls from the **registered financing contract**
-(caller-guarded, verified in the Task 4/5 cross-contract auth pass — commit
+(caller-guarded, verified in the cross-contract auth pass — commit
 `cfa5d41`). User auth never propagates across contract boundaries.
 
-### 1.3 Position-token mint (Task 7, reviewed as part of accept)
+### 1.3 Position-token mint (reviewed as part of accept)
 
 `StellarAssetClient::mint(lender, amount)` (422) is config-gated
 (`postok` optional) and the token's admin is the financing contract, so the
@@ -58,7 +58,7 @@ validated `offer.amount`.
 
 ---
 
-## 2. Task 2 — `repay_invoice` (repayment/src/lib.rs:161)
+## 2. `repay_invoice` (repayment/src/lib.rs:161)
 
 ### 2.1 Auth (checklist #1)
 
@@ -95,7 +95,7 @@ config-gated.
 
 ---
 
-## 3. Task 4A — Emergency pause
+## 3. Emergency pause
 
 - `assert_not_paused(&env)` in **common** (common/src/lib.rs:170) reads the
   instance `paused` flag and panics `"Contract is paused"`.
@@ -145,8 +145,8 @@ Three hardening follow-ups are noted for the audit phase (§7).
 
 - `test_constructor_binds_admin_at_deploy` / `test_constructor_cannot_be_reinvoked`
 - Failure-path tests: insufficient balance, wrong currency, over-payment
-  (> remaining balance), non-originator repay, non-pending offer (Task 3)
-- Pause coverage: state-mutating calls revert while paused (Task 4A tests)
+  (> remaining balance), non-originator repay, non-pending offer
+- Pause coverage: state-mutating calls revert while paused
 - Full suite: **110 tests passing** (`cargo test`, all five crates),
   clippy `-D warnings` clean, Soroban Scout static analysis in CI.
 

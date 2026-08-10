@@ -1,12 +1,12 @@
 # ADR-0002 — Position tokens: granularity, admin, and lifecycle
 
-**Status:** Accepted (2026-08-05) · **Task:** 7 (position tokens), 8 (transfer)
+**Status:** Accepted (2026-08-05)
 
 ## Context
 
 When an offer is accepted, the lender's principal moves to the business
 immediately. To represent the lender's continuing claim (and enable transfer /
-resale before repayment — Task 8), the financing contract mints a token to the
+resale before repayment), the financing contract mints a token to the
 lender at acceptance time.
 
 ## Decision
@@ -32,7 +32,7 @@ lender at acceptance time.
    and deliberately not papered over in contract code.
 5. **Lifecycle: mint-on-accept only.** Burn/redemption on repayment, insurance
    payout integration, and any "position → repayment entitlement" settlement
-   are future work (insurance Task 10; settlement flow). Minting happens only
+   are future work (insurance payout; settlement flow). Minting happens only
    after the principal transfer succeeds, so a failed funding can never mint.
 
 ## Alternatives considered
@@ -41,6 +41,6 @@ lender at acceptance time.
   the audit surface when the SAC already provides a battle-tested
   implementation.
 - **Off-chain receipts (no token)** — rejected: no transferability story, which
-  is the point of Tasks 7–8.
+  is the point of position tokens.
 - **Fractional ERC-style shares** — rejected for now: more complexity than the
   use case needs; granularity choice above already permits arbitrary splits.

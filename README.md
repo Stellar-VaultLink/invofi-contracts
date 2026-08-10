@@ -18,7 +18,7 @@ InvoFi is split across two repositories so the fast-moving app layer and the slo
 | [**invofi**](https://github.com/Stellar-VaultLink/invofi) | Next.js frontend (`apps/frontend`), SDK, docs, scripts | App-layer changes constantly, Node/npm CI, no audit dependency |
 | **invofi-contracts** (this repo) | All Soroban Rust contracts — registry, financing, repayment, insurance, reputation, common | Stable, auditable, slow-moving history; Rust-only CI; the repo that goes through the SCF Audit Bank |
 
-Smart-contract contributions happen here; frontend and SDK contributions happen in [invofi](https://github.com/Stellar-VaultLink/invofi). The frontend supports **Freighter and LOBSTR** wallets via an approved-wallet allowlist (`approved-wallets.ts`, Task 6A) — approving a third wallet is a one-line config change.
+Smart-contract contributions happen here; frontend and SDK contributions happen in [invofi](https://github.com/Stellar-VaultLink/invofi). The frontend supports **Freighter and LOBSTR** wallets via an approved-wallet allowlist (`approved-wallets.ts`) — approving a third wallet is a one-line config change.
 
 ---
 
@@ -32,8 +32,8 @@ position token), each with a narrow job:
 | **registry** | `registry/` | Invoice lifecycle — register, cancel, status transitions, blacklist, disputes |
 | **financing** | `financing/` | Offers — create, withdraw, accept (moves principal **and mints the position token**), reject |
 | **repayment** | `repayment/` | Repayments (full/partial), mark overdue, reclaim/default |
-| **insurance** | `insurance/` | Coverage reserve — stake/unstake, and **payout on default** capped at pool balance (Task 10) |
-| **reputation** | `reputation/` | Originator credit history — repayment outcomes → public score (Task 11) |
+| **insurance** | `insurance/` | Coverage reserve — stake/unstake, and **payout on default** capped at pool balance |
+| **reputation** | `reputation/` | Originator credit history — repayment outcomes → public score |
 
 Cross-contract calls are restricted: the registry only accepts status transitions from the
 registered financing/repayment contracts (implicit contract-invoker auth, per Stellar's
@@ -43,7 +43,7 @@ repayment contract. User auth never propagates across contract boundaries.
 ```
 register_invoice()  →  create_offer()  →  accept_offer()
        ↓                                        ↓
-  [Pending]                 funds to business + POS minted to lender (Task 7)
+  [Pending]                 funds to business + POS minted to lender
        ↓                                        ↓
   reject_offer()                            [Financed]
   stays Pending                                 ↓
@@ -83,7 +83,7 @@ register_invoice()  →  create_offer()  →  accept_offer()
 | `__constructor(admin, registry, token)` | Deployer (at deploy) | Wire to registry + default settlement token (ADR-0005) |
 | `create_offer(offer_id, invoice_id, lender, amount, currency, rate, duration)` | Lender | Submit an offer (validates amount/rate/duration bounds) |
 | `withdraw_offer / reject_offer` | Lender / Originator | Withdraw or reject a Pending offer |
-| `accept_offer(offer_id, originator)` | Originator | Pulls principal lender → business **and mints the lender's position token** (Task 7) |
+| `accept_offer(offer_id, originator)` | Originator | Pulls principal lender → business **and mints the lender's position token** |
 | `register_currency(admin, currency, token)` | Admin | Add a settlement currency — one registry entry, no code branch per currency |
 | `set_position_token(admin, token)` | Admin | Configure the SEP-41 position-token contract (ADR-0002) |
 | `get_position_token()` | Anyone | Read the configured position token |
@@ -100,7 +100,7 @@ register_invoice()  →  create_offer()  →  accept_offer()
 | `reclaim_invoice(invoice_id, offer_id, lender)` | Lender | After the 7-day grace period → offer Defaulted |
 | `calculate_total_due(offer_id)` | Anyone | Principal + accrued yield |
 
-### Insurance — `insurance/` (Task 9)
+### Insurance — `insurance/`
 
 | Function | Auth | Description |
 |---|---|---|
@@ -111,30 +111,30 @@ register_invoice()  →  create_offer()  →  accept_offer()
 | `get_pool_total()` | Anyone | Accounting total of staked funds |
 | `get_stakers_count()` | Anyone | Number of active stakers |
 | `get_contract_token_balance()` | Anyone | Actual on-chain balance — audit check that accounting matches |
-| `pay_out(beneficiary, amount)` | Payout caller only (repayment) | Pay up to `amount`, capped at pool balance; returns amount actually paid (Task 10) |
+| `pay_out(beneficiary, amount)` | Payout caller only (repayment) | Pay up to `amount`, capped at pool balance; returns amount actually paid |
 | `get_payout_caller()` | Anyone | Read the configured payout caller |
 | `set_staking_token / pause / unpause / transfer_admin` | Admin | Admin controls |
 
 > Yield-rate calculation remains intentionally out of scope — the pool is flat accounting with
-> payout-on-default wired through `pay_out` (Task 10). See ADR-0003 for the payout design.
+> payout-on-default wired through `pay_out`. See ADR-0003 for the payout design.
 
 ---
 
-## Position Tokens (Tasks 7 & 8)
+## Position Tokens
 
 On `accept_offer`, the financing contract mints a **SEP-41 position token** to the lender, 1:1
 with the offer amount (one token per base unit of principal — see [ADR-0002](./docs/adr/0002-position-tokens.md)).
 The token is a **Stellar Asset Contract** (`POS`, issued by the protocol deployer) whose admin is
 the financing contract, so minting is authorized via implicit contract-invoker auth.
 
-Position tokens are plain SEP-41 assets: any wallet can hold and transfer them (Task 8), and
+Position tokens are plain SEP-41 assets: any wallet can hold and transfer them, and
 they represent the lender's claim on the financed invoice until it is repaid. Because they are
 Stellar assets, a holder must establish a `POS` trustline before mint/transfer can credit them —
 the frontend's portfolio offers a one-click trustline helper.
 
 ---
 
-### Reputation — `reputation/` (Task 11)
+### Reputation — `reputation/`
 
 | Function | Auth | Description |
 |---|---|---|
@@ -170,8 +170,8 @@ Every state-mutating function publishes a Soroban contract event. Topics are
 | `pos_mint` | `accept_offer` (financing) | `(lender, amount)` — position token minted |
 | `pool_stk` | `stake` (insurance) | `amount` |
 | `pool_un` | `unstake` (insurance) | `amount` |
-| `pool_pay` | `pay_out` (insurance, Task 10) | `amount paid` |
-| `reputn` | `record_outcome` (reputation, Task 11) | `outcome` |
+| `pool_pay` | `pay_out` (insurance) | `amount paid` |
+| `reputn` | `record_outcome` (reputation) | `outcome` |
 
 ---
 
@@ -210,11 +210,11 @@ Or trigger the **[Deploy Contract](https://github.com/Stellar-VaultLink/invofi-c
 
 ### Shipped
 
-- [x] Five auditable contract crates with restricted cross-contract auth (Tasks 4–5)
+- [x] Five auditable contract crates with restricted cross-contract auth
 - [x] SEP-41 token movement — `accept_offer` (lender → business), `repay_invoice` (principal + yield)
-- [x] Position tokens (Task 7), transferable positions (Task 8), insurance stake/unstake (Task 9)
-- [x] Insurance payout on default (Task 10), reputation scoring (Task 11)
-- [x] Emergency pause / circuit breaker (Task 4A), full protocol event coverage (Task 13)
+- [x] Position tokens, transferable positions, insurance stake/unstake
+- [x] Insurance payout on default, reputation scoring
+- [x] Emergency pause / circuit breaker, full protocol event coverage
 - [x] Deployer-bound `__constructor` initialization (issue #75), CI: tests + clippy + Soroban Scout
 
 ### Open

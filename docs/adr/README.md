@@ -3,13 +3,13 @@
 ADRs capture decisions with lasting consequences for the protocol. New ADRs
 get the next number; append, never rewrite (status updates go in the file).
 
-| # | Decision | Task | Status |
-|---|---|---|---|
-| 0001 | [Emergency pause (circuit breaker)](./0001-emergency-pause.md) | 4A | Accepted |
-| 0002 | [Position tokens: granularity, admin, lifecycle](./0002-position-tokens.md) | 7/8 | Accepted |
-| 0003 | [Insurance payout on default](./0003-insurance-payout.md) | 10 | Accepted |
-| 0004 | [Reputation scoring](./0004-reputation.md) | 11 | Accepted |
-| 0005 | [Deployer-bound initialization (constructors)](./0005-deployer-bound-initialization.md) | #75 | Accepted |
+| # | Decision | Status |
+|---|---|---|
+| 0001 | [Emergency pause (circuit breaker)](./0001-emergency-pause.md) | Accepted |
+| 0002 | [Position tokens: granularity, admin, lifecycle](./0002-position-tokens.md) | Accepted |
+| 0003 | [Insurance payout on default](./0003-insurance-payout.md) | Accepted |
+| 0004 | [Reputation scoring](./0004-reputation.md) | Accepted |
+| 0005 | [Deployer-bound initialization (constructors)](./0005-deployer-bound-initialization.md) | Accepted |
 
 App-layer decisions (wallet allowlist, indexer, SDK) live in the monorepo:
 [invofi/docs/adr](https://github.com/Stellar-VaultLink/invofi/tree/main/docs/adr).
