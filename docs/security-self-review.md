@@ -160,15 +160,3 @@ Three hardening follow-ups are noted for the audit phase (§7).
    `create_offer` to bound `yield_amount` arithmetic from input, not just
    overflow-checks.
 3. Mainnet must be preceded by the SCF Audit Bank (or equivalent) audit.
-
-## Related issues (backlog)
-
-Hardening and test-coverage issues that extend this review's scope (tracked
-from the [ADR index](./adr/README.md#backlog-map)):
-
-- [#86 — Validate currency symbols in register_currency](https://github.com/Stellar-VaultLink/invofi-contracts/issues/86)
-- [#89 — Idempotency regression tests: double accept/repay/cancel/stake](https://github.com/Stellar-VaultLink/invofi-contracts/issues/89)
-- [#93 — Structured typed errors for client-facing failure modes](https://github.com/Stellar-VaultLink/invofi-contracts/issues/93)
-- [#99 — Configurable protocol-fee recipient (admin-set, with event)](https://github.com/Stellar-VaultLink/invofi-contracts/issues/99)
-- [#103 — Cross-crate integration test harness for all five contracts](https://github.com/Stellar-VaultLink/invofi-contracts/issues/103)
-- [#106 — Docs: storage rent and TTL strategy with keeper coverage map](https://github.com/Stellar-VaultLink/invofi-contracts/issues/106)

@@ -44,14 +44,3 @@ lender at acceptance time.
   is the point of Tasks 7–8.
 - **Fractional ERC-style shares** — rejected for now: more complexity than the
   use case needs; granularity choice above already permits arbitrary splits.
-
-## Related issues (backlog)
-
-- [#80 — Test: accept_offer fails cleanly when lender has not approved allowance](https://github.com/Stellar-VaultLink/invofi-contracts/issues/80) —
-  failure path for the SEP-41 pull that funds the position.
-- [#81 — Test: position-token mint amount matches offer amount across currencies](https://github.com/Stellar-VaultLink/invofi-contracts/issues/81) —
-  verifies the 1:1 granularity decision (#1 above) holds for every currency.
-- [#94 — End-to-end balance conservation test across the full lifecycle](https://github.com/Stellar-VaultLink/invofi-contracts/issues/94) — mint + transfer
-  + repayment must conserve balances exactly.
-- [#97 — Docs: SEP-41 allowance requirements for each token flow](https://github.com/Stellar-VaultLink/invofi-contracts/issues/97) — documents the
-  approve-then-pull pattern the mint/transfer relies on.

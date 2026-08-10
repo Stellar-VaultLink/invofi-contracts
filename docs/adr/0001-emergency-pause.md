@@ -31,13 +31,3 @@ state-changing function begins with `assert_not_paused`, which panics with
 - The protocol can resume without redeployment.
 - The pause key is a single point of compromise; it is rotated only via
   `transfer_admin`. This is documented and accepted for the current stage.
-
-## Related issues (backlog)
-
-- [#85 — Audit instance vs persistent storage placement across all crates](https://github.com/Stellar-VaultLink/invofi-contracts/issues/85) — the
-  pause flag lives in instance storage; this audit reviews that placement and every other
-  instance/persistent split decision.
-- [#87 — Zero-amount guards across all money-moving entrypoints](https://github.com/Stellar-VaultLink/invofi-contracts/issues/87) — hardens the
-  same entrypoint surface the pause protects.
-- [#88 — Admin-pause test matrix covering every state-changing entrypoint](https://github.com/Stellar-VaultLink/invofi-contracts/issues/88) —
-  proves every guarded function actually reverts while paused, per crate.

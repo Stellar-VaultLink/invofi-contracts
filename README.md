@@ -146,9 +146,8 @@ the frontend's portfolio offers a one-click trustline helper.
 
 ## Protocol Events
 
-**This table is the canonical event specification** — issue
-[#90](https://github.com/Stellar-VaultLink/invofi-contracts/issues/90) audits code against it,
-and new events (#95 CurrencyRegistered, #100 ReputationChanged) extend it.
+**This table is the canonical event specification.** Every event emitted by the
+protocol is listed here; new events must be added to this table when they ship.
 
 Every state-mutating function publishes a Soroban contract event. Topics are
 `(event_name, subject_id)` — indexers can filter by invoice or offer id without decoding payloads.
@@ -173,10 +172,6 @@ Every state-mutating function publishes a Soroban contract event. Topics are
 | `pool_un` | `unstake` (insurance) | `amount` |
 | `pool_pay` | `pay_out` (insurance, Task 10) | `amount paid` |
 | `reputn` | `record_outcome` (reputation, Task 11) | `outcome` |
-
-> Backlog: [#90](https://github.com/Stellar-VaultLink/invofi-contracts/issues/90) (event-completeness
-> audit), [#95](https://github.com/Stellar-VaultLink/invofi-contracts/issues/95) (`CurrencyRegistered`),
-> [#100](https://github.com/Stellar-VaultLink/invofi-contracts/issues/100) (`ReputationChanged`).
 
 ---
 
