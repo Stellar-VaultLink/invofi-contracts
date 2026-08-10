@@ -749,14 +749,14 @@ checksum = "8e04e2fd2b8188ea827b32ef11de88377086d690286ab35747ef7f9bf3ccb590"
 
 [[package]]
 name = "invofi-common"
-version = "0.5.0"
+version = "0.7.0"
 dependencies = [
  "soroban-sdk",
 ]
 
 [[package]]
 name = "invofi-financing"
-version = "0.5.0"
+version = "0.7.0"
 dependencies = [
  "invofi-common",
  "invofi-registry",
@@ -765,7 +765,7 @@ dependencies = [
 
 [[package]]
 name = "invofi-insurance"
-version = "0.5.0"
+version = "0.7.0"
 dependencies = [
  "invofi-common",
  "soroban-sdk",
@@ -773,7 +773,7 @@ dependencies = [
 
 [[package]]
 name = "invofi-registry"
-version = "0.5.0"
+version = "0.7.0"
 dependencies = [
  "invofi-common",
  "soroban-sdk",
@@ -781,7 +781,7 @@ dependencies = [
 
 [[package]]
 name = "invofi-repayment"
-version = "0.5.0"
+version = "0.7.0"
 dependencies = [
  "invofi-common",
  "invofi-financing",
@@ -793,7 +793,7 @@ dependencies = [
 
 [[package]]
 name = "invofi-reputation"
-version = "0.1.0"
+version = "0.7.0"
 dependencies = [
  "invofi-common",
  "soroban-sdk",
