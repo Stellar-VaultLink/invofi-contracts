@@ -204,6 +204,8 @@ bash scripts/deploy.sh
 
 Or trigger the **[Deploy Contract](https://github.com/Stellar-VaultLink/invofi-contracts/actions/workflows/deploy-contract.yml)** GitHub Actions workflow for a one-click Testnet deploy.
 
+For a full redeploy and migration, follow the [migration runbook](./docs/migration-runbook.md).
+
 ---
 
 ## Roadmap

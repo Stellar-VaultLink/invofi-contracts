@@ -7,6 +7,14 @@ and are enforced by commitlint in CI.
 
 ## [Unreleased]
 
+### Docs
+- **Migration runbook**: add `docs/migration-runbook.md` with the snapshot
+  state reads, the five-contract redeploy (workflow and manual stellar-cli
+  fallback), the frontend env re-point, and the verify step via the manual
+  e2e walkthrough (issue #104). The runbook lists which state is re-derivable
+  on-chain and which must be re-created, and it is linked from the README
+  development section. Closes #125.
+
 ## [0.7.0] – 2026-08-06
 
 ### Docs
