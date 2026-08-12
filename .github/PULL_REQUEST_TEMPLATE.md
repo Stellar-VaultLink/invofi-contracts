@@ -16,5 +16,11 @@
 - [ ] New functions have corresponding tests
 - [ ] Breaking changes are documented
 
+> ⚠️ **CI checks are maintainer-managed.** Do not add, remove, rename, or
+> reconfigure any CI check or workflow (including Soroban Scout detector
+> exclusions in `docs/scout-detectors.md`) in this PR. CI is part of the
+> audit story and changes to it go through the maintainers only. If you
+> believe a check needs changing, open an issue instead.
+
 ## Related issues
 Closes #
