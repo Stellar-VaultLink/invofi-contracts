@@ -114,15 +114,16 @@ only goes back to the RPC retention window.
 Record the deployed wasm hash of each contract:
 
 ```bash
-stellar contract info hash --id $REGISTRY_ID --network testnet
-stellar contract info hash --id $FINANCING_ID --network testnet
-stellar contract info hash --id $REPAYMENT_ID --network testnet
-stellar contract info hash --id $INSURANCE_ID --network testnet
-stellar contract info hash --id $REPUTATION_ID --network testnet
+stellar contract fetch --id $REGISTRY_ID --network testnet -o registry.wasm && sha256sum registry.wasm
+stellar contract fetch --id $FINANCING_ID --network testnet -o financing.wasm && sha256sum financing.wasm
+stellar contract fetch --id $REPAYMENT_ID --network testnet -o repayment.wasm && sha256sum repayment.wasm
+stellar contract fetch --id $INSURANCE_ID --network testnet -o insurance.wasm && sha256sum insurance.wasm
+stellar contract fetch --id $REPUTATION_ID --network testnet -o reputation.wasm && sha256sum reputation.wasm
 ```
 
 Store the hashes with the snapshot. They prove which build the old state
-belongs to.
+belongs to. (`stellar contract info hash` was removed from the Stellar CLI
+in v23 — fetch the wasm and hash it locally instead.)
 
 ### Event-replay note
 
@@ -390,11 +391,11 @@ the new contract ids. Until then, run the minimal smoke check below.
 Read the on-chain hash of every new contract:
 
 ```bash
-stellar contract info hash --id $NEW_REGISTRY_ID --network testnet
-stellar contract info hash --id $NEW_FINANCING_ID --network testnet
-stellar contract info hash --id $NEW_REPAYMENT_ID --network testnet
-stellar contract info hash --id $NEW_INSURANCE_ID --network testnet
-stellar contract info hash --id $NEW_REPUTATION_ID --network testnet
+stellar contract fetch --id $NEW_REGISTRY_ID --network testnet -o new-registry.wasm && sha256sum new-registry.wasm
+stellar contract fetch --id $NEW_FINANCING_ID --network testnet -o new-financing.wasm && sha256sum new-financing.wasm
+stellar contract fetch --id $NEW_REPAYMENT_ID --network testnet -o new-repayment.wasm && sha256sum new-repayment.wasm
+stellar contract fetch --id $NEW_INSURANCE_ID --network testnet -o new-insurance.wasm && sha256sum new-insurance.wasm
+stellar contract fetch --id $NEW_REPUTATION_ID --network testnet -o new-reputation.wasm && sha256sum new-reputation.wasm
 ```
 
 Each hash must match the wasm build you deployed. Keep the build artifact
