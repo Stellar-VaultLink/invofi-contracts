@@ -7,6 +7,10 @@ name: Scout Security Analysis
 on:
   pull_request:
     branches: [master]
+  push:
+    # Direct pushes to master (contributor bot, maintainer, deploy workflow)
+    # bypass PR review, so scout should cover the default branch too.
+    branches: [master]
   workflow_dispatch:
 
 permissions:
