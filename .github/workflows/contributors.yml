@@ -4,6 +4,20 @@ on:
   push:
     branches:
       - master
+  schedule:
+    # Weekly retry: GitHub's contributor-stats cache lags new merges by up to
+    # a few days, so the push-triggered run right after a merge can miss a
+    # contributor (see the RawNuke catch-up on 2026-08-14). This run
+    # re-syncs the table once the cache has caught up, even with no new push.
+    # Wednesday 09:00 UTC — deliberately offset from the Monday token watchdog.
+    - cron: '0 9 * * 3'
+  workflow_dispatch:
+
+# Serialize runs: the bot rewrites the same README section, so a scheduled run
+# and a push-triggered run must never race each other.
+concurrency:
+  group: contributors-readme
+  cancel-in-progress: false
 
 permissions:
   contents: write
