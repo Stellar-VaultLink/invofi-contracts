@@ -2,9 +2,6 @@ name: Deploy Contracts to Testnet
 
 on:
   workflow_dispatch:
-
-permissions:
-  contents: read
     inputs:
       network:
         description: 'Target network'
@@ -13,6 +10,9 @@ permissions:
         type: choice
         options:
           - testnet
+
+permissions:
+  contents: read
 
 jobs:
   deploy:
