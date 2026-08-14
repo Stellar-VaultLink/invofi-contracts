@@ -19,6 +19,12 @@ concurrency:
   group: contributors-readme
   cancel-in-progress: false
 
+# Note: this bot commits directly to master (auto_detect_branch_protection:
+# false). That only works because CONTRIBUTORS_TOKEN is an admin PAT and the
+# branch rule has enforce_admins: false. If org policy ever enables admin
+# enforcement, switch this to the PR flow (set auto_detect_branch_protection:
+# true and pr_title_on_protected) instead of granting the bot more power.
+
 permissions:
   contents: write
 
