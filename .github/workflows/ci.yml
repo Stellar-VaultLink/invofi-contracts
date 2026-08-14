@@ -6,6 +6,9 @@ on:
   pull_request:
     branches: [master, main]
 
+permissions:
+  contents: read
+
 jobs:
   test:
     name: Test
@@ -42,6 +45,10 @@ jobs:
   commitlint:
     name: Conventional Commits
     runs-on: ubuntu-latest
+    # PR-only gate: direct maintainer pushes to master (e.g. GitHub web-editor
+    # commits) are not Conventional Commits and would otherwise fail every
+    # direct push. The gate still protects every contributor PR.
+    if: github.event_name == 'pull_request'
     steps:
       - uses: actions/checkout@v7
         with:

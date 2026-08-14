@@ -2,6 +2,9 @@ name: Deploy Contracts to Testnet
 
 on:
   workflow_dispatch:
+
+permissions:
+  contents: read
     inputs:
       network:
         description: 'Target network'
@@ -122,7 +125,7 @@ jobs:
           # only deploy if missing (a re-run with the same deployer reuses the
           # already-deployed SAC instead of failing with "contract already exists").
           POS_ID=$(stellar contract id asset --asset "POS:$ADMIN_PUBLIC" --network ${{ inputs.network }})
-          if ! stellar contract info --id "$POS_ID" interface --network ${{ inputs.network }} >/dev/null 2>&1; then
+          if ! stellar contract info interface --id "$POS_ID" --network ${{ inputs.network }} >/dev/null 2>&1; then
             stellar contract asset deploy --asset "POS:$ADMIN_PUBLIC" --source invofi-deployer --network ${{ inputs.network }}
           fi
           # Hand POS admin to the financing contract. On a re-run this is a no-op

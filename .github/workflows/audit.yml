@@ -8,6 +8,14 @@ on:
       - 'Cargo.lock'
       - 'Cargo.toml'
       - '**/Cargo.toml'
+  pull_request:
+    paths:
+      - 'Cargo.lock'
+      - 'Cargo.toml'
+      - '**/Cargo.toml'
+
+permissions:
+  contents: read
 
 jobs:
   audit:
