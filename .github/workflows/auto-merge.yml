@@ -1,0 +1,164 @@
+name: Auto-merge bot
+
+# Maintainer-managed bot (do NOT modify from PRs — the PR template forbids it).
+#
+# Behavior:
+#   - Reviews every open PR (summary review, then approve when CI is green,
+#     or a review note listing failed checks when a required check fails).
+#   - Auto-merges (squash) once all required CI checks pass.
+#   - Runs on PR events, an hourly sweep (catches PRs whose CI finished after
+#     the event run, e.g. first-time-contributor approval gates), and manual
+#     workflow_dispatch.
+#
+# Security: uses pull_request_target ONLY because it must act on fork PRs.
+# It never checks out or executes PR code — API/gh CLI only. It is safe
+# precisely because it does not run anything from the PR.
+
+on:
+  pull_request_target:
+    types: [opened, synchronize, reopened, ready_for_review]
+  schedule:
+    - cron: '17 * * * *'
+  workflow_dispatch:
+    inputs:
+      pr:
+        description: 'PR number to process (blank = all open PRs)'
+        required: false
+        type: string
+
+permissions:
+  contents: write
+  pull-requests: write
+
+concurrency:
+  group: auto-merge-${{ github.event.pull_request.number || inputs.pr || 'sweep' }}
+  cancel-in-progress: false
+
+jobs:
+  bot:
+    name: Review & auto-merge
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    env:
+      GH_TOKEN: ${{ secrets.CONTRIBUTORS_TOKEN || secrets.GITHUB_TOKEN }}
+      # Job names (check-run names) that must pass before auto-merge.
+      REQUIRED_CHECKS: |-
+        Test
+        Build WASM
+        Conventional Commits
+        Contracts / Clippy lint
+        Soroban Scout
+    steps:
+      - name: Review & auto-merge
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          REPO="${GITHUB_REPOSITORY}"
+
+          mapfile -t REQUIRED < <(printf '%s\n' "${REQUIRED_CHECKS}" | grep -v '^$')
+
+          # Resolve which PRs to process.
+          PRS=()
+          if [ -n "${PR_NUMBER:-}" ]; then
+            PRS+=("${PR_NUMBER}")
+          elif [ -n "${INPUT_PR:-}" ]; then
+            PRS+=("${INPUT_PR}")
+          else
+            mapfile -t PRS < <(gh pr list --repo "${REPO}" --state open --limit 50 --json number --jq '.[].number')
+          fi
+
+          if [ "${#PRS[@]}" -eq 0 ]; then
+            echo "No PRs to process."
+            exit 0
+          fi
+
+          BOT_LOGIN="$(gh api user --jq .login 2>/dev/null || echo 'github-actions[bot]')"
+          echo "Bot identity: ${BOT_LOGIN}"
+
+          for PR in "${PRS[@]}"; do
+            echo "── PR #${PR} ──"
+
+            META="$(gh pr view "${PR}" --repo "${REPO}" --json state,isDraft,mergeable,headRefOid,author --jq '{state,isDraft,mergeable,headRefOid,author:.author.login}' 2>/dev/null || true)"
+            [ -n "${META}" ] || { echo "  cannot read PR — skip"; continue; }
+
+            STATE="$(printf '%s' "${META}" | jq -r .state)"
+            DRAFT="$(printf '%s' "${META}" | jq -r .isDraft)"
+            MERGEABLE="$(printf '%s' "${META}" | jq -r .mergeable)"
+            SHA="$(printf '%s' "${META}" | jq -r .headRefOid)"
+            AUTHOR="$(printf '%s' "${META}" | jq -r .author)"
+
+            [ "${STATE}" = "OPEN" ] || { echo "  skip (state=${STATE})"; continue; }
+            [ "${DRAFT}" = "false" ] || { echo "  skip (draft)"; continue; }
+
+            SELF=false
+            [ "${AUTHOR}" = "${BOT_LOGIN}" ] && SELF=true
+
+            # ── initial summary review (once per head sha) ──
+            EXISTING="$(gh pr view "${PR}" --repo "${REPO}" --json reviews --jq "[.reviews[] | select(.author.login == \"${BOT_LOGIN}\") | select(.commit.oid == \"${SHA}\")] | length" 2>/dev/null || echo 0)"
+            if [ "${EXISTING}" -eq 0 ] && [ "${SELF}" != "true" ]; then
+              SUMMARY="$(gh pr view "${PR}" --repo "${REPO}" --json title,changedFiles,additions,deletions --jq '"`" + .title + "` — +" + (.additions|tostring) + "/−" + (.deletions|tostring) + " across " + (.changedFiles|tostring) + " file(s)."' 2>/dev/null || echo "PR #${PR}")"
+              gh pr review "${PR}" --repo "${REPO}" --comment --body "🤖 **Bot review** — ${SUMMARY}
+
+I will approve and merge this PR automatically once all required CI checks pass. If a required check fails, I'll leave a note here for you to fix." 2>/dev/null || true
+            fi
+
+            # ── wait for required checks (up to ~40 min) ──
+            DEADLINE=$(( $(date +%s) + 2400 ))
+            OUTCOME="pending"
+            FAILED=""
+            while [ "$(date +%s)" -lt "${DEADLINE}" ]; do
+              declare -A CONCS=()
+              while IFS=$'\t' read -r NAME CONC; do
+                [ -n "${NAME}" ] || continue
+                CONCS["${NAME}"]="${CONC}"
+              done < <(gh pr view "${PR}" --repo "${REPO}" --json statusCheckRollup --jq '.statusCheckRollup[] | [((.name // .context)), ((.conclusion // .state))] | @tsv' 2>/dev/null || true)
+
+              FAILED=""
+              PENDING=false
+              for R in "${REQUIRED[@]}"; do
+                C="${CONCS[${R}]:-}"
+                case "${C}" in
+                  SUCCESS|NEUTRAL|SKIPPED) ;;
+                  FAILURE|CANCELLED|TIMED_OUT|ACTION_REQUIRED|STARTUP_FAILURE) FAILED="${FAILED} ${R} (${C})" ;;
+                  *) PENDING=true ;;
+                esac
+              done
+
+              if [ -n "${FAILED}" ]; then OUTCOME="fail"; break; fi
+              if [ "${PENDING}" = "false" ]; then OUTCOME="pass"; break; fi
+              sleep 30
+            done
+
+            if [ "${OUTCOME}" = "pending" ]; then
+              echo "  required checks still running after wait window — leaving for a later run"
+              continue
+            fi
+
+            if [ "${OUTCOME}" = "fail" ]; then
+              echo "  FAILED:${FAILED}"
+              ALREADY="$(gh pr view "${PR}" --repo "${REPO}" --json reviews --jq "[.reviews[] | select(.author.login == \"${BOT_LOGIN}\") | select(.commit.oid == \"${SHA}\") | select(.body | contains(\"did not pass\"))] | length" 2>/dev/null || echo 0)"
+              if [ "${ALREADY}" -eq 0 ]; then
+                gh pr review "${PR}" --repo "${REPO}" --comment --body "🤖 **Bot review** — the following required CI checks did not pass:
+${FAILED}
+
+Please fix them and push — I will re-check automatically." 2>/dev/null || true
+              fi
+              continue
+            fi
+
+            # ── all required checks passed → approve + merge ──
+            echo "  all required checks passed"
+            [ "${MERGEABLE}" = "MERGEABLE" ] || { echo "  not mergeable (${MERGEABLE}) — will retry"; continue; }
+
+            APPROVED="$(gh pr view "${PR}" --repo "${REPO}" --json reviews --jq "[.reviews[] | select(.author.login == \"${BOT_LOGIN}\") | select(.commit.oid == \"${SHA}\") | select(.state == \"APPROVED\")] | length" 2>/dev/null || echo 0)"
+            if [ "${APPROVED}" -eq 0 ] && [ "${SELF}" != "true" ]; then
+              gh pr review "${PR}" --repo "${REPO}" --approve --body "🤖 **Bot review** — all required CI checks passed. Merging automatically." 2>/dev/null || true
+            fi
+
+            if gh pr merge "${PR}" --repo "${REPO}" --squash 2>/dev/null; then
+              echo "  ✅ merged #${PR}"
+            else
+              gh pr review "${PR}" --repo "${REPO}" --comment --body "🤖 **Bot review** — CI is green but I could not merge (conflict or branch protection). A maintainer will handle it." 2>/dev/null || true
+            fi
+          done
