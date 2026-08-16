@@ -1027,3 +1027,130 @@ fn test_full_repay_records_reputation_success() {
     assert_eq!(rec.repayments, 1);
     assert_eq!(rec.defaults, 0);
 }
+
+// ─── Repayment schedule helper tests (issue #133) ──────────────────────────
+
+/// The repayment contract's get_installment_due proxy delegates correctly
+/// to the financing contract.
+#[test]
+fn test_repayment_get_installment_due_proxy() {
+    let env = Env::default();
+    env.mock_all_auths();
+    env.ledger().set_timestamp(1_000_000);
+
+    let admin = Address::generate(&env);
+    let originator = Address::generate(&env);
+    let lender = Address::generate(&env);
+    let amount: i128 = 1_200_000_000;
+
+    let token_id = create_token(&env);
+    let (reg, fin, rep) = setup_contracts(&env, &admin, &token_id);
+
+    reg.register_invoice(
+        &symbol_short!("inv_pr"),
+        &originator,
+        &amount,
+        &symbol_short!("USDC"),
+        &(env.ledger().timestamp() + 100_000_000u64),
+    );
+    fin.create_offer(
+        &symbol_short!("off_pr"),
+        &symbol_short!("inv_pr"),
+        &lender,
+        &amount,
+        &symbol_short!("USDC"),
+        &500u32,
+        &(31_536_000u64),
+    );
+
+    // 4 weekly installments.
+    // installment_principal = 1_200_000_000 / 4 = 300_000_000
+    // installment_amount    = 300_000_000 + 300_000_000*500/10_000 = 315_000_000
+    let first_due = env.ledger().timestamp() + 604_800;
+    let sched = fin.schedule_repayment(
+        &symbol_short!("off_pr"),
+        &originator,
+        &invofi_common::ScheduleFrequency::Weekly,
+        &4u32,
+        &first_due,
+    );
+
+    // Before first_due: proxy returns 0.
+    assert_eq!(rep.get_installment_due(&symbol_short!("off_pr")), 0);
+
+    // Advance past first_due — installment 1 elapsed, 0 paid → returns 1.
+    env.ledger().set_timestamp(first_due + 1);
+    assert_eq!(rep.get_installment_due(&symbol_short!("off_pr")), 1);
+
+    // Mark installment 1 as paid via financing callback, then advance past
+    // second period — installment 2 now due → returns 2.
+    fin.update_offer_amount_repaid(&symbol_short!("off_pr"), &sched.installment_amount);
+    env.ledger().set_timestamp(first_due + 604_800 + 1);
+    assert_eq!(rep.get_installment_due(&symbol_short!("off_pr")), 2);
+}
+
+/// After a full repayment, get_installment_due returns 0 via the proxy.
+#[test]
+fn test_repayment_get_installment_due_zero_after_full_repay() {
+    let env = Env::default();
+    env.mock_all_auths();
+    env.ledger().set_timestamp(1_000_000);
+
+    let admin = Address::generate(&env);
+    let originator = Address::generate(&env);
+    let lender = Address::generate(&env);
+    let amount: i128 = 1_050_000_000; // 12 × 87_500_000 principal
+    // 500 bps interest → per-installment: 87_500_000 + 4_375_000 = 91_875_000
+    // 12 installments × 91_875_000 = 1_102_500_000 total due
+
+    let token_id = create_token(&env);
+    let (reg, fin, rep) = setup_contracts(&env, &admin, &token_id);
+
+    let interest_rate: u32 = 500;
+    let yield_amt = amount * (interest_rate as i128) / 10_000;
+    let total_due = amount + yield_amt;
+
+    reg.register_invoice(
+        &symbol_short!("inv_fd"),
+        &originator,
+        &amount,
+        &symbol_short!("USDC"),
+        &(env.ledger().timestamp() + 100_000_000u64),
+    );
+    fin.create_offer(
+        &symbol_short!("off_fd"),
+        &symbol_short!("inv_fd"),
+        &lender,
+        &amount,
+        &symbol_short!("USDC"),
+        &interest_rate,
+        &(31_536_000u64),
+    );
+
+    let first_due = env.ledger().timestamp() + 604_800;
+    fin.schedule_repayment(
+        &symbol_short!("off_fd"),
+        &originator,
+        &invofi_common::ScheduleFrequency::Weekly,
+        &12u32,
+        &first_due,
+    );
+
+    // Accept offer + fund the repayer.
+    mint_and_approve(&env, &token_id, &fin.address, &lender, amount);
+    fin.accept_offer(&symbol_short!("off_fd"), &originator);
+    let asset = token::StellarAssetClient::new(&env, &token_id);
+    asset.mint(&originator, &total_due);
+
+    // Fully repay.
+    rep.repay_invoice(
+        &symbol_short!("inv_fd"),
+        &symbol_short!("off_fd"),
+        &originator,
+        &total_due,
+    );
+
+    // Advance past all 12 periods — proxy must return 0 (Repaid offer).
+    env.ledger().set_timestamp(first_due + 12 * 604_800 + 1);
+    assert_eq!(rep.get_installment_due(&symbol_short!("off_fd")), 0);
+}

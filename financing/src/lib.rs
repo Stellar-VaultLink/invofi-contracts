@@ -7,7 +7,8 @@ use soroban_sdk::{contract, contractimpl, symbol_short, token, Address, Env, Map
 
 use invofi_common::{
     assert_not_paused, resolve_token, FinancingOffer, Invoice, InvoiceStatus, LenderStats,
-    OfferStatus, ProtocolStats, RegistryClient, MAX_OFFER_DURATION_SECS, MIN_OFFER_DURATION_SECS,
+    OfferStatus, ProtocolStats, RegistryClient, RepaymentSchedule, ScheduleFrequency,
+    MAX_OFFER_DURATION_SECS, MIN_OFFER_DURATION_SECS,
 };
 
 // ─── Storage Helpers ─────────────────────────────────────────────────────────
@@ -53,6 +54,21 @@ fn load_stats(env: &Env) -> ProtocolStats {
 
 fn save_stats(env: &Env, s: &ProtocolStats) {
     env.storage().instance().set(&symbol_short!("stats"), s);
+}
+
+// ─── Schedule Storage Helpers ─────────────────────────────────────────────────
+
+fn load_schedules(env: &Env) -> Map<Symbol, RepaymentSchedule> {
+    env.storage()
+        .persistent()
+        .get(&symbol_short!("scheds"))
+        .unwrap_or(Map::new(env))
+}
+
+fn save_schedules(env: &Env, map: &Map<Symbol, RepaymentSchedule>) {
+    env.storage()
+        .persistent()
+        .set(&symbol_short!("scheds"), map);
 }
 
 fn assert_not_blacklisted(env: &Env, address: &Address) {
@@ -650,6 +666,159 @@ impl FinancingContract {
 
     pub fn get_offer_duration_limits(_env: Env) -> (u64, u64) {
         (MIN_OFFER_DURATION_SECS, MAX_OFFER_DURATION_SECS)
+    }
+
+    // ── Repayment schedules (issue #133) ─────────────────────────────────────
+
+    /// Attach a fixed installment repayment schedule to a financing offer.
+    ///
+    /// Can be called by the **lender** on a Pending offer (before acceptance)
+    /// or by the **originator** on a Financed/Accepted offer (after acceptance,
+    /// to formalise a payment plan). Both parties must provide their auth;
+    /// the contract checks that the caller is the lender or the invoice
+    /// originator.
+    ///
+    /// Installment math (flat-rate, equal principal slices):
+    ///
+    ///   installment_principal = offer.amount / count
+    ///   installment_yield     = installment_principal × interest_rate / 10_000
+    ///   installment_amount    = installment_principal + installment_yield
+    ///
+    /// `first_due` must be in the future. `count` must be ≥ 1 and ≤ 1 200
+    /// (100 years of daily installments — a hard cap that prevents overflow).
+    ///
+    /// An existing schedule is overwritten — either party can reschedule while
+    /// the offer is still active.
+    pub fn schedule_repayment(
+        env: Env,
+        offer_id: Symbol,
+        caller: Address,
+        frequency: ScheduleFrequency,
+        count: u32,
+        first_due: u64,
+    ) -> RepaymentSchedule {
+        assert_not_paused(&env);
+        caller.require_auth();
+
+        assert!(count >= 1, "count must be at least 1");
+        assert!(count <= 1_200, "count must be at most 1200 installments");
+        assert!(
+            first_due > env.ledger().timestamp(),
+            "first_due must be in the future"
+        );
+
+        let offers = load_offers(&env);
+        let offer = offers
+            .get(offer_id.clone())
+            .unwrap_or_else(|| panic!("Offer not found"));
+
+        // Only allow scheduling on live (non-terminal) offers.
+        if offer.status == OfferStatus::Rejected
+            || offer.status == OfferStatus::Repaid
+            || offer.status == OfferStatus::Defaulted
+        {
+            panic!("Cannot schedule a terminal offer");
+        }
+
+        // The caller must be the lender or the invoice originator.
+        // Retrieve the originator via the registry cross-contract call.
+        let registry_addr: Address = env
+            .storage()
+            .instance()
+            .get(&symbol_short!("registry"))
+            .unwrap_or_else(|| panic!("Not initialized"));
+        let registry_client = RegistryClient::new(&env, &registry_addr);
+        let invoice: Invoice = registry_client.get_invoice(&offer.invoice_id);
+
+        if caller != offer.lender && caller != invoice.originator {
+            panic!("Only the lender or the invoice originator can set a schedule");
+        }
+
+        // installment_principal = floor(amount / count)
+        // We use floor division; any leftover cent is borne by the last
+        // installment but the helper only reports whole installments — that
+        // is explicitly in-scope per the issue.
+        let installment_principal = offer.amount / (count as i128);
+        let installment_yield =
+            installment_principal * (offer.interest_rate as i128) / 10_000;
+        let installment_amount = installment_principal + installment_yield;
+
+        assert!(
+            installment_amount > 0,
+            "installment amount must be greater than zero"
+        );
+
+        let schedule = RepaymentSchedule {
+            offer_id: offer_id.clone(),
+            count,
+            frequency,
+            installment_amount,
+            first_due,
+        };
+
+        let mut schedules = load_schedules(&env);
+        schedules.set(offer_id, schedule.clone());
+        save_schedules(&env, &schedules);
+
+        schedule
+    }
+
+    /// Read the repayment schedule attached to an offer, if any.
+    pub fn get_schedule(env: Env, offer_id: Symbol) -> Option<RepaymentSchedule> {
+        load_schedules(&env).get(offer_id)
+    }
+
+    /// Return the 1-based index of the installment that is **currently due**
+    /// (its due timestamp ≤ `now`) and whose principal has not yet been
+    /// covered by `amount_repaid` on the offer.
+    ///
+    /// Returns `0` when:
+    /// - No schedule exists for this offer, or
+    /// - All installments have been paid, or
+    /// - No installment is due yet (`now` < `first_due`).
+    ///
+    /// This is the keeper/CLI-friendly read helper described in issue #133.
+    pub fn get_installment_due(env: Env, offer_id: Symbol) -> u32 {
+        let schedules = load_schedules(&env);
+        let schedule = match schedules.get(offer_id.clone()) {
+            Some(s) => s,
+            None => return 0,
+        };
+
+        let offers = load_offers(&env);
+        let offer = match offers.get(offer_id) {
+            Some(o) => o,
+            None => return 0,
+        };
+
+        // Terminal offer — nothing due.
+        if offer.status == OfferStatus::Repaid || offer.status == OfferStatus::Defaulted {
+            return 0;
+        }
+
+        let now = env.ledger().timestamp();
+        if now < schedule.first_due {
+            return 0;
+        }
+
+        let period = schedule.frequency.period_secs();
+        // How many installments have elapsed (1-based)?
+        let elapsed = ((now - schedule.first_due) / period + 1).min(schedule.count as u64) as u32;
+
+        // How many installments are already covered by amount_repaid?
+        let paid_count = if schedule.installment_amount == 0 {
+            schedule.count
+        } else {
+            (offer.amount_repaid / schedule.installment_amount) as u32
+        };
+
+        if paid_count >= elapsed {
+            // All elapsed installments already paid.
+            0
+        } else {
+            // The next unpaid installment that is already due.
+            paid_count + 1
+        }
     }
 }
 

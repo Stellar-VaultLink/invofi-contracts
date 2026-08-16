@@ -396,6 +396,22 @@ impl RepaymentContract {
     pub fn get_duration_limits(_env: Env) -> (u64, u64) {
         (MIN_OFFER_DURATION_SECS, MAX_OFFER_DURATION_SECS)
     }
+
+    // ── Schedule helpers (issue #133) ────────────────────────────────────────
+
+    /// Return the 1-based index of the installment that is currently due for
+    /// the given offer, or 0 if none.  Delegates to the financing contract's
+    /// `get_installment_due` so callers don't need to hold the financing
+    /// address directly.
+    pub fn get_installment_due(env: Env, offer_id: Symbol) -> u32 {
+        let financing_addr: Address = env
+            .storage()
+            .instance()
+            .get(&symbol_short!("financing"))
+            .unwrap_or_else(|| panic!("Not initialized"));
+        let financing_client = FinancingClient::new(&env, &financing_addr);
+        financing_client.get_installment_due(&offer_id)
+    }
 }
 
 #[cfg(test)]
