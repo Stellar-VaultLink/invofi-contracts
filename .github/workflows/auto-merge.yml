@@ -6,7 +6,9 @@ name: Auto-merge bot
 #   - Reviews every open PR: a summary review on first sight, an approving
 #     review when CI is green, or a review note listing failed checks when a
 #     required check fails.
-#   - Auto-merges (squash) once all required CI checks pass.
+#   - Auto-merges once all required CI checks pass: normal merge by
+#     default (preserves history); rebase when the branch is behind base.
+#     Never squashes — squash rewrites history and can hide changes.
 #   - Triggers: PR events, an hourly sweep (catches PRs whose CI finished
 #     after the event run, e.g. first-time-contributor approval gates), and
 #     manual workflow_dispatch.
@@ -205,8 +207,13 @@ jobs:
                 --body "${BODY}" 2>/dev/null || true
             fi
 
-            if gh pr merge "${PR}" --repo "${REPO}" --squash 2>/dev/null; then
+            # Merge strategy: normal merge by default (keeps history). If
+            # the branch is behind the base and a clean merge is not
+            # possible, rebase instead. Never squash — it rewrites history.
+            if gh pr merge "${PR}" --repo "${REPO}" --merge 2>/dev/null; then
               echo "  ✅ merged #${PR}"
+            elif gh pr merge "${PR}" --repo "${REPO}" --rebase 2>/dev/null; then
+              echo "  ✅ rebased and merged #${PR}"
             else
               BODY="🤖 **Bot review** — CI is green but I could not merge"
               BODY+=$'\n'
