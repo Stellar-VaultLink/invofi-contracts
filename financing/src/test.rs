@@ -914,6 +914,75 @@ fn test_pause_blocks_create_offer() {
     );
 }
 
+#[test]
+fn test_pause_blocks_all_financing_state_changes() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let admin = Address::generate(&env);
+    let token = Address::generate(&env);
+    let (_, fin) = setup_contracts(&env, &admin, &token);
+    let lender = Address::generate(&env);
+    let originator = Address::generate(&env);
+    let new_admin = Address::generate(&env);
+    let repayment = Address::generate(&env);
+    let pos_token = Address::generate(&env);
+
+    fin.pause(&admin);
+
+    fn assert_paused<F: FnOnce()>(f: F) {
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(f));
+        assert!(result.is_err(), "state-changing function should panic while paused");
+    }
+
+    assert_paused(|| {
+        fin.create_offer(
+            &symbol_short!("offx1"),
+            &symbol_short!("invx1"),
+            &lender,
+            &1_000i128,
+            &symbol_short!("USDC"),
+            &500u32,
+            &86_400u64,
+        );
+    });
+    assert_paused(|| {
+        fin.withdraw_offer(&symbol_short!("offx2"), &lender);
+    });
+    assert_paused(|| {
+        fin.accept_offer(&symbol_short!("offx3"), &originator);
+    });
+    assert_paused(|| {
+        fin.reject_offer(&symbol_short!("offx4"), &originator);
+    });
+    assert_paused(|| {
+        fin.set_repayment_contract(&admin, &repayment);
+    });
+    assert_paused(|| {
+        fin.transfer_admin(&admin, &new_admin);
+    });
+    assert_paused(|| {
+        fin.register_currency(&admin, &symbol_short!("EUR"), &Address::generate(&env));
+    });
+    assert_paused(|| {
+        fin.set_position_token(&admin, &pos_token);
+    });
+    assert_paused(|| {
+        fin.update_offer_status(&symbol_short!("offx5"), &OfferStatus::Rejected);
+    });
+    assert_paused(|| {
+        fin.update_offer_amount_repaid(&symbol_short!("offx6"), &1_000i128);
+    });
+    assert_paused(|| {
+        fin.update_lender_stats_repaid(&lender, &true);
+    });
+    assert_paused(|| {
+        fin.update_stats_repaid(&1_000i128, &50i128);
+    });
+
+    assert_eq!(fin.get_offer_duration_limits().0, invofi_common::MIN_OFFER_DURATION_SECS);
+    assert_eq!(fin.get_stats().total_offers, 0);
+}
+
 // ─── Position token minting tests (Task 7) ──────────────────────────────────
 
 #[test]

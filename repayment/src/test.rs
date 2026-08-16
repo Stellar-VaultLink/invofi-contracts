@@ -786,6 +786,54 @@ fn test_pause_blocks_repay_invoice() {
     rep.repay_invoice(&invoice_id, &offer_id, &originator, &amount);
 }
 
+#[test]
+fn test_pause_blocks_all_repayment_state_changes() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let admin = Address::generate(&env);
+    let token = Address::generate(&env);
+    let (_, _, rep) = setup_contracts(&env, &admin, &token);
+    let insurance = Address::generate(&env);
+    let reputation = Address::generate(&env);
+    let new_admin = Address::generate(&env);
+
+    rep.pause(&admin);
+    fn assert_paused<F: FnOnce()>(f: F) {
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(f));
+        assert!(result.is_err(), "state-changing function should panic while paused");
+    }
+
+    assert_paused(|| {
+        rep.repay_invoice(
+            &symbol_short!("invx"),
+            &symbol_short!("offx"),
+            &Address::generate(&env),
+            &1_000i128,
+        );
+    });
+    assert_paused(|| {
+        rep.mark_overdue(&symbol_short!("invx"));
+    });
+    assert_paused(|| {
+        rep.reclaim_invoice(
+            &symbol_short!("invx"),
+            &symbol_short!("offx"),
+            &Address::generate(&env),
+        );
+    });
+    assert_paused(|| {
+        rep.set_insurance(&admin, &insurance);
+    });
+    assert_paused(|| {
+        rep.set_reputation(&admin, &reputation);
+    });
+    assert_paused(|| {
+        rep.transfer_admin(&admin, &new_admin);
+    });
+
+    assert_eq!(rep.get_duration_limits().0, invofi_common::MIN_OFFER_DURATION_SECS);
+}
+
 // ─── Default-flow integration tests (Task 10 + 11) ───────────────────────────
 
 #[test]

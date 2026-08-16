@@ -104,6 +104,7 @@ impl FinancingContract {
     /// The repayment contract is the only caller authorized to invoke
     /// callback methods (update_offer_status, update_offer_amount_repaid, etc.).
     pub fn set_repayment_contract(env: Env, admin: Address, repayment: Address) {
+        assert_not_paused(&env);
         admin.require_auth();
         let current: Address = env
             .storage()
@@ -134,6 +135,7 @@ impl FinancingContract {
 
     /// Transfers admin rights. Only current admin.
     pub fn transfer_admin(env: Env, admin: Address, new_admin: Address) {
+        assert_not_paused(&env);
         admin.require_auth();
         let current: Address = env
             .storage()
@@ -152,6 +154,7 @@ impl FinancingContract {
 
     /// Register a currency → token mapping. Admin only.
     pub fn register_currency(env: Env, admin: Address, currency: Symbol, token_addr: Address) {
+        assert_not_paused(&env);
         admin.require_auth();
         let current: Address = env
             .storage()
@@ -178,6 +181,7 @@ impl FinancingContract {
     /// behalf (the token's admin.require_auth() resolves via implicit
     /// contract-invoker auth — see ADR-0002).
     pub fn set_position_token(env: Env, admin: Address, token: Address) {
+        assert_not_paused(&env);
         admin.require_auth();
         let current: Address = env
             .storage()
@@ -491,6 +495,7 @@ impl FinancingContract {
     /// Update the status of an offer. Called by the Repayment contract
     /// after accept/reject/repay/reclaim to keep offer state in sync.
     pub fn update_offer_status(env: Env, id: Symbol, new_status: OfferStatus) {
+        assert_not_paused(&env);
         Self::assert_only_repayment(&env);
         let mut offers = load_offers(&env);
         let mut offer = offers
@@ -503,6 +508,7 @@ impl FinancingContract {
 
     /// Update the running amount_repaid on an offer. Called by Repayment.
     pub fn update_offer_amount_repaid(env: Env, id: Symbol, amount_repaid: i128) {
+        assert_not_paused(&env);
         Self::assert_only_repayment(&env);
         let mut offers = load_offers(&env);
         let mut offer = offers
@@ -515,6 +521,7 @@ impl FinancingContract {
 
     /// Update lender stats after a repayment. Called by Repayment.
     pub fn update_lender_stats_repaid(env: Env, lender: Address, fully_repaid: bool) {
+        assert_not_paused(&env);
         Self::assert_only_repayment(&env);
         let mut lstats = load_lender_stats(&env, &lender);
         if fully_repaid {
@@ -525,6 +532,7 @@ impl FinancingContract {
 
     /// Update protocol-level stats after a repayment. Called by Repayment.
     pub fn update_stats_repaid(env: Env, amount: i128, fee_amount: i128) {
+        assert_not_paused(&env);
         Self::assert_only_repayment(&env);
         let mut s = load_stats(&env);
         s.total_repaid += amount;

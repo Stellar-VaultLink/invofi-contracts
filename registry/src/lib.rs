@@ -119,6 +119,7 @@ impl RegistryContract {
     /// Transfers admin rights to a new address. Only the current admin can
     /// call this.
     pub fn transfer_admin(env: Env, admin: Address, new_admin: Address) {
+        assert_not_paused(&env);
         assert_admin(&env, &admin);
         env.storage()
             .instance()
@@ -129,6 +130,7 @@ impl RegistryContract {
     /// contract is the only caller allowed to transition a Pending invoice to
     /// Financed via `transition_invoice_status`.
     pub fn set_financing_contract(env: Env, admin: Address, financing: Address) {
+        assert_not_paused(&env);
         assert_admin(&env, &admin);
         env.storage()
             .instance()
@@ -139,6 +141,7 @@ impl RegistryContract {
     /// contract is the only caller allowed to transition a Financed invoice
     /// to Financed (partial) or Repaid (full) via `transition_invoice_status`.
     pub fn set_repayment_contract(env: Env, admin: Address, repayment: Address) {
+        assert_not_paused(&env);
         assert_admin(&env, &admin);
         env.storage()
             .instance()
@@ -176,6 +179,7 @@ impl RegistryContract {
     /// Sets the yield rate (in basis points, 0-10000) for a risk tier.
     /// Admin only.
     pub fn set_rate(env: Env, admin: Address, tier: RiskTier, rate_bps: u32) {
+        assert_not_paused(&env);
         assert_admin(&env, &admin);
         if rate_bps > 10_000 {
             panic!("rate_bps must be between 0 and 10000");
@@ -197,6 +201,7 @@ impl RegistryContract {
 
     /// Set the protocol fee in basis points (max 500 = 5%). Admin only.
     pub fn set_fee(env: Env, admin: Address, fee_bps: u32) {
+        assert_not_paused(&env);
         assert_admin(&env, &admin);
         if fee_bps > 500 {
             panic!("fee_bps must be at most 500 (5%)");
@@ -366,6 +371,7 @@ impl RegistryContract {
         repayer: Address,
         fully_repaid: bool,
     ) -> Invoice {
+        assert_not_paused(&env);
         repayer.require_auth();
         let mut invoices = load_invoices(&env);
         let mut invoice = invoices
@@ -392,6 +398,7 @@ impl RegistryContract {
     /// contract is authorized by address via the host's implicit
     /// contract-invoker auth (see Stellar docs — Authorization).
     pub fn financing_marks_invoice_financed(env: Env, id: Symbol) -> Invoice {
+        assert_not_paused(&env);
         let financing: Address = env
             .storage()
             .instance()
@@ -420,6 +427,7 @@ impl RegistryContract {
     /// repayment. Only the registered repayment contract may call this,
     /// authorized via implicit contract-invoker auth.
     pub fn repayment_marks_invoice_repaid(env: Env, id: Symbol, fully_repaid: bool) -> Invoice {
+        assert_not_paused(&env);
         let repayment: Address = env
             .storage()
             .instance()
@@ -454,6 +462,7 @@ impl RegistryContract {
     /// credit loss, which is what triggers the insurance payout hook and the
     /// originator's reputation default record.
     pub fn repayment_marks_defaulted(env: Env, id: Symbol) -> Invoice {
+        assert_not_paused(&env);
         let repayment: Address = env
             .storage()
             .instance()
@@ -536,6 +545,7 @@ impl RegistryContract {
         invoice_id: Symbol,
         target_status: InvoiceStatus,
     ) -> Invoice {
+        assert_not_paused(&env);
         assert_admin(&env, &admin);
         let mut invoices = load_invoices(&env);
         let mut invoice = invoices
@@ -652,6 +662,7 @@ impl RegistryContract {
     // ── Blacklist management ─────────────────────────────────────────────────
 
     pub fn blacklist_address(env: Env, admin: Address, target: Address) {
+        assert_not_paused(&env);
         assert_admin(&env, &admin);
         let mut list = load_blacklist(&env);
         for entry in list.iter() {
@@ -664,6 +675,7 @@ impl RegistryContract {
     }
 
     pub fn unblacklist_address(env: Env, admin: Address, target: Address) {
+        assert_not_paused(&env);
         assert_admin(&env, &admin);
         let list = load_blacklist(&env);
         let mut new_list: Vec<Address> = Vec::new(&env);

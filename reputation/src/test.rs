@@ -102,6 +102,32 @@ fn test_record_outcome_without_recorder_panics() {
 }
 
 #[test]
+fn test_pause_blocks_all_reputation_state_changes() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let admin = Address::generate(&env);
+    let client = setup(&env, &admin);
+    let originator = Address::generate(&env);
+    let recorder = Address::generate(&env);
+
+    client.pause(&admin);
+    fn assert_paused<F: FnOnce()>(f: F) {
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(f));
+        assert!(result.is_err(), "state-changing function should panic while paused");
+    }
+
+    assert_paused(|| {
+        client.record_outcome(&originator, &OUTCOME_REPAID);
+    });
+    assert_paused(|| {
+        client.set_recorder(&admin, &recorder);
+    });
+
+    assert_eq!(client.get_score(&originator), 0);
+    assert_eq!(client.get_record(&originator).repayments, 0);
+}
+
+#[test]
 #[should_panic(expected = "outcome must be 0 (repaid) or 1 (defaulted)")]
 fn test_record_outcome_invalid_outcome_panics() {
     let env = Env::default();
