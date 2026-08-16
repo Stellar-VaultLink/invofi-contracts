@@ -347,7 +347,7 @@ impl RepaymentContract {
         let insurance_opt: Option<Address> = env.storage().instance().get(&symbol_short!("insadd"));
         if let Some(insurance_addr) = insurance_opt {
             let insurance_client = InsuranceClient::new(&env, &insurance_addr);
-            payout = insurance_client.pay_out(&offer.lender, &remaining_due);
+            payout = insurance_client.pay_out(&invoice_id, &offer.lender, &remaining_due);
         }
 
         // Task 11: reputation hook — record the originator's default.

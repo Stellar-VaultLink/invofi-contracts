@@ -2,7 +2,7 @@
 extern crate std;
 
 use super::InsuranceContract;
-use soroban_sdk::{testutils::Address as _, token, Address, Env};
+use soroban_sdk::{testutils::{Address as _, Ledger}, token, Address, Env};
 
 /// Deploy the insurance contract + a staking token, and initialize.
 fn setup<'a>(
@@ -238,6 +238,60 @@ fn test_set_staking_token_admin_only() {
 }
 
 // ─── Payout tests (Task 10) ─────────────────────────────────────────────────
+//
+// Every payout test wires a real registry contract and forces the invoice into
+// Defaulted status before calling pay_out. This proves the on-chain Defaulted
+// check cannot be bypassed — pay_out cross-reads the registry itself.
+
+use invofi_registry::RegistryContract;
+
+/// Register a registry contract and return its address and a minimal
+/// Defaulted invoice id ready for use in payout tests.
+///
+/// The registry is wired to the insurance client via `set_registry`.
+/// The invoice is driven to `Defaulted` via `repayment_marks_defaulted`,
+/// which requires the registry's repayment contract to be configured — we
+/// set it to an arbitrary address and use `mock_all_auths` to authorise it.
+fn setup_with_defaulted_invoice<'a>(
+    env: &'a Env,
+    admin: &Address,
+    payout_caller: &Address,
+    client: &super::InsuranceContractClient<'a>,
+) -> (invofi_registry::RegistryContractClient<'a>, soroban_sdk::Symbol) {
+    use soroban_sdk::symbol_short;
+    // Deploy a registry, wire it to the insurance contract.
+    let registry_id = env.register(RegistryContract, (admin.clone(),));
+    let reg = invofi_registry::RegistryContractClient::new(env, &registry_id);
+    client.set_registry(admin, &registry_id);
+
+    // Use the payout_caller as the authorised repayment contract on the
+    // registry — mock_all_auths covers its auth so we can drive status.
+    reg.set_repayment_contract(admin, payout_caller);
+
+    // Register a minimal invoice and drive it to Defaulted.
+    let originator = Address::generate(env);
+    let invoice_id = symbol_short!("inv_dfl");
+    // due_date in the past so mark_invoice_overdue passes the timestamp guard.
+    let due_date: u64 = 1_000;
+    reg.register_invoice(
+        &invoice_id,
+        &originator,
+        &1_000_000_000i128,
+        &symbol_short!("USDC"),
+        &due_date,
+    );
+    // Pending -> Financed (registry needs a financing contract configured).
+    reg.set_financing_contract(admin, payout_caller);
+    reg.financing_marks_invoice_financed(&invoice_id);
+    // Advance ledger past due_date so mark_invoice_overdue passes.
+    env.ledger().set_timestamp(due_date + 1);
+    // Financed -> Overdue (public, timestamp-gated).
+    reg.mark_invoice_overdue(&invoice_id);
+    // Overdue -> Defaulted via authorized repayment transition.
+    reg.repayment_marks_defaulted(&invoice_id);
+
+    (reg, invoice_id)
+}
 
 #[test]
 fn test_payout_after_default_covers_claim() {
@@ -254,12 +308,14 @@ fn test_payout_after_default_covers_claim() {
     mint_and_approve(&env, &token_id, &insurance_id, &staker, 1_000_000);
     client.stake(&staker, &1_000_000);
 
-    // Configure the repayment contract as payout caller.
+    // Configure payout caller and registry with a Defaulted invoice.
     client.set_payout_caller(&admin, &payout_caller);
     assert_eq!(client.get_payout_caller(), Some(payout_caller.clone()));
+    let (_reg, invoice_id) =
+        setup_with_defaulted_invoice(&env, &admin, &payout_caller, &client);
 
-    // Default triggers a 400k payout claim — fully covered.
-    let paid = client.pay_out(&beneficiary, &400_000);
+    // Default triggers a 400k payout claim — fully covered by the pool.
+    let paid = client.pay_out(&invoice_id, &beneficiary, &400_000);
     assert_eq!(paid, 400_000);
 
     // Pool accounting: pool 600k, staker claim 600k, lender funded.
@@ -284,10 +340,13 @@ fn test_payout_pool_depleted_pays_whats_left() {
     mint_and_approve(&env, &token_id, &insurance_id, &staker, 100_000);
     client.stake(&staker, &100_000);
     client.set_payout_caller(&admin, &payout_caller);
+    let (_reg, invoice_id) =
+        setup_with_defaulted_invoice(&env, &admin, &payout_caller, &client);
 
     // Claim (1M) far exceeds the pool (100k) — lender gets everything left.
-    let paid = client.pay_out(&beneficiary, &1_000_000);
-    assert_eq!(paid, 100_000);
+    // payout is capped at available reserves; it never exceeds pool_total.
+    let paid = client.pay_out(&invoice_id, &beneficiary, &1_000_000);
+    assert_eq!(paid, 100_000); // capped at available balance, not reverted
 
     assert_eq!(client.get_pool_total(), 0);
     assert_eq!(client.get_stake(&staker), 0);
@@ -296,8 +355,8 @@ fn test_payout_pool_depleted_pays_whats_left() {
     let token_client = token::TokenClient::new(&env, &token_id);
     assert_eq!(token_client.balance(&beneficiary), 100_000);
 
-    // Subsequent claim against an empty pool pays nothing.
-    assert_eq!(client.pay_out(&beneficiary, &1_000_000), 0);
+    // Subsequent call against an already-empty pool returns 0.
+    assert_eq!(client.pay_out(&invoice_id, &beneficiary, &1_000_000), 0);
 }
 
 #[test]
@@ -318,35 +377,133 @@ fn test_payout_pro_rata_multiple_stakers_exact() {
     client.stake(&staker_a, &1_000_000);
     client.stake(&staker_b, &3_000_000);
     client.set_payout_caller(&admin, &payout_caller);
+    let (_reg, invoice_id) =
+        setup_with_defaulted_invoice(&env, &admin, &payout_caller, &client);
 
     // 2M payout -> each staker loses exactly their pro-rata share.
-    let paid = client.pay_out(&beneficiary, &2_000_000);
+    let paid = client.pay_out(&invoice_id, &beneficiary, &2_000_000);
     assert_eq!(paid, 2_000_000);
 
     assert_eq!(client.get_pool_total(), 2_000_000);
-    assert_eq!(client.get_stake(&staker_a), 500_000); // 25% of the loss
-    assert_eq!(client.get_stake(&staker_b), 1_500_000); // 75% of the loss
+    assert_eq!(client.get_stake(&staker_a), 500_000); // 25 % of the loss
+    assert_eq!(client.get_stake(&staker_b), 1_500_000); // 75 % of the loss
     assert_eq!(client.get_contract_token_balance(), 2_000_000);
     let token_client = token::TokenClient::new(&env, &token_id);
     assert_eq!(token_client.balance(&beneficiary), 2_000_000);
 }
 
+// ── Rejection: invoice not Defaulted ─────────────────────────────────────────
+
+/// pay_out must reject when the invoice is in any status other than Defaulted.
+/// We test the most dangerous case: the invoice is Overdue (one step before
+/// Defaulted) — the payout must still revert with a clear error.
+#[test]
+#[should_panic(expected = "Invoice is not Defaulted")]
+fn test_payout_rejected_when_invoice_overdue_not_defaulted() {
+    use invofi_common::InvoiceStatus;
+    use soroban_sdk::symbol_short;
+
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let admin = Address::generate(&env);
+    let payout_caller = Address::generate(&env);
+    let beneficiary = Address::generate(&env);
+    let (token_id, insurance_id, client) = setup(&env, &admin);
+
+    let staker = Address::generate(&env);
+    mint_and_approve(&env, &token_id, &insurance_id, &staker, 1_000_000);
+    client.stake(&staker, &1_000_000);
+    client.set_payout_caller(&admin, &payout_caller);
+
+    // Deploy registry, wire it — but only advance invoice to Overdue, NOT Defaulted.
+    let registry_id = env.register(RegistryContract, (admin.clone(),));
+    let reg = invofi_registry::RegistryContractClient::new(&env, &registry_id);
+    client.set_registry(&admin, &registry_id);
+    reg.set_repayment_contract(&admin, &payout_caller);
+    reg.set_financing_contract(&admin, &payout_caller);
+
+    let originator = Address::generate(&env);
+    let invoice_id = symbol_short!("inv_ovd");
+    reg.register_invoice(
+        &invoice_id,
+        &originator,
+        &1_000_000_000i128,
+        &symbol_short!("USDC"),
+        &1_000u64,
+    );
+    reg.financing_marks_invoice_financed(&invoice_id);
+    // Advance past due_date so mark_invoice_overdue passes.
+    env.ledger().set_timestamp(1_001);
+    // Stopped here — invoice is Overdue, not Defaulted.
+    reg.mark_invoice_overdue(&invoice_id);
+
+    let invoice = reg.get_invoice(&invoice_id);
+    assert_eq!(invoice.status, InvoiceStatus::Overdue);
+
+    // Must panic: "Invoice is not Defaulted"
+    client.pay_out(&invoice_id, &beneficiary, &400_000);
+}
+
+/// pay_out must reject when the invoice is Pending (completely wrong state).
+#[test]
+#[should_panic(expected = "Invoice is not Defaulted")]
+fn test_payout_rejected_when_invoice_pending() {
+    use soroban_sdk::symbol_short;
+
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let admin = Address::generate(&env);
+    let payout_caller = Address::generate(&env);
+    let beneficiary = Address::generate(&env);
+    let (token_id, insurance_id, client) = setup(&env, &admin);
+
+    let staker = Address::generate(&env);
+    mint_and_approve(&env, &token_id, &insurance_id, &staker, 1_000_000);
+    client.stake(&staker, &1_000_000);
+    client.set_payout_caller(&admin, &payout_caller);
+
+    let registry_id = env.register(RegistryContract, (admin.clone(),));
+    let reg = invofi_registry::RegistryContractClient::new(&env, &registry_id);
+    client.set_registry(&admin, &registry_id);
+
+    let originator = Address::generate(&env);
+    let invoice_id = symbol_short!("inv_pnd");
+    reg.register_invoice(
+        &invoice_id,
+        &originator,
+        &1_000_000_000i128,
+        &symbol_short!("USDC"),
+        &1_000_000u64,
+    );
+    // Invoice is still Pending — must panic.
+    client.pay_out(&invoice_id, &beneficiary, &400_000);
+}
+
+// ── Existing guard tests (updated signatures) ─────────────────────────────────
+
 #[test]
 #[should_panic(expected = "No payout caller configured")]
 fn test_payout_without_caller_panics() {
+    use soroban_sdk::symbol_short;
+
     let env = Env::default();
     env.mock_all_auths();
 
     let admin = Address::generate(&env);
     let beneficiary = Address::generate(&env);
     let (_, _, client) = setup(&env, &admin);
+    let invoice_id = symbol_short!("inv_x");
 
-    client.pay_out(&beneficiary, &1_000);
+    client.pay_out(&invoice_id, &beneficiary, &1_000);
 }
 
 #[test]
 #[should_panic(expected = "payout amount must be greater than zero")]
 fn test_payout_zero_amount_panics() {
+    use soroban_sdk::symbol_short;
+
     let env = Env::default();
     env.mock_all_auths();
 
@@ -355,13 +512,16 @@ fn test_payout_zero_amount_panics() {
     let beneficiary = Address::generate(&env);
     let (_, _, client) = setup(&env, &admin);
     client.set_payout_caller(&admin, &payout_caller);
+    let invoice_id = symbol_short!("inv_x");
 
-    client.pay_out(&beneficiary, &0);
+    client.pay_out(&invoice_id, &beneficiary, &0);
 }
 
 #[test]
 #[should_panic(expected = "Contract is paused")]
 fn test_paused_blocks_payout() {
+    use soroban_sdk::symbol_short;
+
     let env = Env::default();
     env.mock_all_auths();
 
@@ -371,6 +531,32 @@ fn test_paused_blocks_payout() {
     let (_, _, client) = setup(&env, &admin);
     client.set_payout_caller(&admin, &payout_caller);
     client.pause(&admin);
+    let invoice_id = symbol_short!("inv_x");
 
-    client.pay_out(&beneficiary, &1_000);
+    client.pay_out(&invoice_id, &beneficiary, &1_000);
+}
+
+// ── Registry not configured guard ─────────────────────────────────────────────
+
+#[test]
+#[should_panic(expected = "Registry not configured")]
+fn test_payout_without_registry_panics() {
+    use soroban_sdk::symbol_short;
+
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let admin = Address::generate(&env);
+    let payout_caller = Address::generate(&env);
+    let beneficiary = Address::generate(&env);
+    let (token_id, insurance_id, client) = setup(&env, &admin);
+
+    let staker = Address::generate(&env);
+    mint_and_approve(&env, &token_id, &insurance_id, &staker, 1_000_000);
+    client.stake(&staker, &1_000_000);
+    // Payout caller configured, but NO registry wired — must fail-closed.
+    client.set_payout_caller(&admin, &payout_caller);
+    let invoice_id = symbol_short!("inv_x");
+
+    client.pay_out(&invoice_id, &beneficiary, &500_000);
 }

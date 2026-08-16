@@ -10,9 +10,9 @@
 //! can never exceed actual pool funds). Yield-rate calculation stays out of
 //! scope.
 
-use soroban_sdk::{contract, contractimpl, symbol_short, token, Address, Env, Map, Vec};
+use soroban_sdk::{contract, contractimpl, symbol_short, token, Address, Env, Map, Symbol, Vec};
 
-use invofi_common::assert_not_paused;
+use invofi_common::{assert_not_paused, InvoiceStatus, RegistryClient};
 
 // ─── Storage Helpers ─────────────────────────────────────────────────────────
 
@@ -142,6 +142,29 @@ impl InsuranceContract {
         env.storage().instance().get(&symbol_short!("paycall"))
     }
 
+    /// Configure the registry contract used to verify invoice status in
+    /// `pay_out`. Admin only. Payouts on Defaulted invoices are rejected
+    /// with a clear error if the registry is not configured or if the
+    /// invoice is not in the Defaulted state (fail-closed).
+    pub fn set_registry(env: Env, admin: Address, registry: Address) {
+        admin.require_auth();
+        let current: Address = env
+            .storage()
+            .instance()
+            .get(&symbol_short!("admin"))
+            .unwrap_or_else(|| panic!("Not initialized"));
+        if current != admin {
+            panic!("Only the current admin can set the registry");
+        }
+        env.storage()
+            .instance()
+            .set(&symbol_short!("registry"), &registry);
+    }
+
+    pub fn get_registry(env: Env) -> Option<Address> {
+        env.storage().instance().get(&symbol_short!("registry"))
+    }
+
     // ── Pause / unpause (Task 4A circuit breaker) ───────────────────────────
 
     pub fn pause(env: Env, admin: Address) {
@@ -251,15 +274,24 @@ impl InsuranceContract {
     /// available balance. Only callable by the configured payout caller (the
     /// repayment contract), authorized via implicit contract-invoker auth.
     ///
+    /// **Safety invariants (both checked on-chain before any funds move):**
+    ///
+    /// 1. The invoice identified by `invoice_id` must be in `Defaulted` status
+    ///    in the registry — `Overdue` alone is not sufficient. This is verified
+    ///    via a cross-contract read of the registry, so the check cannot be
+    ///    spoofed by the caller.
+    /// 2. The payout is capped at the pool's available balance. When the pool
+    ///    has insufficient funds the contract pays whatever is left and returns
+    ///    that amount; it never moves more than `pool_total`. A subsequent call
+    ///    against an empty pool returns 0 immediately.
+    ///
     /// Every staker's claim is reduced pro-rata by the payout ratio, and the
     /// pool total drops by exactly the amount paid — so get_stake sums always
-    /// equal get_pool_total and unstake can never overdraw the pool. The
-    /// payout itself is capped at the pool total (pool-depleted case pays
-    /// everything available, then returns 0 on subsequent claims).
+    /// equal get_pool_total and unstake can never overdraw the pool.
     ///
     /// Returns the amount actually paid (may be less than `amount` when the
     /// pool is short).
-    pub fn pay_out(env: Env, beneficiary: Address, amount: i128) -> i128 {
+    pub fn pay_out(env: Env, invoice_id: Symbol, beneficiary: Address, amount: i128) -> i128 {
         assert_not_paused(&env);
         let payout_caller: Address = env
             .storage()
@@ -269,6 +301,25 @@ impl InsuranceContract {
         payout_caller.require_auth();
         assert!(amount > 0, "payout amount must be greater than zero");
 
+        // ── Safety check 1: invoice must be Defaulted, not merely Overdue ──
+        // Cross-contract read from the registry provides on-chain proof that
+        // the credit-loss event has been finalized before any staked funds move.
+        let registry_addr: Address = env
+            .storage()
+            .instance()
+            .get(&symbol_short!("registry"))
+            .unwrap_or_else(|| panic!("Registry not configured"));
+        let registry_client = RegistryClient::new(&env, &registry_addr);
+        let invoice = registry_client.get_invoice(&invoice_id);
+        if invoice.status != InvoiceStatus::Defaulted {
+            panic!("Invoice is not Defaulted");
+        }
+
+        // ── Safety check 2: payout ≤ available pool balance ───────────────
+        // `amount.min(pool_total)` ensures we never transfer more than the
+        // pool holds. An empty pool (pool_total == 0) returns 0 immediately —
+        // the `off_def` protocol event on the caller side carries payout=0 so
+        // indexers can track the shortfall.
         let pool_total = load_pool_total(&env);
         let payout = amount.min(pool_total);
         if payout <= 0 {

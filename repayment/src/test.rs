@@ -844,6 +844,9 @@ fn test_reclaim_triggers_defaulted_payout_and_reputation() {
     );
     ins.stake(&staker, &300_000_000);
     ins.set_payout_caller(&admin, &repayment_id);
+    // Wire the registry into the insurance contract so pay_out can verify
+    // the invoice is Defaulted on-chain before moving staked funds.
+    ins.set_registry(&admin, &registry_id);
 
     // Reputation contract, recorder = repayment.
     let reputation_id = env.register(ReputationContract, (admin.clone(),));
