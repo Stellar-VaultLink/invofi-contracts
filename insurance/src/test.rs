@@ -194,6 +194,47 @@ fn test_paused_blocks_stake() {
 }
 
 #[test]
+fn test_pause_blocks_all_insurance_state_changes() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let admin = Address::generate(&env);
+    let (_, _, client) = setup(&env, &admin);
+    let staker = Address::generate(&env);
+    let beneficiary = Address::generate(&env);
+    let new_admin = Address::generate(&env);
+    let payout_caller = Address::generate(&env);
+    let new_token = Address::generate(&env);
+
+    client.pause(&admin);
+    fn assert_paused<F: FnOnce()>(f: F) {
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(f));
+        assert!(result.is_err(), "state-changing function should panic while paused");
+    }
+
+    assert_paused(|| {
+        client.stake(&staker, &1_000i128);
+    });
+    assert_paused(|| {
+        client.unstake(&staker, &1_000i128);
+    });
+    assert_paused(|| {
+        client.pay_out(&beneficiary, &1_000i128);
+    });
+    assert_paused(|| {
+        client.transfer_admin(&admin, &new_admin);
+    });
+    assert_paused(|| {
+        client.set_staking_token(&admin, &new_token);
+    });
+    assert_paused(|| {
+        client.set_payout_caller(&admin, &payout_caller);
+    });
+
+    assert_eq!(client.get_pool_total(), 0);
+    assert_eq!(client.get_stakers_count(), 0);
+}
+
+#[test]
 #[should_panic(expected = "Contract is paused")]
 fn test_paused_blocks_unstake() {
     let env = Env::default();

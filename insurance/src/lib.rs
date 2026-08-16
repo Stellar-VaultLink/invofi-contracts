@@ -85,6 +85,7 @@ impl InsuranceContract {
 
     /// Transfers admin rights. Only current admin.
     pub fn transfer_admin(env: Env, admin: Address, new_admin: Address) {
+        assert_not_paused(&env);
         admin.require_auth();
         let current: Address = env
             .storage()
@@ -102,6 +103,7 @@ impl InsuranceContract {
     /// Swap the staking token. Admin only. Existing stakes are not migrated —
     /// set this before opening the pool to stakers.
     pub fn set_staking_token(env: Env, admin: Address, token: Address) {
+        assert_not_paused(&env);
         admin.require_auth();
         let current: Address = env
             .storage()
@@ -124,6 +126,7 @@ impl InsuranceContract {
     /// repayment contract. Admin only. Payouts are disabled until a caller
     /// is configured (fail-closed).
     pub fn set_payout_caller(env: Env, admin: Address, payout_caller: Address) {
+        assert_not_paused(&env);
         admin.require_auth();
         let current: Address = env
             .storage()

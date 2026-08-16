@@ -58,6 +58,7 @@ impl RepaymentContract {
     /// reclaim (default) triggers a pool payout to the lender from the
     /// insurance pool (Task 10).
     pub fn set_insurance(env: Env, admin: Address, insurance: Address) {
+        assert_not_paused(&env);
         admin.require_auth();
         let current: Address = env
             .storage()
@@ -80,6 +81,7 @@ impl RepaymentContract {
     /// full repayments and defaults update the originator's reputation score
     /// (Task 11).
     pub fn set_reputation(env: Env, admin: Address, reputation: Address) {
+        assert_not_paused(&env);
         admin.require_auth();
         let current: Address = env
             .storage()
@@ -100,6 +102,7 @@ impl RepaymentContract {
 
     /// Transfers admin rights. Only current admin.
     pub fn transfer_admin(env: Env, admin: Address, new_admin: Address) {
+        assert_not_paused(&env);
         admin.require_auth();
         let current: Address = env
             .storage()

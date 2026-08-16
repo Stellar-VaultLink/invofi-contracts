@@ -167,6 +167,37 @@ pub fn resolve_token(env: &Env, currency: &Symbol) -> Address {
 // ─── Pause Guard ─────────────────────────────────────────────────────────────
 
 /// Panics if the contract is currently paused.
+///
+/// Coverage matrix for the five audited contracts: every public
+/// write/state-changing entrypoint must call this guard before mutating
+/// persistent storage or transferring funds. The explicit exceptions are the
+/// pause/unpause setters themselves and read-only getter/query functions.
+///
+/// - Registry:
+///   - state-changing: register_invoice, update_invoice_status, update_invoice_amount,
+///     cancel_invoice, set_invoice_repaid_status, financing_marks_invoice_financed,
+///     repayment_marks_invoice_repaid, repayment_marks_defaulted, mark_invoice_overdue,
+///     raise_dispute, resolve_dispute, blacklist_address, unblacklist_address,
+///     transfer_admin, set_financing_contract, set_repayment_contract, set_rate,
+///     set_fee.
+///   - exceptions: pause, unpause, contract_is_paused, getters.
+/// - Financing:
+///   - state-changing: create_offer, withdraw_offer, accept_offer, reject_offer,
+///     update_offer_status, update_offer_amount_repaid, update_lender_stats_repaid,
+///     update_stats_repaid, register_currency, set_position_token, set_repayment_contract,
+///     transfer_admin.
+///   - exceptions: pause, unpause, contract_is_paused, getters.
+/// - Repayment:
+///   - state-changing: repay_invoice, mark_overdue, reclaim_invoice, set_insurance,
+///     set_reputation, transfer_admin.
+///   - exceptions: pause, unpause, contract_is_paused, getters.
+/// - Insurance:
+///   - state-changing: stake, unstake, pay_out, set_staking_token, set_payout_caller,
+///     transfer_admin.
+///   - exceptions: pause, unpause, contract_is_paused, getters.
+/// - Reputation:
+///   - state-changing: record_outcome, set_recorder.
+///   - exceptions: pause, unpause, contract_is_paused, getters.
 pub fn assert_not_paused(env: &Env) {
     let paused: bool = env
         .storage()
