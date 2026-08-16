@@ -9,6 +9,8 @@
 //! staker's claim pro-rata so accounting stays exactly consistent (unstake
 //! can never exceed actual pool funds). Yield-rate calculation stays out of
 //! scope.
+//!
+//! Task 10 security: pay_out verifies invoice.status == Defaulted on-chain.
 
 use soroban_sdk::{contract, contractimpl, symbol_short, token, Address, Env, Map, Symbol, Vec};
 
