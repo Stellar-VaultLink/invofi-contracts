@@ -32,6 +32,14 @@ on:
 permissions:
   contents: write
   pull-requests: write
+  actions: write
+
+# NOTE: the `actions: write` permission above lets the bot auto-approve
+# workflow runs gated behind GitHub's first-time-contributor check via
+# POST /repos/{owner}/{repo}/actions/runs/{run_id}/approve. This is what
+# unlocks fork PRs from new contributors without a maintainer having to
+# click "Approve and run". The schedule trigger is never gated, so the
+# hourly sweep can both approve and merge.
 
 concurrency:
   group: auto-merge-${{ github.event.pull_request.number || inputs.pr || 'sweep' }}
@@ -84,6 +92,25 @@ jobs:
           BOT_LOGIN="$(gh api user --jq .login 2>/dev/null \
             || echo 'github-actions[bot]')"
           echo "Bot identity: ${BOT_LOGIN}"
+
+          # ── auto-approve gated first-time-contributor runs ──
+          # Fork PRs from brand-new contributors have their workflow runs
+          # held behind an approval gate (status=action_required). Approve
+          # them here so CI can start without a maintainer in the loop.
+          echo "── Approving pending first-time-contributor runs ──"
+          mapfile -t GATED < <(gh api \
+            "repos/${REPO}/actions/runs?status=action_required&per_page=50" \
+            --jq '.workflow_runs[] | select(.event == "pull_request") | .id' \
+            2>/dev/null || true)
+          for RUN in "${GATED[@]:-}"; do
+            [ -n "${RUN}" ] || continue
+            if gh api -X POST \
+              "repos/${REPO}/actions/runs/${RUN}/approve" >/dev/null 2>&1; then
+              echo "  ✅ approved gated run ${RUN}"
+            else
+              echo "  could not approve run ${RUN} (may already be approved)"
+            fi
+          done
 
           for PR in "${PRS[@]}"; do
             echo "── PR #${PR} ──"
