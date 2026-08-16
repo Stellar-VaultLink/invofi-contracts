@@ -2,7 +2,7 @@
 name = "invofi-insurance"
 version = "0.7.0"
 edition = "2021"
-description = "Soroban insurance pool contract for InvoFi — stake/unstake with flat pool accounting"
+description = "Soroban insurance pool contract for InvoFi — stake/unstake with flat pool accounting + payout-on-default safety"
 license = "MIT"
 
 [lib]
