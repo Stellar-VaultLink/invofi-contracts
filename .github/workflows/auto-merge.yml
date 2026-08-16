@@ -41,7 +41,9 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 45
     env:
-      GH_TOKEN: ${{ secrets.CONTRIBUTORS_TOKEN || secrets.GITHUB_TOKEN }}
+      # GITHUB_TOKEN has repo write access on pull_request_target, so it can
+      # review, approve, and merge fork PRs — no PAT needed.
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
       PR_NUMBER: ${{ github.event.pull_request.number }}
       INPUT_PR: ${{ inputs.pr }}
       # Job names (check-run names) that must pass before auto-merge.
