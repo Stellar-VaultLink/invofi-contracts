@@ -178,6 +178,7 @@ impl RepaymentContract {
             .get(&symbol_short!("registry"))
             .unwrap_or_else(|| panic!("Not initialized"));
         let registry_client = RegistryClient::new(&env, &registry_addr);
+        // CEI: Read-only cross-contract call. Repayment has no local state to mutate, so CEI is trivially satisfied.
         let invoice: Invoice = registry_client.get_invoice(&invoice_id);
 
         if invoice.originator != repayer {
@@ -194,6 +195,7 @@ impl RepaymentContract {
             .get(&symbol_short!("financing"))
             .unwrap_or_else(|| panic!("Not initialized"));
         let financing_client = FinancingClient::new(&env, &financing_addr);
+        // CEI: Read-only cross-contract call.
         let mut offer: FinancingOffer = financing_client.get_offer(&offer_id);
 
         if offer.invoice_id != invoice_id {
@@ -218,6 +220,7 @@ impl RepaymentContract {
         let fee_bps: u32 = financing_client.get_fee_bps();
         let fee_amount = amount * (fee_bps as i128) / 10_000;
         let lender_amount = amount - fee_amount;
+        // CEI: External interaction. Safe because this contract has no local state to protect.
         token_client.transfer(&repayer, &offer.lender, &lender_amount);
         if fee_amount > 0 {
             let admin: Address = env
@@ -225,6 +228,7 @@ impl RepaymentContract {
                 .instance()
                 .get(&symbol_short!("admin"))
                 .unwrap_or_else(|| panic!("Not initialized"));
+            // CEI: External interaction. Safe because this contract has no local state to protect.
             token_client.transfer(&repayer, &admin, &fee_amount);
         }
 
@@ -237,6 +241,7 @@ impl RepaymentContract {
         };
 
         // Cross-contract: update offer in financing
+        // CEI: External interactions. Safe because this contract has no local state to protect.
         financing_client.update_offer_status(&offer_id, &new_status);
         financing_client.update_offer_amount_repaid(&offer_id, &offer.amount_repaid);
         financing_client.update_lender_stats_repaid(&offer.lender, &fully_repaid);
@@ -244,6 +249,7 @@ impl RepaymentContract {
 
         // Cross-contract: mark the invoice repaid in the registry via the
         // system transition (the repayment contract is the authorized caller).
+        // CEI: External interaction. Safe because this contract has no local state to protect.
         let updated_invoice =
             registry_client.repayment_marks_invoice_repaid(&invoice_id, &fully_repaid);
 
@@ -255,6 +261,7 @@ impl RepaymentContract {
                 env.storage().instance().get(&symbol_short!("repadd"));
             if let Some(reputation_addr) = reputation_opt {
                 let reputation_client = ReputationClient::new(&env, &reputation_addr);
+                // CEI: External interaction. Safe because this contract has no local state to protect.
                 reputation_client.record_outcome(&invoice.originator, &0);
             }
         }
@@ -280,6 +287,7 @@ impl RepaymentContract {
             .get(&symbol_short!("registry"))
             .unwrap_or_else(|| panic!("Not initialized"));
         let registry_client = RegistryClient::new(&env, &registry_addr);
+        // CEI: External interaction. Safe because this contract has no local state to protect.
         registry_client.mark_invoice_overdue(&invoice_id)
     }
 
@@ -301,6 +309,7 @@ impl RepaymentContract {
             .get(&symbol_short!("registry"))
             .unwrap_or_else(|| panic!("Not initialized"));
         let registry_client = RegistryClient::new(&env, &registry_addr);
+        // CEI: Read-only cross-contract call. Repayment has no local state to protect.
         let invoice: Invoice = registry_client.get_invoice(&invoice_id);
 
         if invoice.status != InvoiceStatus::Overdue {
@@ -317,6 +326,7 @@ impl RepaymentContract {
             .get(&symbol_short!("financing"))
             .unwrap_or_else(|| panic!("Not initialized"));
         let financing_client = FinancingClient::new(&env, &financing_addr);
+        // CEI: Read-only cross-contract call.
         let mut offer: FinancingOffer = financing_client.get_offer(&offer_id);
 
         if offer.invoice_id != invoice_id {
@@ -330,6 +340,7 @@ impl RepaymentContract {
         }
 
         // Cross-contract: update offer status in financing
+        // CEI: External interaction. Safe because this contract has no local state to protect.
         financing_client.update_offer_status(&offer_id, &OfferStatus::Defaulted);
 
         offer.status = OfferStatus::Defaulted;
@@ -337,6 +348,7 @@ impl RepaymentContract {
         // Task 10: transition the invoice Overdue -> Defaulted in the registry
         // (the repayment contract is the authorized caller). This is the
         // protocol's realized-credit-loss signal.
+        // CEI: External interaction. Safe because this contract has no local state to protect.
         registry_client.repayment_marks_defaulted(&invoice_id);
 
         // Task 10: insurance payout hook. The lender's outstanding exposure is
@@ -350,6 +362,7 @@ impl RepaymentContract {
         let insurance_opt: Option<Address> = env.storage().instance().get(&symbol_short!("insadd"));
         if let Some(insurance_addr) = insurance_opt {
             let insurance_client = InsuranceClient::new(&env, &insurance_addr);
+            // CEI: External interaction. Safe because this contract has no local state to protect.
             payout = insurance_client.pay_out(&offer.lender, &remaining_due);
         }
 
@@ -358,6 +371,7 @@ impl RepaymentContract {
             env.storage().instance().get(&symbol_short!("repadd"));
         if let Some(reputation_addr) = reputation_opt {
             let reputation_client = ReputationClient::new(&env, &reputation_addr);
+            // CEI: External interaction. Safe because this contract has no local state to protect.
             reputation_client.record_outcome(&invoice.originator, &1);
         }
 
@@ -379,6 +393,7 @@ impl RepaymentContract {
             .get(&symbol_short!("financing"))
             .unwrap_or_else(|| panic!("Not initialized"));
         let financing_client = FinancingClient::new(&env, &financing_addr);
+        // CEI: Read-only cross-contract call.
         let offer: FinancingOffer = financing_client.get_offer(&offer_id);
 
         if offer.status == OfferStatus::Repaid || offer.status == OfferStatus::Defaulted {
@@ -410,6 +425,7 @@ impl RepaymentContract {
             .get(&symbol_short!("financing"))
             .unwrap_or_else(|| panic!("Not initialized"));
         let financing_client = FinancingClient::new(&env, &financing_addr);
+        // CEI: Read-only cross-contract call.
         financing_client.get_installment_due(&offer_id)
     }
 }
