@@ -94,8 +94,16 @@ jobs:
             exit 0
           fi
 
-          BOT_LOGIN="$(gh api user --jq .login 2>/dev/null \
-            || echo 'github-actions[bot]')"
+          # GITHUB_TOKEN cannot call GET /user ("Resource not accessible
+          # by integration"), so detect the actor robustly and fall back
+          # to the bot identity when the token type is unknown.
+          RAW_LOGIN="$(gh api user --jq .login 2>/dev/null | tr -d '\r\n' \
+            || true)"
+          case "${RAW_LOGIN}" in
+            ""|"null") BOT_LOGIN="github-actions[bot]" ;;
+            *[!a-zA-Z0-9_-]*) BOT_LOGIN="github-actions[bot]" ;;
+            *) BOT_LOGIN="${RAW_LOGIN}" ;;
+          esac
           echo "Bot identity: ${BOT_LOGIN}"
 
           # ── auto-approve gated first-time-contributor runs ──
@@ -280,10 +288,27 @@ jobs:
               continue
             fi
 
-            # ── all required checks passed → approve + merge ──
+            # ── all required checks passed → announce, approve, merge ──
             echo "  all required checks passed"
             [ "${MERGEABLE}" = "MERGEABLE" ] || {
               echo "  not mergeable (${MERGEABLE}) — will retry"; continue; }
+
+            # Announce the merge with a plain review comment first — this
+            # works even when the token cannot submit APPROVED reviews.
+            ANNOUNCE="$(gh pr view "${PR}" --repo "${REPO}" \
+              --json reviews \
+              --jq "[.reviews[] | select(.author.login == \"${BOT_LOGIN}\")
+                | select(.body | contains(\"BOT-MERGE-ANNOUNCE ${SHA}\"))]
+                | length" 2>/dev/null || echo 0)"
+            if [ "${ANNOUNCE}" -eq 0 ] && [ "${SELF}" != "true" ]; then
+              BODY="🤖 **Bot review** — ✅ All required CI checks passed."
+              BODY+=$'\n'
+              BODY+="Merging now."
+              BODY+=$'\n\n'
+              BODY+="<!-- BOT-MERGE-ANNOUNCE ${SHA} -->"
+              gh pr review "${PR}" --repo "${REPO}" --comment \
+                --body "${BODY}" 2>/dev/null || true
+            fi
 
             APPROVED="$(gh pr view "${PR}" --repo "${REPO}" \
               --json reviews \
@@ -292,24 +317,24 @@ jobs:
                 | select(.state == \"APPROVED\")] | length" \
               2>/dev/null || echo 0)"
             if [ "${APPROVED}" -eq 0 ] && [ "${SELF}" != "true" ]; then
-              BODY="🤖 **Bot review** — ✅ All required CI checks passed."
-              BODY+=$'\n'
-              BODY+="Merging now."
               gh pr review "${PR}" --repo "${REPO}" --approve \
-                --body "${BODY}" 2>/dev/null || true
+                --body "🤖 Approved — all required CI checks passed." \
+                2>/dev/null || true
             fi
 
             # Merge strategy: normal merge by default (keeps history). If
             # the branch is behind the base and a clean merge is not
             # possible, rebase instead. Never squash — it rewrites history.
-            if gh pr merge "${PR}" --repo "${REPO}" --merge 2>/dev/null; then
+            if MERGE_OUT="$(gh pr merge "${PR}" --repo "${REPO}" \
+              --merge 2>&1)"; then
               echo "  ✅ merged #${PR}"
               if [ "${SELF}" != "true" ]; then
                 gh pr comment "${PR}" --repo "${REPO}" \
                   --body "🎉 Merged — thanks for the contribution!" \
                   2>/dev/null || true
               fi
-            elif gh pr merge "${PR}" --repo "${REPO}" --rebase 2>/dev/null; then
+            elif MERGE_OUT="$(gh pr merge "${PR}" --repo "${REPO}" \
+              --rebase 2>&1)"; then
               echo "  ✅ rebased and merged #${PR}"
               if [ "${SELF}" != "true" ]; then
                 gh pr comment "${PR}" --repo "${REPO}" \
@@ -317,11 +342,25 @@ jobs:
                   2>/dev/null || true
               fi
             else
-              BODY="🤖 **Bot review** — CI is green but I could not merge"
-              BODY+=$'\n'
-              BODY+="(conflict or branch protection). A maintainer will"
-              BODY+=" handle it."
-              gh pr review "${PR}" --repo "${REPO}" --comment \
-                --body "${BODY}" 2>/dev/null || true
+              MERGE_ERR="$(printf '%s' "${MERGE_OUT}" \
+                | head -3 | tr '\n' ' ')"
+              [ -n "${MERGE_ERR}" ] || MERGE_ERR="(no error output)"
+              MARKER2="<!-- BOT-MERGE-FAIL sha=${SHA} -->"
+              ALREADY2="$(gh pr view "${PR}" --repo "${REPO}" \
+                --json reviews \
+                --jq "[.reviews[] | select(.author.login == \"${BOT_LOGIN}\")
+                  | select(.body | contains(\"${MARKER2}\"))] | length" \
+                2>/dev/null || echo 0)"
+              if [ "${ALREADY2}" -eq 0 ]; then
+                BODY="🤖 **Bot review** — CI is green but the merge failed:"
+                BODY+=$'\n\n'
+                BODY+="> ${MERGE_ERR}"
+                BODY+=$'\n\n'
+                BODY+="${MARKER2}"
+                BODY+=$'\n'
+                BODY+="A maintainer will handle it."
+                gh pr review "${PR}" --repo "${REPO}" --comment \
+                  --body "${BODY}" 2>/dev/null || true
+              fi
             fi
           done
