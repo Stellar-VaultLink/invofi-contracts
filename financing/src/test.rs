@@ -258,7 +258,7 @@ fn test_create_offer_self_dealing_panics() {
 }
 
 #[test]
-#[should_panic(expected = "Address is blacklisted")]
+#[should_panic(expected = "Error(Contract, #8)")]
 fn test_blacklisted_cannot_create_offer() {
     let env = Env::default();
     env.mock_all_auths();
@@ -420,7 +420,7 @@ fn test_withdraw_offer() {
 }
 
 #[test]
-#[should_panic(expected = "Only the offer lender can withdraw")]
+#[should_panic(expected = "Error(Contract, #1)")]
 fn test_withdraw_offer_wrong_lender_panics() {
     let env = Env::default();
     env.mock_all_auths();
@@ -881,7 +881,7 @@ fn test_get_offer_duration_limits() {
 // ─── Task 4A: emergency pause / circuit breaker ──────────────────────────────
 
 #[test]
-#[should_panic(expected = "Contract is paused")]
+#[should_panic(expected = "Error(Contract, #4)")]
 fn test_pause_blocks_create_offer() {
     let env = Env::default();
     env.mock_all_auths();
@@ -1456,7 +1456,7 @@ fn test_schedule_first_due_in_past_panics() {
 
 /// A third party (neither lender nor originator) cannot set a schedule.
 #[test]
-#[should_panic(expected = "Only the lender or the invoice originator can set a schedule")]
+#[should_panic(expected = "Error(Contract, #1)")]
 fn test_schedule_unauthorized_caller_panics() {
     let env = Env::default();
     env.mock_all_auths();

@@ -6,9 +6,9 @@
 use soroban_sdk::{contract, contractimpl, symbol_short, token, Address, Env, Map, Symbol, Vec};
 
 use invofi_common::{
-    assert_not_paused, resolve_token, FinancingOffer, Invoice, InvoiceStatus, LenderStats,
-    OfferStatus, ProtocolStats, RegistryClient, RepaymentSchedule, ScheduleFrequency,
-    MAX_OFFER_DURATION_SECS, MIN_OFFER_DURATION_SECS,
+    assert_not_paused, resolve_token, ContractError, FinancingOffer, Invoice, InvoiceStatus,
+    LenderStats, OfferStatus, ProtocolStats, RegistryClient, RepaymentSchedule,
+    ScheduleFrequency, MAX_OFFER_DURATION_SECS, MIN_OFFER_DURATION_SECS,
 };
 
 // ─── Storage Helpers ─────────────────────────────────────────────────────────
@@ -81,7 +81,7 @@ fn assert_not_blacklisted(env: &Env, address: &Address) {
     let registry_client = RegistryClient::new(env, &registry_addr);
     // CEI: Read-only cross-contract call, safe before state mutations.
     if registry_client.is_blacklisted(address) {
-        panic!("Address is blacklisted");
+        env.panic_with_error(ContractError::Blacklisted);
     }
 }
 
@@ -129,7 +129,7 @@ impl FinancingContract {
             .get(&symbol_short!("admin"))
             .unwrap_or_else(|| panic!("Not initialized"));
         if current != admin {
-            panic!("Only the current admin can set the repayment contract");
+            env.panic_with_error(ContractError::Unauthorized);
         }
         env.storage()
             .instance()
@@ -160,7 +160,7 @@ impl FinancingContract {
             .get(&symbol_short!("admin"))
             .unwrap_or_else(|| panic!("Not initialized"));
         if current != admin {
-            panic!("Only the current admin can transfer admin rights");
+            env.panic_with_error(ContractError::Unauthorized);
         }
         env.storage()
             .instance()
@@ -179,7 +179,7 @@ impl FinancingContract {
             .get(&symbol_short!("admin"))
             .unwrap_or_else(|| panic!("Not initialized"));
         if current != admin {
-            panic!("Only the current admin can register currencies");
+            env.panic_with_error(ContractError::Unauthorized);
         }
         invofi_common::register_currency(&env, &currency, &token_addr);
     }
@@ -206,7 +206,7 @@ impl FinancingContract {
             .get(&symbol_short!("admin"))
             .unwrap_or_else(|| panic!("Not initialized"));
         if current != admin {
-            panic!("Only the current admin can set the position token");
+            env.panic_with_error(ContractError::Unauthorized);
         }
         env.storage()
             .instance()
@@ -228,7 +228,7 @@ impl FinancingContract {
             .get(&symbol_short!("admin"))
             .unwrap_or_else(|| panic!("Not initialized"));
         if current != admin {
-            panic!("Only admin can pause");
+            env.panic_with_error(ContractError::Unauthorized);
         }
         env.storage()
             .instance()
@@ -243,7 +243,7 @@ impl FinancingContract {
             .get(&symbol_short!("admin"))
             .unwrap_or_else(|| panic!("Not initialized"));
         if current != admin {
-            panic!("Only admin can unpause");
+            env.panic_with_error(ContractError::Unauthorized);
         }
         env.storage()
             .instance()
@@ -308,7 +308,7 @@ impl FinancingContract {
 
         let mut offers = load_offers(&env);
         if offers.contains_key(offer_id.clone()) {
-            panic!("Offer with this ID already exists");
+            env.panic_with_error(ContractError::AlreadyExists);
         }
 
         let offer = FinancingOffer {
@@ -351,7 +351,7 @@ impl FinancingContract {
     pub fn get_offer(env: Env, id: Symbol) -> FinancingOffer {
         load_offers(&env)
             .get(id)
-            .unwrap_or_else(|| panic!("Offer not found"))
+            .unwrap_or_else(|| env.panic_with_error(ContractError::NotFound))
     }
 
     /// Withdraw a pending offer. Only the lender.
@@ -361,12 +361,12 @@ impl FinancingContract {
         let mut offers = load_offers(&env);
         let mut offer = offers
             .get(offer_id.clone())
-            .unwrap_or_else(|| panic!("Offer not found"));
+            .unwrap_or_else(|| env.panic_with_error(ContractError::NotFound));
         if offer.lender != lender {
-            panic!("Only the offer lender can withdraw");
+            env.panic_with_error(ContractError::Unauthorized);
         }
         if offer.status != OfferStatus::Pending {
-            panic!("Only Pending offers can be withdrawn");
+            env.panic_with_error(ContractError::InvalidTransition);
         }
         offer.status = OfferStatus::Rejected;
         offers.set(offer_id, offer.clone());
@@ -389,9 +389,9 @@ impl FinancingContract {
         let mut offers = load_offers(&env);
         let mut offer = offers
             .get(offer_id.clone())
-            .unwrap_or_else(|| panic!("Offer not found"));
+            .unwrap_or_else(|| env.panic_with_error(ContractError::NotFound));
         if offer.status != OfferStatus::Pending {
-            panic!("Offer is not in Pending status");
+            env.panic_with_error(ContractError::InvalidTransition);
         }
 
         // Cross-contract: read invoice from registry
@@ -405,10 +405,10 @@ impl FinancingContract {
         let invoice: Invoice = registry_client.get_invoice(&offer.invoice_id);
 
         if invoice.originator != invoice_originator {
-            panic!("Only the invoice originator can accept offers");
+            env.panic_with_error(ContractError::Unauthorized);
         }
         if invoice.status != InvoiceStatus::Pending {
-            panic!("Invoice is not in Pending status");
+            env.panic_with_error(ContractError::InvalidTransition);
         }
 
         // Pull the lender's principal and pay it straight to the business.
@@ -475,9 +475,9 @@ impl FinancingContract {
         let mut offers = load_offers(&env);
         let mut offer = offers
             .get(offer_id.clone())
-            .unwrap_or_else(|| panic!("Offer not found"));
+            .unwrap_or_else(|| env.panic_with_error(ContractError::NotFound));
         if offer.status != OfferStatus::Pending {
-            panic!("Offer is not in Pending status");
+            env.panic_with_error(ContractError::InvalidTransition);
         }
 
         // Cross-contract: verify invoice originator
@@ -490,7 +490,7 @@ impl FinancingContract {
         // CEI: Read-only cross-contract call before state mutations.
         let invoice: Invoice = registry_client.get_invoice(&offer.invoice_id);
         if invoice.originator != invoice_originator {
-            panic!("Only the invoice originator can reject offers");
+            env.panic_with_error(ContractError::Unauthorized);
         }
 
         offer.status = OfferStatus::Rejected;
@@ -523,7 +523,7 @@ impl FinancingContract {
         let mut offers = load_offers(&env);
         let mut offer = offers
             .get(id.clone())
-            .unwrap_or_else(|| panic!("Offer not found"));
+            .unwrap_or_else(|| env.panic_with_error(ContractError::NotFound));
         offer.status = new_status;
         offers.set(id, offer);
         save_offers(&env, &offers);
@@ -536,7 +536,7 @@ impl FinancingContract {
         let mut offers = load_offers(&env);
         let mut offer = offers
             .get(id.clone())
-            .unwrap_or_else(|| panic!("Offer not found"));
+            .unwrap_or_else(|| env.panic_with_error(ContractError::NotFound));
         offer.amount_repaid = amount_repaid;
         offers.set(id, offer);
         save_offers(&env, &offers);
@@ -717,14 +717,14 @@ impl FinancingContract {
         let offers = load_offers(&env);
         let offer = offers
             .get(offer_id.clone())
-            .unwrap_or_else(|| panic!("Offer not found"));
+            .unwrap_or_else(|| env.panic_with_error(ContractError::NotFound));
 
         // Only allow scheduling on live (non-terminal) offers.
         if offer.status == OfferStatus::Rejected
             || offer.status == OfferStatus::Repaid
             || offer.status == OfferStatus::Defaulted
         {
-            panic!("Cannot schedule a terminal offer");
+            env.panic_with_error(ContractError::InvalidTransition);
         }
 
         // The caller must be the lender or the invoice originator.
@@ -739,7 +739,7 @@ impl FinancingContract {
         let invoice: Invoice = registry_client.get_invoice(&offer.invoice_id);
 
         if caller != offer.lender && caller != invoice.originator {
-            panic!("Only the lender or the invoice originator can set a schedule");
+            env.panic_with_error(ContractError::Unauthorized);
         }
 
         // installment_principal = floor(amount / count)

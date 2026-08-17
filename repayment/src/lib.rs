@@ -3,9 +3,9 @@
 use soroban_sdk::{contract, contractimpl, symbol_short, token, Address, Env, Symbol};
 
 use invofi_common::{
-    assert_not_paused, resolve_token, FinancingClient, FinancingOffer, InsuranceClient, Invoice,
-    InvoiceStatus, OfferStatus, RegistryClient, ReputationClient, GRACE_PERIOD_SECS,
-    MAX_OFFER_DURATION_SECS, MIN_OFFER_DURATION_SECS,
+    assert_not_paused, resolve_token, ContractError, FinancingClient, FinancingOffer,
+    InsuranceClient, Invoice, InvoiceStatus, OfferStatus, RegistryClient, ReputationClient,
+    GRACE_PERIOD_SECS, MAX_OFFER_DURATION_SECS, MIN_OFFER_DURATION_SECS,
 };
 
 // ─── Overdue penalty (ADR-0007) ──────────────────────────────────────────────
@@ -151,7 +151,7 @@ impl RepaymentContract {
             .get(&symbol_short!("admin"))
             .unwrap_or_else(|| panic!("Not initialized"));
         if current != admin {
-            panic!("Only the current admin can set the insurance contract");
+            env.panic_with_error(ContractError::Unauthorized);
         }
         env.storage()
             .instance()
@@ -174,7 +174,7 @@ impl RepaymentContract {
             .get(&symbol_short!("admin"))
             .unwrap_or_else(|| panic!("Not initialized"));
         if current != admin {
-            panic!("Only the current admin can set the reputation contract");
+            env.panic_with_error(ContractError::Unauthorized);
         }
         env.storage()
             .instance()
@@ -201,13 +201,13 @@ impl RepaymentContract {
             .get(&symbol_short!("admin"))
             .unwrap_or_else(|| panic!("Not initialized"));
         if current != admin {
-            panic!("Only the current admin can set penalty parameters");
+            env.panic_with_error(ContractError::Unauthorized);
         }
         if penalty_bps > MAX_PENALTY_BPS {
-            panic!("penalty_bps must be at most 500 (5% per day)");
+            env.panic_with_error(ContractError::InvalidInput);
         }
         if cap_bps > 10_000 {
-            panic!("cap_bps must be between 0 and 10000");
+            env.panic_with_error(ContractError::InvalidInput);
         }
         env.storage()
             .instance()
@@ -237,7 +237,7 @@ impl RepaymentContract {
             .get(&symbol_short!("admin"))
             .unwrap_or_else(|| panic!("Not initialized"));
         if current != admin {
-            panic!("Only the current admin can transfer admin rights");
+            env.panic_with_error(ContractError::Unauthorized);
         }
         env.storage()
             .instance()
@@ -254,7 +254,7 @@ impl RepaymentContract {
             .get(&symbol_short!("admin"))
             .unwrap_or_else(|| panic!("Not initialized"));
         if current != admin {
-            panic!("Only admin can pause");
+            env.panic_with_error(ContractError::Unauthorized);
         }
         env.storage()
             .instance()
@@ -269,7 +269,7 @@ impl RepaymentContract {
             .get(&symbol_short!("admin"))
             .unwrap_or_else(|| panic!("Not initialized"));
         if current != admin {
-            panic!("Only admin can unpause");
+            env.panic_with_error(ContractError::Unauthorized);
         }
         env.storage()
             .instance()
@@ -309,10 +309,10 @@ impl RepaymentContract {
         let invoice: Invoice = registry_client.get_invoice(&invoice_id);
 
         if invoice.originator != repayer {
-            panic!("Only the invoice originator can repay");
+            env.panic_with_error(ContractError::Unauthorized);
         }
         if invoice.status != InvoiceStatus::Financed {
-            panic!("Invoice must be Financed before repayment");
+            env.panic_with_error(ContractError::InvalidTransition);
         }
 
         // Cross-contract: read offer from financing
@@ -326,10 +326,10 @@ impl RepaymentContract {
         let mut offer: FinancingOffer = financing_client.get_offer(&offer_id);
 
         if offer.invoice_id != invoice_id {
-            panic!("Offer does not belong to this invoice");
+            env.panic_with_error(ContractError::InvalidInput);
         }
         if offer.status != OfferStatus::Accepted && offer.status != OfferStatus::Financed {
-            panic!("Offer must be Accepted or Financed before repayment");
+            env.panic_with_error(ContractError::InvalidTransition);
         }
         assert!(amount > 0, "repayment amount must be greater than zero");
 
@@ -346,10 +346,9 @@ impl RepaymentContract {
         let total_owed = total_due + penalty;
 
         let remaining_balance = total_owed - offer.amount_repaid;
-        assert!(
-            amount <= remaining_balance,
-            "Repayment amount exceeds remaining balance"
-        );
+        if amount > remaining_balance {
+            env.panic_with_error(ContractError::InsufficientBalance);
+        }
 
         // Protocol fee deduction
         let fee_bps: u32 = financing_client.get_fee_bps();
@@ -448,10 +447,10 @@ impl RepaymentContract {
         let invoice: Invoice = registry_client.get_invoice(&invoice_id);
 
         if invoice.status != InvoiceStatus::Overdue {
-            panic!("Invoice must be Overdue before reclaim");
+            env.panic_with_error(ContractError::InvalidTransition);
         }
         if env.ledger().timestamp() < invoice.due_date + GRACE_PERIOD_SECS {
-            panic!("Grace period has not elapsed");
+            env.panic_with_error(ContractError::InvalidTransition);
         }
 
         // Cross-contract: read offer from financing
@@ -465,13 +464,13 @@ impl RepaymentContract {
         let mut offer: FinancingOffer = financing_client.get_offer(&offer_id);
 
         if offer.invoice_id != invoice_id {
-            panic!("Offer does not belong to this invoice");
+            env.panic_with_error(ContractError::InvalidInput);
         }
         if offer.lender != lender {
-            panic!("Only the financing lender can reclaim");
+            env.panic_with_error(ContractError::Unauthorized);
         }
         if offer.status != OfferStatus::Accepted && offer.status != OfferStatus::Financed {
-            panic!("Offer must be Accepted or Financed before reclaim");
+            env.panic_with_error(ContractError::InvalidTransition);
         }
 
         // Cross-contract: update offer status in financing
