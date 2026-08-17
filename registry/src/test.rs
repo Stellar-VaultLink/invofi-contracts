@@ -681,6 +681,110 @@ fn test_pause_unauthorized_panics() {
     client.pause(&not_admin);
 }
 
+#[test]
+#[should_panic(expected = "Contract is paused")]
+fn test_pause_blocks_transfer_admin() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let admin = Address::generate(&env);
+    let contract_id = env.register(RegistryContract, (admin.clone(),));
+    let client = super::RegistryContractClient::new(&env, &contract_id);
+    let new_admin = Address::generate(&env);
+
+    client.pause(&admin);
+    client.transfer_admin(&admin, &new_admin);
+}
+
+#[test]
+fn test_pause_blocks_all_registry_state_changes() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let admin = Address::generate(&env);
+    let contract_id = env.register(RegistryContract, (admin.clone(),));
+    let client = super::RegistryContractClient::new(&env, &contract_id);
+
+    client.pause(&admin);
+    let originator = Address::generate(&env);
+    let other = Address::generate(&env);
+    let financing = Address::generate(&env);
+    let repayment = Address::generate(&env);
+    let invoice_id = symbol_short!("invx");
+    let new_admin = Address::generate(&env);
+
+    fn assert_paused<F: FnOnce()>(f: F) {
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(f));
+        assert!(result.is_err(), "state-changing function should panic while paused");
+    }
+
+    assert_paused(|| {
+        client.register_invoice(
+            &symbol_short!("inv_p"),
+            &originator,
+            &10_000_000i128,
+            &symbol_short!("XLM"),
+            &3_000_000u64,
+        );
+    });
+    assert_paused(|| {
+        client.update_invoice_status(
+            &invoice_id,
+            &originator,
+            &invofi_common::InvoiceStatus::Cancelled,
+        );
+    });
+    assert_paused(|| {
+        client.update_invoice_amount(&invoice_id, &originator, &11_000_000i128);
+    });
+    assert_paused(|| {
+        client.cancel_invoice(&invoice_id, &originator);
+    });
+    assert_paused(|| {
+        client.set_invoice_repaid_status(&invoice_id, &originator, &true);
+    });
+    assert_paused(|| {
+        client.financing_marks_invoice_financed(&invoice_id);
+    });
+    assert_paused(|| {
+        client.repayment_marks_invoice_repaid(&invoice_id, &true);
+    });
+    assert_paused(|| {
+        client.repayment_marks_defaulted(&invoice_id);
+    });
+    assert_paused(|| {
+        client.mark_invoice_overdue(&invoice_id);
+    });
+    assert_paused(|| {
+        client.raise_dispute(&invoice_id, &originator);
+    });
+    assert_paused(|| {
+        client.resolve_dispute(&admin, &invoice_id, &invofi_common::InvoiceStatus::Cancelled);
+    });
+    assert_paused(|| {
+        client.blacklist_address(&admin, &other);
+    });
+    assert_paused(|| {
+        client.unblacklist_address(&admin, &other);
+    });
+    assert_paused(|| {
+        client.transfer_admin(&admin, &new_admin);
+    });
+    assert_paused(|| {
+        client.set_financing_contract(&admin, &financing);
+    });
+    assert_paused(|| {
+        client.set_repayment_contract(&admin, &repayment);
+    });
+    assert_paused(|| {
+        client.set_rate(&admin, &invofi_common::RiskTier::A, &500u32);
+    });
+    assert_paused(|| {
+        client.set_fee(&admin, &50u32);
+    });
+
+    assert_eq!(client.get_fee(), 0);
+    assert_eq!(client.get_all_invoices().len(), 0);
+}
+
 // ─── Rate oracle tests ───────────────────────────────────────────────────────
 
 #[test]

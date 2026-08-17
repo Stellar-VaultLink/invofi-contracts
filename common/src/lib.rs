@@ -117,6 +117,57 @@ pub struct LenderStats {
     pub offers_repaid: u32,
 }
 
+/// Installment frequency for a fixed repayment schedule.
+///
+/// `Daily` = 86 400 s between installments, `Weekly` = 604 800 s,
+/// `Monthly` = 2 592 000 s (30-day approximation).
+#[contracttype]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[repr(u32)]
+pub enum ScheduleFrequency {
+    Daily = 0,
+    Weekly = 1,
+    Monthly = 2,
+}
+
+impl ScheduleFrequency {
+    /// Returns the period in seconds that corresponds to this frequency.
+    pub fn period_secs(self) -> u64 {
+        match self {
+            ScheduleFrequency::Daily => 86_400,
+            ScheduleFrequency::Weekly => 604_800,
+            ScheduleFrequency::Monthly => 2_592_000,
+        }
+    }
+}
+
+/// An advisory fixed-installment repayment schedule attached to a financing offer.
+///
+/// Each installment covers an equal slice of principal plus interest on the
+/// remaining principal (flat-rate model):
+///
+///   installment_principal = offer.amount / count
+///   installment_yield     = installment_principal * offer.interest_rate / 10_000
+///   installment_amount    = installment_principal + installment_yield
+///
+/// The schedule is **advisory with enforcement**: ad-hoc partial repayments
+/// remain permitted via `repay_invoice` and will never corrupt schedule state
+/// — `amount_repaid` on the offer is always the source of truth for how much
+/// has actually been cleared.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct RepaymentSchedule {
+    pub offer_id: Symbol,
+    /// Number of equal installments.
+    pub count: u32,
+    /// Seconds between installments.
+    pub frequency: ScheduleFrequency,
+    /// Amount due per installment (principal slice + yield on that slice).
+    pub installment_amount: i128,
+    /// Unix timestamp of the first installment due date.
+    pub first_due: u64,
+}
+
 // ─── Currency Registry ───────────────────────────────────────────────────────
 
 /// Load the currency registry (an empty map if none has been configured).
@@ -167,6 +218,37 @@ pub fn resolve_token(env: &Env, currency: &Symbol) -> Address {
 // ─── Pause Guard ─────────────────────────────────────────────────────────────
 
 /// Panics if the contract is currently paused.
+///
+/// Coverage matrix for the five audited contracts: every public
+/// write/state-changing entrypoint must call this guard before mutating
+/// persistent storage or transferring funds. The explicit exceptions are the
+/// pause/unpause setters themselves and read-only getter/query functions.
+///
+/// - Registry:
+///   - state-changing: register_invoice, update_invoice_status, update_invoice_amount,
+///     cancel_invoice, set_invoice_repaid_status, financing_marks_invoice_financed,
+///     repayment_marks_invoice_repaid, repayment_marks_defaulted, mark_invoice_overdue,
+///     raise_dispute, resolve_dispute, blacklist_address, unblacklist_address,
+///     transfer_admin, set_financing_contract, set_repayment_contract, set_rate,
+///     set_fee.
+///   - exceptions: pause, unpause, contract_is_paused, getters.
+/// - Financing:
+///   - state-changing: create_offer, withdraw_offer, accept_offer, reject_offer,
+///     update_offer_status, update_offer_amount_repaid, update_lender_stats_repaid,
+///     update_stats_repaid, register_currency, set_position_token, set_repayment_contract,
+///     transfer_admin.
+///   - exceptions: pause, unpause, contract_is_paused, getters.
+/// - Repayment:
+///   - state-changing: repay_invoice, mark_overdue, reclaim_invoice, set_insurance,
+///     set_reputation, transfer_admin.
+///   - exceptions: pause, unpause, contract_is_paused, getters.
+/// - Insurance:
+///   - state-changing: stake, unstake, pay_out, set_staking_token, set_payout_caller,
+///     transfer_admin.
+///   - exceptions: pause, unpause, contract_is_paused, getters.
+/// - Reputation:
+///   - state-changing: record_outcome, set_recorder.
+///   - exceptions: pause, unpause, contract_is_paused, getters.
 pub fn assert_not_paused(env: &Env) {
     let paused: bool = env
         .storage()
@@ -262,6 +344,24 @@ pub trait FinancingInterface {
 
     /// Read the protocol fee in basis points.
     fn get_fee_bps(env: Env) -> u32;
+
+    /// Create a fixed installment repayment schedule for an offer.
+    /// `first_due` is the Unix timestamp of the first installment.
+    fn schedule_repayment(
+        env: Env,
+        offer_id: Symbol,
+        frequency: ScheduleFrequency,
+        count: u32,
+        first_due: u64,
+    ) -> RepaymentSchedule;
+
+    /// Read the repayment schedule attached to an offer, if any.
+    fn get_schedule(env: Env, offer_id: Symbol) -> Option<RepaymentSchedule>;
+
+    /// Return the installment number (1-based) that is currently due (its
+    /// due timestamp ≤ now) and has not yet been covered by `amount_repaid`.
+    /// Returns 0 when all installments are paid or no schedule exists.
+    fn get_installment_due(env: Env, offer_id: Symbol) -> u32;
 }
 
 // ─── Insurance Cross-Contract Interface ──────────────────────────────────────

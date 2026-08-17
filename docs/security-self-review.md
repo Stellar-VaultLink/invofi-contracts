@@ -119,24 +119,17 @@ there is no silent wrap. Amounts are also bounded upstream
 remaining_balance` repayment cap), so the realistic overflow surface is
 already constrained. **Verdict: acceptable; no change required.**
 
-## 5. Reentrancy via cross-contract calls (checklist #3)
+## 5. Checks-Effects-Interactions (CEI) & Reentrancy (checklist #3)
 
-Soroban has no native reentrancy guard; the mitigation is ordering and
-authorization:
+Soroban has no native reentrancy guard; the mitigation is ordering and authorization. A full cross-contract walk confirmed that all state writes happen before external interactions, with specific documented exceptions:
 
-- **accept_offer** performs the external token pull **before** persisting the
-  offer state. A malicious token could attempt reentry, but the pull uses
-  `transfer_from` against the **lender's allowance** — an allowance is
-  consumed by the transfer, so a reentrant call cannot double-pull, and the
-  offer/invoice status guards still hold during reentry.
-- **repay_invoice** transfers **out of the repayer's own balance** (direct
-  `transfer`, repayer-authenticated). Reentry cannot spend funds the caller
-  did not authorize; state is then persisted with the standard guards.
-- Cross-contract *writer* callbacks (registry/financing/repayment) are
-  **caller-guarded to the registered contract address** (commit `cfa5d41`),
-  so a third-party contract cannot invoke system transitions.
+- **accept_offer (financing)** performs the external token pull **before** persisting the offer state. A malicious token could attempt reentry, but the pull uses `transfer_from` against the **lender's allowance** — an allowance is consumed by the transfer, so a reentrant call cannot double-pull, and the offer/invoice status guards still hold during reentry. Additionally, `load_stats` and `load_lender_stats` are read *after* this external call, but the callee (a standard Soroban token) cannot mutate financing state, preserving invariant clarity.
+- **repay_invoice (repayment)** transfers **out of the repayer's own balance** (direct `transfer`, repayer-authenticated). Reentry cannot spend funds the caller did not authorize. Repayment acts only as a router and has no local state to protect, so CEI is trivially satisfied.
+- **stake (insurance)** performs the external `transfer_from` before updating local stake balances. Similar to `accept_offer`, this exception is safe because standard tokens lack reentrant hooks, and even if they did, `stake` requires pre-allowance and hasn't yet credited the staker's local balance, neutralizing double-spend exploits. `load_stakes` and `load_pool_total` are read *after* this external call; because the token contract is a distinct and standard asset contract, it cannot mutate the insurance contract's state, preserving invariants.
+- Cross-contract *writer* callbacks (registry/financing/repayment) are **caller-guarded to the registered contract address** (commit `cfa5d41`), so a third-party contract cannot invoke system transitions.
+- All other cross-contract calls are strictly read-only (`get_invoice`, `get_offer`, `is_blacklisted`) or occur strictly after state changes (e.g., `pay_out` and `unstake` in insurance), fully adhering to CEI.
 
-**Verdict:** no exploitable reentrancy path found in the reviewed functions.
+**Verdict:** no exploitable reentrancy path found in the reviewed functions. All CEI violations are benign and explicitly documented inline.
 Three hardening follow-ups are noted for the audit phase (§7).
 
 ---

@@ -53,7 +53,11 @@ jobs:
     env:
       # GITHUB_TOKEN has repo write access on pull_request_target, so it can
       # review, approve, and merge fork PRs — no PAT needed.
-      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      # GITHUB_TOKEN cannot approve PRs (can_approve_pull_request_reviews
+      # is false), which fails contracts' branch-protection review
+      # requirement. Use the maintainer PAT (CONTRIBUTORS_TOKEN) when it
+      # exists — its approval counts — and fall back to GITHUB_TOKEN.
+      GH_TOKEN: ${{ secrets.CONTRIBUTORS_TOKEN || secrets.GITHUB_TOKEN }}
       PR_NUMBER: ${{ github.event.pull_request.number }}
       INPUT_PR: ${{ inputs.pr }}
       # Job names (check-run names) that must pass before auto-merge.

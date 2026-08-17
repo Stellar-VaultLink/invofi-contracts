@@ -20,6 +20,7 @@ invofi-financing = { path = "../financing", features = ["testutils"] }
 invofi-registry = { path = "../registry", features = ["testutils"] }
 invofi-insurance = { path = "../insurance", features = ["testutils"] }
 invofi-reputation = { path = "../reputation", features = ["testutils"] }
+proptest = "1.11.0"
 
 [features]
 testutils = ["soroban-sdk/testutils", "invofi-common/testutils"]

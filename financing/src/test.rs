@@ -914,6 +914,75 @@ fn test_pause_blocks_create_offer() {
     );
 }
 
+#[test]
+fn test_pause_blocks_all_financing_state_changes() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let admin = Address::generate(&env);
+    let token = Address::generate(&env);
+    let (_, fin) = setup_contracts(&env, &admin, &token);
+    let lender = Address::generate(&env);
+    let originator = Address::generate(&env);
+    let new_admin = Address::generate(&env);
+    let repayment = Address::generate(&env);
+    let pos_token = Address::generate(&env);
+
+    fin.pause(&admin);
+
+    fn assert_paused<F: FnOnce()>(f: F) {
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(f));
+        assert!(result.is_err(), "state-changing function should panic while paused");
+    }
+
+    assert_paused(|| {
+        fin.create_offer(
+            &symbol_short!("offx1"),
+            &symbol_short!("invx1"),
+            &lender,
+            &1_000i128,
+            &symbol_short!("USDC"),
+            &500u32,
+            &86_400u64,
+        );
+    });
+    assert_paused(|| {
+        fin.withdraw_offer(&symbol_short!("offx2"), &lender);
+    });
+    assert_paused(|| {
+        fin.accept_offer(&symbol_short!("offx3"), &originator);
+    });
+    assert_paused(|| {
+        fin.reject_offer(&symbol_short!("offx4"), &originator);
+    });
+    assert_paused(|| {
+        fin.set_repayment_contract(&admin, &repayment);
+    });
+    assert_paused(|| {
+        fin.transfer_admin(&admin, &new_admin);
+    });
+    assert_paused(|| {
+        fin.register_currency(&admin, &symbol_short!("EUR"), &Address::generate(&env));
+    });
+    assert_paused(|| {
+        fin.set_position_token(&admin, &pos_token);
+    });
+    assert_paused(|| {
+        fin.update_offer_status(&symbol_short!("offx5"), &OfferStatus::Rejected);
+    });
+    assert_paused(|| {
+        fin.update_offer_amount_repaid(&symbol_short!("offx6"), &1_000i128);
+    });
+    assert_paused(|| {
+        fin.update_lender_stats_repaid(&lender, &true);
+    });
+    assert_paused(|| {
+        fin.update_stats_repaid(&1_000i128, &50i128);
+    });
+
+    assert_eq!(fin.get_offer_duration_limits().0, invofi_common::MIN_OFFER_DURATION_SECS);
+    assert_eq!(fin.get_stats().total_offers, 0);
+}
+
 // ─── Position token minting tests (Task 7) ──────────────────────────────────
 
 #[test]
@@ -1029,4 +1098,424 @@ fn test_accept_offer_without_position_token_still_works() {
 
     let token_client = token::TokenClient::new(&env, &token_id);
     assert_eq!(token_client.balance(&originator), amount);
+}
+
+// ─── Repayment schedule tests (issue #133) ──────────────────────────────────
+
+/// Helper: create a pending offer on a fresh invoice and return the offer id,
+/// invoice id, originator and lender addresses.
+fn setup_offer_for_schedule<'a>(
+    env: &'a Env,
+    admin: &Address,
+    token: &Address,
+) -> (
+    invofi_registry::RegistryContractClient<'a>,
+    super::FinancingContractClient<'a>,
+    Address, // originator
+    Address, // lender
+) {
+    let (reg, fin) = setup_contracts(env, admin, token);
+    let originator = Address::generate(env);
+    let lender = Address::generate(env);
+
+    reg.register_invoice(
+        &symbol_short!("inv_sc1"),
+        &originator,
+        &1_200_000_000i128, // 1.2 billion units (12 installments of 100M each)
+        &symbol_short!("USDC"),
+        &(env.ledger().timestamp() + 100_000_000u64),
+    );
+    fin.create_offer(
+        &symbol_short!("off_sc1"),
+        &symbol_short!("inv_sc1"),
+        &lender,
+        &1_200_000_000i128,
+        &symbol_short!("USDC"),
+        &500u32, // 5.00% per installment slice
+        &(31_536_000u64),
+    );
+
+    (reg, fin, originator, lender)
+}
+
+/// Acceptance criterion 1: schedule created and readable.
+#[test]
+fn test_schedule_created_and_readable() {
+    let env = Env::default();
+    env.mock_all_auths();
+    env.ledger().set_timestamp(1_000_000);
+
+    let admin = Address::generate(&env);
+    let token = Address::generate(&env);
+    let (_reg, fin, originator, _lender) = setup_offer_for_schedule(&env, &admin, &token);
+
+    // No schedule yet
+    assert!(fin.get_schedule(&symbol_short!("off_sc1")).is_none());
+
+    let first_due = env.ledger().timestamp() + 604_800; // +1 week
+    let sched = fin.schedule_repayment(
+        &symbol_short!("off_sc1"),
+        &originator,
+        &invofi_common::ScheduleFrequency::Weekly,
+        &12u32,
+        &first_due,
+    );
+
+    assert_eq!(sched.count, 12);
+    assert_eq!(sched.frequency, invofi_common::ScheduleFrequency::Weekly);
+    assert_eq!(sched.first_due, first_due);
+
+    let fetched = fin.get_schedule(&symbol_short!("off_sc1"));
+    assert!(fetched.is_some());
+    assert_eq!(fetched.unwrap().count, 12);
+}
+
+/// Acceptance criterion 2: installment math matches the documented model.
+///
+/// offer.amount = 1 200 000 000, count = 12, interest_rate = 500 bps (5%)
+/// installment_principal = 1_200_000_000 / 12 = 100_000_000
+/// installment_yield     = 100_000_000 * 500 / 10_000 = 5_000_000
+/// installment_amount    = 105_000_000
+#[test]
+fn test_installment_math_matches_documented_model() {
+    let env = Env::default();
+    env.mock_all_auths();
+    env.ledger().set_timestamp(1_000_000);
+
+    let admin = Address::generate(&env);
+    let token = Address::generate(&env);
+    let (_reg, fin, originator, _lender) = setup_offer_for_schedule(&env, &admin, &token);
+
+    let first_due = env.ledger().timestamp() + 604_800;
+    let sched = fin.schedule_repayment(
+        &symbol_short!("off_sc1"),
+        &originator,
+        &invofi_common::ScheduleFrequency::Weekly,
+        &12u32,
+        &first_due,
+    );
+
+    // Documented model: principal_slice + yield_on_slice
+    let expected_principal_slice = 1_200_000_000i128 / 12;       // 100_000_000
+    let expected_yield = expected_principal_slice * 500 / 10_000;  // 5_000_000
+    let expected_installment = expected_principal_slice + expected_yield; // 105_000_000
+
+    assert_eq!(sched.installment_amount, expected_installment);
+}
+
+/// Acceptance criterion 3: off-schedule (ad-hoc) payment still permitted
+/// without corrupting state.
+#[test]
+fn test_off_schedule_repayment_does_not_corrupt_state() {
+    let env = Env::default();
+    env.mock_all_auths();
+    env.ledger().set_timestamp(1_000_000);
+
+    let admin = Address::generate(&env);
+    let token = Address::generate(&env);
+    let (_reg, fin, originator, _lender) = setup_offer_for_schedule(&env, &admin, &token);
+
+    let first_due = env.ledger().timestamp() + 604_800;
+    fin.schedule_repayment(
+        &symbol_short!("off_sc1"),
+        &originator,
+        &invofi_common::ScheduleFrequency::Weekly,
+        &12u32,
+        &first_due,
+    );
+
+    // Register a fake repayment contract (auth is mocked for callbacks)
+    let repayment_id = env.register(
+        super::FinancingContract,
+        (
+            Address::generate(&env),
+            Address::generate(&env),
+            Address::generate(&env),
+        ),
+    );
+    fin.set_repayment_contract(&admin, &repayment_id);
+
+    // Simulate an ad-hoc off-schedule partial repayment (42M — not a multiple
+    // of installment_amount = 105M). State should remain readable and correct.
+    fin.update_offer_amount_repaid(&symbol_short!("off_sc1"), &42_000_000i128);
+
+    let offer = fin.get_offer(&symbol_short!("off_sc1"));
+    assert_eq!(offer.amount_repaid, 42_000_000i128);
+
+    // Schedule is still intact — state not corrupted.
+    let sched = fin.get_schedule(&symbol_short!("off_sc1")).unwrap();
+    assert_eq!(sched.count, 12);
+    assert_eq!(sched.installment_amount, 105_000_000i128);
+}
+
+/// Lender can also create the schedule on a Pending offer.
+#[test]
+fn test_lender_can_schedule_on_pending_offer() {
+    let env = Env::default();
+    env.mock_all_auths();
+    env.ledger().set_timestamp(1_000_000);
+
+    let admin = Address::generate(&env);
+    let token = Address::generate(&env);
+    let (_reg, fin, _originator, lender) = setup_offer_for_schedule(&env, &admin, &token);
+
+    let first_due = env.ledger().timestamp() + 86_400;
+    let sched = fin.schedule_repayment(
+        &symbol_short!("off_sc1"),
+        &lender,
+        &invofi_common::ScheduleFrequency::Monthly,
+        &4u32,
+        &first_due,
+    );
+
+    assert_eq!(sched.count, 4);
+    assert_eq!(sched.frequency, invofi_common::ScheduleFrequency::Monthly);
+}
+
+/// get_installment_due returns 0 before the first_due timestamp.
+#[test]
+fn test_get_installment_due_returns_zero_before_first_due() {
+    let env = Env::default();
+    env.mock_all_auths();
+    env.ledger().set_timestamp(1_000_000);
+
+    let admin = Address::generate(&env);
+    let token = Address::generate(&env);
+    let (_reg, fin, originator, _lender) = setup_offer_for_schedule(&env, &admin, &token);
+
+    let first_due = env.ledger().timestamp() + 604_800; // 1 week in the future
+    fin.schedule_repayment(
+        &symbol_short!("off_sc1"),
+        &originator,
+        &invofi_common::ScheduleFrequency::Weekly,
+        &4u32,
+        &first_due,
+    );
+
+    // Now is before first_due — nothing due yet.
+    assert_eq!(fin.get_installment_due(&symbol_short!("off_sc1")), 0);
+}
+
+/// get_installment_due returns 1 after the first_due timestamp.
+#[test]
+fn test_get_installment_due_returns_one_after_first_due() {
+    let env = Env::default();
+    env.mock_all_auths();
+    env.ledger().set_timestamp(1_000_000);
+
+    let admin = Address::generate(&env);
+    let token = Address::generate(&env);
+    let (_reg, fin, originator, _lender) = setup_offer_for_schedule(&env, &admin, &token);
+
+    let first_due = env.ledger().timestamp() + 604_800;
+    fin.schedule_repayment(
+        &symbol_short!("off_sc1"),
+        &originator,
+        &invofi_common::ScheduleFrequency::Weekly,
+        &4u32,
+        &first_due,
+    );
+
+    // Advance time past first_due but before second installment.
+    env.ledger().set_timestamp(first_due + 1);
+    assert_eq!(fin.get_installment_due(&symbol_short!("off_sc1")), 1);
+}
+
+/// get_installment_due returns the first unpaid elapsed installment (1).
+/// Even when 2 periods have elapsed, if installment 1 is still unpaid,
+/// the helper returns 1 — the caller should pay installment 1 first.
+#[test]
+fn test_get_installment_due_advances_over_time() {
+    let env = Env::default();
+    env.mock_all_auths();
+    env.ledger().set_timestamp(1_000_000);
+
+    let admin = Address::generate(&env);
+    let token = Address::generate(&env);
+    let (_reg, fin, originator, _lender) = setup_offer_for_schedule(&env, &admin, &token);
+
+    let first_due = env.ledger().timestamp() + 604_800;
+    fin.schedule_repayment(
+        &symbol_short!("off_sc1"),
+        &originator,
+        &invofi_common::ScheduleFrequency::Weekly,
+        &4u32,
+        &first_due,
+    );
+
+    // Advance past the second weekly period — 2 installments elapsed, 0 paid.
+    // The helper returns 1 (the first unpaid due installment).
+    env.ledger().set_timestamp(first_due + 604_800 + 1);
+    assert_eq!(fin.get_installment_due(&symbol_short!("off_sc1")), 1);
+}
+
+/// get_installment_due returns 0 when all installments are covered.
+#[test]
+fn test_get_installment_due_zero_when_all_paid() {
+    let env = Env::default();
+    env.mock_all_auths();
+    env.ledger().set_timestamp(1_000_000);
+
+    let admin = Address::generate(&env);
+    let token = Address::generate(&env);
+    let (_reg, fin, originator, _lender) = setup_offer_for_schedule(&env, &admin, &token);
+
+    // Schedule with 4 weekly installments.
+    // offer.amount = 1_200_000_000, count = 4, rate = 500 bps
+    // installment_principal = 1_200_000_000 / 4 = 300_000_000
+    // installment_yield     = 300_000_000 * 500 / 10_000 = 15_000_000
+    // installment_amount    = 315_000_000
+    // 4 installments fully paid = 4 × 315_000_000 = 1_260_000_000
+    let first_due = env.ledger().timestamp() + 604_800;
+    let sched = fin.schedule_repayment(
+        &symbol_short!("off_sc1"),
+        &originator,
+        &invofi_common::ScheduleFrequency::Weekly,
+        &4u32,
+        &first_due,
+    );
+    let full_paid = sched.installment_amount * 4;
+
+    // Register a fake repayment contract (auth is mocked)
+    let repayment_id = env.register(
+        super::FinancingContract,
+        (
+            Address::generate(&env),
+            Address::generate(&env),
+            Address::generate(&env),
+        ),
+    );
+    fin.set_repayment_contract(&admin, &repayment_id);
+
+    // Simulate full coverage: 4 installments × installment_amount.
+    fin.update_offer_amount_repaid(&symbol_short!("off_sc1"), &full_paid);
+
+    // Advance past all 4 periods.
+    env.ledger().set_timestamp(first_due + 4 * 604_800);
+
+    // Nothing is due — all installments covered.
+    assert_eq!(fin.get_installment_due(&symbol_short!("off_sc1")), 0);
+}
+
+/// get_installment_due returns 0 when no schedule exists.
+#[test]
+fn test_get_installment_due_returns_zero_with_no_schedule() {
+    let env = Env::default();
+    env.mock_all_auths();
+    env.ledger().set_timestamp(1_000_000);
+
+    let admin = Address::generate(&env);
+    let token = Address::generate(&env);
+    let (_reg, fin, _originator, _lender) = setup_offer_for_schedule(&env, &admin, &token);
+
+    // No schedule set — must return 0.
+    assert_eq!(fin.get_installment_due(&symbol_short!("off_sc1")), 0);
+}
+
+/// schedule_repayment panics for a count of zero.
+#[test]
+#[should_panic(expected = "count must be at least 1")]
+fn test_schedule_count_zero_panics() {
+    let env = Env::default();
+    env.mock_all_auths();
+    env.ledger().set_timestamp(1_000_000);
+
+    let admin = Address::generate(&env);
+    let token = Address::generate(&env);
+    let (_reg, fin, originator, _lender) = setup_offer_for_schedule(&env, &admin, &token);
+
+    fin.schedule_repayment(
+        &symbol_short!("off_sc1"),
+        &originator,
+        &invofi_common::ScheduleFrequency::Weekly,
+        &0u32,
+        &(env.ledger().timestamp() + 604_800),
+    );
+}
+
+/// schedule_repayment panics when first_due is in the past.
+#[test]
+#[should_panic(expected = "first_due must be in the future")]
+fn test_schedule_first_due_in_past_panics() {
+    let env = Env::default();
+    env.mock_all_auths();
+    env.ledger().set_timestamp(1_000_000);
+
+    let admin = Address::generate(&env);
+    let token = Address::generate(&env);
+    let (_reg, fin, originator, _lender) = setup_offer_for_schedule(&env, &admin, &token);
+
+    fin.schedule_repayment(
+        &symbol_short!("off_sc1"),
+        &originator,
+        &invofi_common::ScheduleFrequency::Weekly,
+        &4u32,
+        &999_999u64, // before current timestamp
+    );
+}
+
+/// A third party (neither lender nor originator) cannot set a schedule.
+#[test]
+#[should_panic(expected = "Only the lender or the invoice originator can set a schedule")]
+fn test_schedule_unauthorized_caller_panics() {
+    let env = Env::default();
+    env.mock_all_auths();
+    env.ledger().set_timestamp(1_000_000);
+
+    let admin = Address::generate(&env);
+    let token = Address::generate(&env);
+    let (_reg, fin, _originator, _lender) = setup_offer_for_schedule(&env, &admin, &token);
+
+    let intruder = Address::generate(&env);
+    fin.schedule_repayment(
+        &symbol_short!("off_sc1"),
+        &intruder,
+        &invofi_common::ScheduleFrequency::Daily,
+        &30u32,
+        &(env.ledger().timestamp() + 86_400),
+    );
+}
+
+/// Daily frequency: period_secs = 86_400.
+/// When 2 daily periods elapsed and 1 installment already paid,
+/// the helper returns 2 (the next unpaid due installment).
+#[test]
+fn test_daily_frequency_period() {
+    let env = Env::default();
+    env.mock_all_auths();
+    env.ledger().set_timestamp(1_000_000);
+
+    let admin = Address::generate(&env);
+    let token = Address::generate(&env);
+    let (_reg, fin, originator, _lender) = setup_offer_for_schedule(&env, &admin, &token);
+
+    // count = 5 daily → installment_principal = 1_200_000_000 / 5 = 240_000_000
+    //                    installment_yield     = 240_000_000 * 500 / 10_000 = 12_000_000
+    //                    installment_amount    = 252_000_000
+    let first_due = env.ledger().timestamp() + 86_400;
+    let sched = fin.schedule_repayment(
+        &symbol_short!("off_sc1"),
+        &originator,
+        &invofi_common::ScheduleFrequency::Daily,
+        &5u32,
+        &first_due,
+    );
+
+    // Register a fake repayment contract (auth is mocked)
+    let repayment_id = env.register(
+        super::FinancingContract,
+        (
+            Address::generate(&env),
+            Address::generate(&env),
+            Address::generate(&env),
+        ),
+    );
+    fin.set_repayment_contract(&admin, &repayment_id);
+
+    // Mark installment 1 as paid.
+    fin.update_offer_amount_repaid(&symbol_short!("off_sc1"), &sched.installment_amount);
+
+    // Advance past 2 daily periods — installment 1 paid, installment 2 is now due.
+    env.ledger().set_timestamp(first_due + 86_400 + 1);
+    assert_eq!(fin.get_installment_due(&symbol_short!("off_sc1")), 2);
 }

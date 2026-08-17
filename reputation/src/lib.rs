@@ -79,6 +79,7 @@ impl ReputationContract {
     /// repayment contract. Admin only. Recording is disabled until a
     /// recorder is configured (fail-closed).
     pub fn set_recorder(env: Env, admin: Address, recorder: Address) {
+        assert_not_paused(&env);
         admin.require_auth();
         let current: Address = env
             .storage()

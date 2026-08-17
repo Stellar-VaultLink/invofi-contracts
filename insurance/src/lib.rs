@@ -87,6 +87,7 @@ impl InsuranceContract {
 
     /// Transfers admin rights. Only current admin.
     pub fn transfer_admin(env: Env, admin: Address, new_admin: Address) {
+        assert_not_paused(&env);
         admin.require_auth();
         let current: Address = env
             .storage()
@@ -104,6 +105,7 @@ impl InsuranceContract {
     /// Swap the staking token. Admin only. Existing stakes are not migrated —
     /// set this before opening the pool to stakers.
     pub fn set_staking_token(env: Env, admin: Address, token: Address) {
+        assert_not_paused(&env);
         admin.require_auth();
         let current: Address = env
             .storage()
@@ -126,6 +128,7 @@ impl InsuranceContract {
     /// repayment contract. Admin only. Payouts are disabled until a caller
     /// is configured (fail-closed).
     pub fn set_payout_caller(env: Env, admin: Address, payout_caller: Address) {
+        assert_not_paused(&env);
         admin.require_auth();
         let current: Address = env
             .storage()
@@ -219,6 +222,7 @@ impl InsuranceContract {
 
         let token_addr = load_token(&env);
         let token_client = token::TokenClient::new(&env, &token_addr);
+        // CEI: External interaction before state mutations. Safe because the token is a trusted standard Soroban token without reentrant hooks.
         token_client.transfer_from(
             &env.current_contract_address(),
             &staker,
@@ -264,6 +268,7 @@ impl InsuranceContract {
 
         let token_addr = load_token(&env);
         let token_client = token::TokenClient::new(&env, &token_addr);
+        // CEI: External interaction after state mutations (Effects before Interactions). Compliant.
         token_client.transfer(&env.current_contract_address(), &staker, &amount);
 
         env.events()
@@ -357,6 +362,7 @@ impl InsuranceContract {
         save_pool_total(&env, pool_total - payout);
 
         let token_addr = load_token(&env);
+        // CEI: External interaction after state mutations (Effects before Interactions). Compliant.
         token::TokenClient::new(&env, &token_addr).transfer(
             &env.current_contract_address(),
             &beneficiary,
@@ -389,6 +395,7 @@ impl InsuranceContract {
     /// equal get_pool_total whenever stake accounting is correct.
     pub fn get_contract_token_balance(env: Env) -> i128 {
         let token_addr = load_token(&env);
+        // CEI: Read-only cross-contract call.
         token::TokenClient::new(&env, &token_addr).balance(&env.current_contract_address())
     }
 
