@@ -17,6 +17,49 @@ and are enforced by commitlint in CI.
   and registry ↔ repayment (overdue/delegate). At least one happy-path and
   one negative test per boundary. Existing per-crate unit tests are untouched
   (issue #103).
+- **Overdue penalty interest (issue #49)** — `repayment` now accrues a
+  penalty on obligations past their invoice due date, threaded through
+  `calculate_total_due`, `repay_invoice`, and the `reclaim_invoice` payout
+  math. Design in `docs/adr/0007-overdue-penalty-interest.md`.
+  - Accrual is anchored on `invoice.due_date` (not the permissionless
+    Overdue status transition, which would be gameable by withholding a
+    keeper call) and runs in whole elapsed days, truncated — the partial day
+    in progress is not charged, so rounding favours the borrower.
+  - The accrual base is **frozen** at principal + yield and does not shrink
+    as repayments land. This is deliberate: a base tracking the outstanding
+    balance would let a large late partial payment retroactively erase
+    penalty already accrued, since a read-time recomputation would apply the
+    reduced principal across the entire elapsed window.
+  - Total accrued penalty is capped at `penalty_cap_bps` of that base, so
+    worst-case liability is a fixed multiple of the original obligation
+    rather than a function of how long the invoice went unattended.
+  - New admin entrypoint `set_penalty(admin, penalty_bps, cap_bps)`
+    (pause-guarded, admin-only, `penalty_bps` ≤ 500 = 5%/day, `cap_bps` ≤
+    10 000), with getters `get_penalty_bps` / `get_penalty_cap_bps`. **Both
+    parameters default to 0, which disables accrual entirely** — this change
+    is behaviourally inert until an admin enables it per network.
+  - New read-only `calculate_penalty(offer_id)` exposes the penalty
+    component on its own, for UIs that show it separately from the combined
+    figure.
+  - The insurance pool does **not** cover accrued penalty: the claim in
+    `reclaim_invoice` remains principal + yield − repaid, per ADR-0003.
+    Penalty is a punitive charge owed by the originator, not an insured
+    credit loss, and covering it would make staker losses grow with the time
+    a defaulted invoice went unreclaimed.
+  - 16 new tests cover per-day accrual, the truncation boundary, the cap
+    boundary (days 299/300/400/5 000), the frozen base across a 95% partial
+    repayment, penalty-must-be-settled-for-full-repayment, accrual continuing
+    across the Overdue transition, exclusion from the insurance payout, and
+    the admin/range/pause guards on `set_penalty`.
+
+### Changed
+- **`calculate_total_due` now reads the registry.** It previously read only
+  the offer from financing; it needs `invoice.due_date` to compute accrued
+  penalty, so this query now also depends on the registry being reachable.
+- **The `off_def` event gained a fourth element** (accrued penalty, `i128`),
+  emitted by `reclaim_invoice` so indexers can track the portion of the
+  lender's claim the pool did not cover. Consumers that destructure the
+  payload positionally need updating.
 
 ### Docs
 - **Migration runbook**: add `docs/migration-runbook.md` with the snapshot
