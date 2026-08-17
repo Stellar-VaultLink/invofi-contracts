@@ -69,6 +69,15 @@ jobs:
         Contracts / Clippy lint
         Soroban Scout
     steps:
+      # gh pr merge runs local git commands (e.g. resolving fork head
+      # branches) and fails with "failed to run git" when no repo exists.
+      # Check out the BASE branch only — pull_request_target context is
+      # the base, never the PR head, and this bot never executes PR code.
+      - name: Checkout base branch (gh merge needs a git repo)
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+          fetch-depth: 1
       - name: Review & auto-merge
         shell: bash
         run: |
