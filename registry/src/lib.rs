@@ -3,7 +3,8 @@
 use soroban_sdk::{contract, contractimpl, symbol_short, Address, Env, Map, Symbol, Vec};
 
 use invofi_common::{
-    assert_not_paused, Invoice, InvoiceStatus, ProtocolStats, RiskTier, MIN_INVOICE_AMOUNT,
+    assert_not_paused, ContractError, Invoice, InvoiceStatus, ProtocolStats, RiskTier,
+    MIN_INVOICE_AMOUNT,
 };
 
 // ─── Storage Helpers ─────────────────────────────────────────────────────────
@@ -66,7 +67,7 @@ fn assert_not_blacklisted(env: &Env, address: &Address) {
     let list = load_blacklist(env);
     for entry in list.iter() {
         if entry == *address {
-            panic!("Address is blacklisted");
+            env.panic_with_error(ContractError::Blacklisted);
         }
     }
 }
@@ -79,7 +80,7 @@ fn assert_admin(env: &Env, caller: &Address) {
         .get(&symbol_short!("admin"))
         .unwrap_or_else(|| panic!("Not initialized"));
     if current != *caller {
-        panic!("Only the current admin can perform this action");
+        env.panic_with_error(ContractError::Unauthorized);
     }
 }
 
@@ -182,7 +183,7 @@ impl RegistryContract {
         assert_not_paused(&env);
         assert_admin(&env, &admin);
         if rate_bps > 10_000 {
-            panic!("rate_bps must be between 0 and 10000");
+            env.panic_with_error(ContractError::InvalidInput);
         }
         let mut rates = load_rates(&env);
         rates.set(tier, rate_bps);
@@ -194,7 +195,7 @@ impl RegistryContract {
     pub fn get_rate(env: Env, tier: RiskTier) -> u32 {
         load_rates(&env)
             .get(tier)
-            .unwrap_or_else(|| panic!("Rate not set for this tier"))
+            .unwrap_or_else(|| env.panic_with_error(ContractError::NotFound))
     }
 
     // ── Protocol fee ─────────────────────────────────────────────────────────
@@ -204,7 +205,7 @@ impl RegistryContract {
         assert_not_paused(&env);
         assert_admin(&env, &admin);
         if fee_bps > 500 {
-            panic!("fee_bps must be at most 500 (5%)");
+            env.panic_with_error(ContractError::InvalidInput);
         }
         env.storage()
             .instance()
@@ -233,18 +234,16 @@ impl RegistryContract {
         assert_not_paused(&env);
         originator.require_auth();
         assert_not_blacklisted(&env, &originator);
-        assert!(
-            amount >= MIN_INVOICE_AMOUNT,
-            "amount must be at least MIN_INVOICE_AMOUNT stroops"
-        );
-        assert!(
-            due_date > env.ledger().timestamp(),
-            "due_date must be in the future"
-        );
+        if amount < MIN_INVOICE_AMOUNT {
+            env.panic_with_error(ContractError::InvalidInput);
+        }
+        if due_date <= env.ledger().timestamp() {
+            env.panic_with_error(ContractError::InvalidInput);
+        }
 
         let mut invoices = load_invoices(&env);
         if invoices.contains_key(id.clone()) {
-            panic!("Invoice with this ID already exists");
+            env.panic_with_error(ContractError::AlreadyExists);
         }
 
         let invoice = Invoice {
@@ -273,7 +272,7 @@ impl RegistryContract {
     pub fn get_invoice(env: Env, id: Symbol) -> Invoice {
         load_invoices(&env)
             .get(id)
-            .unwrap_or_else(|| panic!("Invoice not found"))
+            .unwrap_or_else(|| env.panic_with_error(ContractError::NotFound))
     }
 
     /// Manually update the status of a Pending invoice. Only the invoice
@@ -289,12 +288,12 @@ impl RegistryContract {
         let mut invoices = load_invoices(&env);
         let mut invoice = invoices
             .get(id.clone())
-            .unwrap_or_else(|| panic!("Invoice not found"));
+            .unwrap_or_else(|| env.panic_with_error(ContractError::NotFound));
         if invoice.originator != originator {
-            panic!("Only the invoice originator can update the status");
+            env.panic_with_error(ContractError::Unauthorized);
         }
         if invoice.status != InvoiceStatus::Pending {
-            panic!("Only Pending invoices can have their status updated");
+            env.panic_with_error(ContractError::InvalidTransition);
         }
         invoice.status = new_status.clone();
         invoices.set(id, invoice.clone());
@@ -316,17 +315,16 @@ impl RegistryContract {
         let mut invoices = load_invoices(&env);
         let mut invoice = invoices
             .get(invoice_id.clone())
-            .unwrap_or_else(|| panic!("Invoice not found"));
+            .unwrap_or_else(|| env.panic_with_error(ContractError::NotFound));
         if invoice.originator != originator {
-            panic!("Only the invoice originator can update the amount");
+            env.panic_with_error(ContractError::Unauthorized);
         }
         if invoice.status != InvoiceStatus::Pending {
-            panic!("Only Pending invoices can have their amount updated");
+            env.panic_with_error(ContractError::InvalidTransition);
         }
-        assert!(
-            new_amount >= MIN_INVOICE_AMOUNT,
-            "new_amount must be at least MIN_INVOICE_AMOUNT stroops"
-        );
+        if new_amount < MIN_INVOICE_AMOUNT {
+            env.panic_with_error(ContractError::InvalidInput);
+        }
         invoice.amount = new_amount;
         invoices.set(invoice_id, invoice.clone());
         save_invoices(&env, &invoices);
@@ -344,12 +342,12 @@ impl RegistryContract {
         let mut invoices = load_invoices(&env);
         let mut invoice = invoices
             .get(invoice_id.clone())
-            .unwrap_or_else(|| panic!("Invoice not found"));
+            .unwrap_or_else(|| env.panic_with_error(ContractError::NotFound));
         if invoice.originator != originator {
-            panic!("Only the invoice originator can cancel");
+            env.panic_with_error(ContractError::Unauthorized);
         }
         if invoice.status != InvoiceStatus::Pending {
-            panic!("Only Pending invoices can be cancelled");
+            env.panic_with_error(ContractError::InvalidTransition);
         }
         invoice.status = InvoiceStatus::Cancelled;
         invoices.set(invoice_id, invoice.clone());
@@ -376,9 +374,9 @@ impl RegistryContract {
         let mut invoices = load_invoices(&env);
         let mut invoice = invoices
             .get(id.clone())
-            .unwrap_or_else(|| panic!("Invoice not found"));
+            .unwrap_or_else(|| env.panic_with_error(ContractError::NotFound));
         if invoice.status != InvoiceStatus::Financed {
-            panic!("Invoice must be Financed for repayment status update");
+            env.panic_with_error(ContractError::InvalidTransition);
         }
         invoice.status = if fully_repaid {
             InvoiceStatus::Repaid
@@ -409,9 +407,9 @@ impl RegistryContract {
         let mut invoices = load_invoices(&env);
         let mut invoice = invoices
             .get(id.clone())
-            .unwrap_or_else(|| panic!("Invoice not found"));
+            .unwrap_or_else(|| env.panic_with_error(ContractError::NotFound));
         if invoice.status != InvoiceStatus::Pending {
-            panic!("Invoice must be Pending before financing");
+            env.panic_with_error(ContractError::InvalidTransition);
         }
         invoice.status = InvoiceStatus::Financed;
         invoices.set(id, invoice.clone());
@@ -438,9 +436,9 @@ impl RegistryContract {
         let mut invoices = load_invoices(&env);
         let mut invoice = invoices
             .get(id.clone())
-            .unwrap_or_else(|| panic!("Invoice not found"));
+            .unwrap_or_else(|| env.panic_with_error(ContractError::NotFound));
         if invoice.status != InvoiceStatus::Financed {
-            panic!("Invoice must be Financed before repayment");
+            env.panic_with_error(ContractError::InvalidTransition);
         }
         invoice.status = if fully_repaid {
             InvoiceStatus::Repaid
@@ -473,9 +471,9 @@ impl RegistryContract {
         let mut invoices = load_invoices(&env);
         let mut invoice = invoices
             .get(id.clone())
-            .unwrap_or_else(|| panic!("Invoice not found"));
+            .unwrap_or_else(|| env.panic_with_error(ContractError::NotFound));
         if invoice.status != InvoiceStatus::Overdue {
-            panic!("Invoice must be Overdue before defaulting");
+            env.panic_with_error(ContractError::InvalidTransition);
         }
         invoice.status = InvoiceStatus::Defaulted;
         invoices.set(id, invoice.clone());
@@ -495,12 +493,12 @@ impl RegistryContract {
         let mut invoices = load_invoices(&env);
         let mut invoice = invoices
             .get(id.clone())
-            .unwrap_or_else(|| panic!("Invoice not found"));
+            .unwrap_or_else(|| env.panic_with_error(ContractError::NotFound));
         if invoice.status != InvoiceStatus::Financed {
-            panic!("Only Financed invoices can be marked Overdue");
+            env.panic_with_error(ContractError::InvalidTransition);
         }
         if env.ledger().timestamp() <= invoice.due_date {
-            panic!("Invoice due date has not passed");
+            env.panic_with_error(ContractError::InvalidTransition);
         }
         invoice.status = InvoiceStatus::Overdue;
         invoices.set(id, invoice.clone());
@@ -521,12 +519,12 @@ impl RegistryContract {
         let mut invoices = load_invoices(&env);
         let mut invoice = invoices
             .get(invoice_id.clone())
-            .unwrap_or_else(|| panic!("Invoice not found"));
+            .unwrap_or_else(|| env.panic_with_error(ContractError::NotFound));
         if invoice.originator != originator {
-            panic!("Only the invoice originator can raise a dispute");
+            env.panic_with_error(ContractError::Unauthorized);
         }
         if invoice.status != InvoiceStatus::Financed {
-            panic!("Only Financed invoices can be disputed");
+            env.panic_with_error(ContractError::InvalidTransition);
         }
         invoice.status = InvoiceStatus::Disputed;
         invoices.set(invoice_id, invoice.clone());
@@ -550,12 +548,12 @@ impl RegistryContract {
         let mut invoices = load_invoices(&env);
         let mut invoice = invoices
             .get(invoice_id.clone())
-            .unwrap_or_else(|| panic!("Invoice not found"));
+            .unwrap_or_else(|| env.panic_with_error(ContractError::NotFound));
         if invoice.status != InvoiceStatus::Disputed {
-            panic!("Invoice is not in Disputed status");
+            env.panic_with_error(ContractError::InvalidTransition);
         }
         if target_status == InvoiceStatus::Disputed {
-            panic!("Cannot resolve to Disputed status");
+            env.panic_with_error(ContractError::InvalidInput);
         }
         invoice.status = target_status;
         invoices.set(invoice_id, invoice.clone());

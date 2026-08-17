@@ -177,7 +177,7 @@ fn test_repay_invoice_partial_then_full() {
 // ─── Edge case tests ──────────────────────────────────────────────────────
 
 #[test]
-#[should_panic(expected = "Repayment amount exceeds remaining balance")]
+#[should_panic(expected = "Error(Contract, #5)")]
 fn test_repay_invoice_overpayment_panics() {
     let env = Env::default();
     env.mock_all_auths();
@@ -247,7 +247,7 @@ fn test_repay_invoice_overpayment_panics() {
 }
 
 #[test]
-#[should_panic(expected = "Invoice must be Financed before repayment")]
+#[should_panic(expected = "Error(Contract, #3)")]
 fn test_repay_unfinanced_invoice_panics() {
     let env = Env::default();
     env.mock_all_auths();
@@ -424,7 +424,7 @@ fn test_reclaim_invoice_after_grace_period() {
 }
 
 #[test]
-#[should_panic(expected = "Grace period has not elapsed")]
+#[should_panic(expected = "Error(Contract, #3)")]
 fn test_reclaim_before_grace_period_panics() {
     let env = Env::default();
     env.mock_all_auths();
@@ -489,7 +489,7 @@ fn test_reclaim_before_grace_period_panics() {
 }
 
 #[test]
-#[should_panic(expected = "Invoice must be Overdue before reclaim")]
+#[should_panic(expected = "Error(Contract, #3)")]
 fn test_reclaim_on_non_overdue_panics() {
     let env = Env::default();
     env.mock_all_auths();
@@ -725,7 +725,7 @@ fn test_get_duration_limits() {
 // ─── Task 4A: emergency pause / circuit breaker ──────────────────────────────
 
 #[test]
-#[should_panic(expected = "Contract is paused")]
+#[should_panic(expected = "Error(Contract, #4)")]
 fn test_pause_blocks_repay_invoice() {
     let env = Env::default();
     env.mock_all_auths();
@@ -1490,7 +1490,7 @@ fn test_penalty_must_be_settled_for_full_repayment() {
 }
 
 #[test]
-#[should_panic(expected = "Repayment amount exceeds remaining balance")]
+#[should_panic(expected = "Error(Contract, #5)")]
 fn test_penalty_overpayment_beyond_accrued_total_panics() {
     let env = Env::default();
     env.mock_all_auths();
@@ -1588,7 +1588,7 @@ fn test_penalty_excluded_from_insurance_payout() {
 }
 
 #[test]
-#[should_panic(expected = "Only the current admin can set penalty parameters")]
+#[should_panic(expected = "Error(Contract, #1)")]
 fn test_set_penalty_admin_only() {
     let env = Env::default();
     env.mock_all_auths();
@@ -1600,7 +1600,7 @@ fn test_set_penalty_admin_only() {
 }
 
 #[test]
-#[should_panic(expected = "penalty_bps must be at most 500")]
+#[should_panic(expected = "Error(Contract, #6)")]
 fn test_set_penalty_rejects_excessive_rate() {
     let env = Env::default();
     env.mock_all_auths();
@@ -1611,7 +1611,7 @@ fn test_set_penalty_rejects_excessive_rate() {
 }
 
 #[test]
-#[should_panic(expected = "cap_bps must be between 0 and 10000")]
+#[should_panic(expected = "Error(Contract, #6)")]
 fn test_set_penalty_rejects_excessive_cap() {
     let env = Env::default();
     env.mock_all_auths();
@@ -1622,7 +1622,7 @@ fn test_set_penalty_rejects_excessive_cap() {
 }
 
 #[test]
-#[should_panic(expected = "Contract is paused")]
+#[should_panic(expected = "Error(Contract, #4)")]
 fn test_set_penalty_blocked_while_paused() {
     let env = Env::default();
     env.mock_all_auths();

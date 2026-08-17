@@ -39,7 +39,7 @@ fn test_register_and_get_invoice() {
 }
 
 #[test]
-#[should_panic(expected = "Invoice with this ID already exists")]
+#[should_panic(expected = "Error(Contract, #7)")]
 fn test_duplicate_invoice_id_panics() {
     let env = Env::default();
     env.mock_all_auths();
@@ -57,7 +57,7 @@ fn test_duplicate_invoice_id_panics() {
 }
 
 #[test]
-#[should_panic(expected = "Invoice not found")]
+#[should_panic(expected = "Error(Contract, #2)")]
 fn test_get_non_existent_invoice() {
     let env = Env::default();
     env.mock_all_auths();
@@ -96,7 +96,7 @@ fn test_update_invoice_status() {
 }
 
 #[test]
-#[should_panic(expected = "Only the invoice originator can update the status")]
+#[should_panic(expected = "Error(Contract, #1)")]
 fn test_update_invoice_status_non_originator_panics() {
     let env = Env::default();
     env.mock_all_auths();
@@ -119,7 +119,7 @@ fn test_update_invoice_status_non_originator_panics() {
 }
 
 #[test]
-#[should_panic(expected = "Only Pending invoices can have their status updated")]
+#[should_panic(expected = "Error(Contract, #3)")]
 fn test_update_invoice_status_on_non_pending_panics() {
     let env = Env::default();
     env.mock_all_auths();
@@ -164,7 +164,7 @@ fn test_cancel_invoice() {
 }
 
 #[test]
-#[should_panic(expected = "Only Pending invoices can be cancelled")]
+#[should_panic(expected = "Error(Contract, #3)")]
 fn test_cancel_non_pending_panics() {
     let env = Env::default();
     env.mock_all_auths();
@@ -211,7 +211,7 @@ fn test_update_invoice_amount() {
 }
 
 #[test]
-#[should_panic(expected = "new_amount must be at least MIN_INVOICE_AMOUNT stroops")]
+#[should_panic(expected = "Error(Contract, #6)")]
 fn test_update_invoice_amount_below_min_panics() {
     let env = Env::default();
     env.mock_all_auths();
@@ -232,7 +232,7 @@ fn test_update_invoice_amount_below_min_panics() {
 }
 
 #[test]
-#[should_panic(expected = "Only Pending invoices can have their amount updated")]
+#[should_panic(expected = "Error(Contract, #3)")]
 fn test_update_amount_on_non_pending_panics() {
     let env = Env::default();
     env.mock_all_auths();
@@ -257,7 +257,7 @@ fn test_update_amount_on_non_pending_panics() {
 // ─── Validation tests ────────────────────────────────────────────────────
 
 #[test]
-#[should_panic(expected = "amount must be at least MIN_INVOICE_AMOUNT stroops")]
+#[should_panic(expected = "Error(Contract, #6)")]
 fn test_register_invoice_zero_amount() {
     let env = Env::default();
     env.mock_all_auths();
@@ -276,7 +276,7 @@ fn test_register_invoice_zero_amount() {
 }
 
 #[test]
-#[should_panic(expected = "due_date must be in the future")]
+#[should_panic(expected = "Error(Contract, #6)")]
 fn test_register_invoice_past_due_date() {
     let env = Env::default();
     env.mock_all_auths();
@@ -295,7 +295,7 @@ fn test_register_invoice_past_due_date() {
 }
 
 #[test]
-#[should_panic(expected = "amount must be at least MIN_INVOICE_AMOUNT stroops")]
+#[should_panic(expected = "Error(Contract, #6)")]
 fn test_min_invoice_amount_rejected() {
     let env = Env::default();
     env.mock_all_auths();
@@ -616,7 +616,7 @@ fn test_transfer_admin() {
 }
 
 #[test]
-#[should_panic(expected = "Only the current admin can perform this action")]
+#[should_panic(expected = "Error(Contract, #1)")]
 fn test_transfer_admin_unauthorized_panics() {
     let env = Env::default();
     env.mock_all_auths();
@@ -648,7 +648,7 @@ fn test_pause_and_unpause() {
 }
 
 #[test]
-#[should_panic(expected = "Contract is paused")]
+#[should_panic(expected = "Error(Contract, #4)")]
 fn test_register_invoice_while_paused_panics() {
     let env = Env::default();
     env.mock_all_auths();
@@ -669,7 +669,7 @@ fn test_register_invoice_while_paused_panics() {
 }
 
 #[test]
-#[should_panic(expected = "Only the current admin can perform this action")]
+#[should_panic(expected = "Error(Contract, #1)")]
 fn test_pause_unauthorized_panics() {
     let env = Env::default();
     env.mock_all_auths();
@@ -682,7 +682,7 @@ fn test_pause_unauthorized_panics() {
 }
 
 #[test]
-#[should_panic(expected = "Contract is paused")]
+#[should_panic(expected = "Error(Contract, #4)")]
 fn test_pause_blocks_transfer_admin() {
     let env = Env::default();
     env.mock_all_auths();
@@ -805,7 +805,7 @@ fn test_set_and_get_rate() {
 }
 
 #[test]
-#[should_panic(expected = "rate_bps must be between 0 and 10000")]
+#[should_panic(expected = "Error(Contract, #6)")]
 fn test_set_rate_out_of_range_panics() {
     let env = Env::default();
     env.mock_all_auths();
@@ -817,7 +817,7 @@ fn test_set_rate_out_of_range_panics() {
 }
 
 #[test]
-#[should_panic(expected = "Only the current admin can perform this action")]
+#[should_panic(expected = "Error(Contract, #1)")]
 fn test_set_rate_unauthorized_panics() {
     let env = Env::default();
     env.mock_all_auths();
@@ -830,7 +830,7 @@ fn test_set_rate_unauthorized_panics() {
 }
 
 #[test]
-#[should_panic(expected = "Rate not set for this tier")]
+#[should_panic(expected = "Error(Contract, #2)")]
 fn test_get_unset_rate_panics() {
     let env = Env::default();
     env.mock_all_auths();
@@ -857,7 +857,7 @@ fn test_set_and_get_fee() {
 }
 
 #[test]
-#[should_panic(expected = "fee_bps must be at most 500")]
+#[should_panic(expected = "Error(Contract, #6)")]
 fn test_set_fee_too_high_panics() {
     let env = Env::default();
     env.mock_all_auths();
@@ -896,7 +896,7 @@ fn test_blacklist_and_unblacklist() {
 }
 
 #[test]
-#[should_panic(expected = "Address is blacklisted")]
+#[should_panic(expected = "Error(Contract, #8)")]
 fn test_blacklisted_cannot_register_invoice() {
     let env = Env::default();
     env.mock_all_auths();
@@ -917,7 +917,7 @@ fn test_blacklisted_cannot_register_invoice() {
 }
 
 #[test]
-#[should_panic(expected = "Only the current admin can perform this action")]
+#[should_panic(expected = "Error(Contract, #1)")]
 fn test_blacklist_non_admin_panics() {
     let env = Env::default();
     env.mock_all_auths();
@@ -1013,7 +1013,7 @@ fn test_mark_invoice_overdue() {
 }
 
 #[test]
-#[should_panic(expected = "Only Financed invoices can be marked Overdue")]
+#[should_panic(expected = "Error(Contract, #3)")]
 fn test_mark_overdue_on_pending_panics() {
     let env = Env::default();
     env.mock_all_auths();
@@ -1056,7 +1056,7 @@ fn test_raise_and_resolve_dispute() {
 }
 
 #[test]
-#[should_panic(expected = "Only Financed invoices can be disputed")]
+#[should_panic(expected = "Error(Contract, #3)")]
 fn test_raise_dispute_on_pending_panics() {
     let env = Env::default();
     env.mock_all_auths();
@@ -1160,7 +1160,7 @@ fn test_repayment_marks_defaulted_transition() {
 }
 
 #[test]
-#[should_panic(expected = "Invoice must be Overdue before defaulting")]
+#[should_panic(expected = "Error(Contract, #3)")]
 fn test_repayment_marks_defaulted_requires_overdue() {
     let env = Env::default();
     env.mock_all_auths();

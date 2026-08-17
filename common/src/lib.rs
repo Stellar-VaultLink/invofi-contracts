@@ -7,7 +7,7 @@
 
 #![no_std]
 
-use soroban_sdk::{contractclient, contracttype, symbol_short, Address, Env, Map, Symbol};
+use soroban_sdk::{contractclient, contracterror, contracttype, symbol_short, Address, Env, Map, Symbol};
 
 // ─── Constants ───────────────────────────────────────────────────────────────
 
@@ -24,6 +24,57 @@ pub const MAX_OFFER_DURATION_SECS: u64 = 31_536_000;
 /// Minimum invoice amount in stroops (1 XLM = 10_000_000 stroops).
 /// Prevents dust invoices that would cost more in fees than they're worth.
 pub const MIN_INVOICE_AMOUNT: i128 = 10_000_000;
+
+// ─── Shared Error Enum ────────────────────────────────────────────────────────
+
+/// Structured error type shared across all InvoFi contracts.
+///
+/// Using `#[contracterror]` causes the Soroban host to encode these as a
+/// typed `Error` value in the XDR result, not as an opaque string panic.
+/// Clients (SDK, frontend, indexer) can match on the `u32` discriminant
+/// without parsing panic messages — which breaks across contract versions.
+///
+/// Discriminants are **stable** and must never be re-numbered once deployed.
+/// Add new variants at the end with a new, higher number.
+///
+/// Using `env.panic_with_error(&ContractError::X)` keeps all public
+/// function signatures identical (`T`, not `Result<T, ContractError>`), so
+/// no SDK binding changes are needed.
+#[contracterror]
+#[derive(Copy, Clone, Debug, Eq, PartialEq, PartialOrd, Ord)]
+#[repr(u32)]
+pub enum ContractError {
+    /// Caller is not authorized to perform this action (wrong admin,
+    /// wrong originator, wrong lender, etc.).
+    Unauthorized = 1,
+
+    /// Requested resource (invoice, offer, rate, etc.) does not exist.
+    NotFound = 2,
+
+    /// The operation is not permitted given the resource's current status
+    /// (e.g., accepting an already-Financed offer, cancelling a non-Pending
+    /// invoice, reclaiming before the grace period).
+    InvalidTransition = 3,
+
+    /// The contract is paused; all state-mutating operations are halted
+    /// until an admin calls `unpause`.
+    Paused = 4,
+
+    /// The caller's balance is insufficient for the requested operation
+    /// (e.g., unstaking more than staked, repaying more than is owed).
+    InsufficientBalance = 5,
+
+    /// A parameter value falls outside the allowed range or violates a
+    /// protocol constraint (e.g., `fee_bps > 500`, `amount <= 0`,
+    /// past-due `due_date`).
+    InvalidInput = 6,
+
+    /// An entity with the provided ID already exists (invoice, offer).
+    AlreadyExists = 7,
+
+    /// The caller's address is on the blacklist.
+    Blacklisted = 8,
+}
 
 // ─── Types ───────────────────────────────────────────────────────────────────
 
@@ -256,7 +307,7 @@ pub fn assert_not_paused(env: &Env) {
         .get(&symbol_short!("paused"))
         .unwrap_or(false);
     if paused {
-        panic!("Contract is paused");
+        env.panic_with_error(ContractError::Paused);
     }
 }
 
