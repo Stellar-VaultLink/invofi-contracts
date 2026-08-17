@@ -7,9 +7,16 @@ name: Auto-merge bot
 #     review when CI is green, or a review that explains WHAT failed when a
 #     required check fails (error details pulled from the check annotations
 #     and the failed job's log — not just the check name).
-#   - Auto-merges once all required CI checks pass: normal merge by
-#     default (preserves history); rebase when the branch is behind base.
+#   - Runs a diff review before merging: compares the changed files against
+#     the scope declared in the PR title/body, flags high-risk files
+#     (workflows, lockfiles, configs) and very large diffs. If anything is
+#     flagged, the bot posts a review and holds the merge for a maintainer —
+#     a green CI is not enough when a PR drifts outside its declared scope.
+#   - Auto-merges once CI is green AND the diff review passes: normal merge
+#     by default (preserves history); rebase when the branch is behind base.
 #     Never squashes — squash rewrites history and can hide changes.
+#   - The merge announcement lists what the PR accomplishes (from its body)
+#     before merging.
 #   - Triggers: PR events, an hourly sweep (catches PRs whose CI finished
 #     after the event run, e.g. first-time-contributor approval gates), and
 #     manual workflow_dispatch.
@@ -57,7 +64,8 @@ jobs:
       # GITHUB_TOKEN cannot approve PRs (can_approve_pull_request_reviews
       # is false), which fails contracts' branch-protection review
       # requirement. Use the maintainer PAT (CONTRIBUTORS_TOKEN) when it
-      # exists — its approval counts — and fall back to GITHUB_TOKEN.
+      # exists — its approval counts and merges are attributed to the PAT
+      # owner — and fall back to GITHUB_TOKEN.
       GH_TOKEN: ${{ secrets.CONTRIBUTORS_TOKEN || secrets.GITHUB_TOKEN }}
       PR_NUMBER: ${{ github.event.pull_request.number }}
       INPUT_PR: ${{ inputs.pr }}
@@ -68,6 +76,17 @@ jobs:
         Conventional Commits
         Contracts / Clippy lint
         Soroban Scout
+      # Top-level path prefixes PRs normally touch. Files outside these
+      # are flagged by the diff-review gate (never auto-merged).
+      SCOPE_PREFIXES: |-
+        registry/
+        financing/
+        repayment/
+        insurance/
+        reputation/
+        common/
+        docs/
+        scripts/
     steps:
       # gh pr merge runs local git commands (e.g. resolving fork head
       # branches) and fails with "failed to run git" when no repo exists.
@@ -85,7 +104,10 @@ jobs:
 
           REPO="${GITHUB_REPOSITORY}"
 
-          mapfile -t REQUIRED < <(printf '%s\n' "${REQUIRED_CHECKS}" | grep -v '^$')
+          mapfile -t REQUIRED < <(printf '%s\n' "${REQUIRED_CHECKS}" \
+            | grep -v '^$')
+          mapfile -t SCOPE_PREFIX < <(printf '%s\n' "${SCOPE_PREFIXES}" \
+            | grep -v '^$')
 
           # Resolve which PRs to process.
           PRS=()
@@ -192,13 +214,115 @@ jobs:
             printf '%s' "${OUT}"
           }
 
+          # ── diff review: scope + divergence gate ──
+          # Compares the PR's changed files against the scope declared in
+          # its title/body. Flags out-of-scope files, high-risk files, and
+          # very large diffs. When flagged, the bot posts a review and
+          # holds the merge for a maintainer (no auto-merge).
+          diff_review() {
+            local PR="$1" TITLE="$2" BODY="$3"
+            local FLAGS="" FILES LOWT LOWB SCOPE="" PR_TYPE="" P IN_SCOPE
+            local NFILES NADD
+            mapfile -t FILES < <(gh pr diff "${PR}" --repo "${REPO}" \
+              --name-only 2>/dev/null || true)
+            NFILES="${#FILES[@]}"
+            NADD="$(gh pr view "${PR}" --repo "${REPO}" \
+              --json additions --jq .additions 2>/dev/null || echo 0)"
+            LOWT="$(printf '%s' "${TITLE}" | tr '[:upper:]' '[:lower:]')"
+            LOWB="$(printf '%s' "${BODY}" | tr '[:upper:]' '[:lower:]')"
+            # Conventional-commit prefix: type(scope), e.g. test(frontend).
+            if [[ "${LOWT}" =~ ^(feat|fix|test|docs|chore|refactor|ci)\(([a-z0-9_-]+)\) ]]; then
+              PR_TYPE="${BASH_REMATCH[1]}"
+              SCOPE="${BASH_REMATCH[2]}"
+            fi
+            for F in "${FILES[@]}"; do
+              IN_SCOPE="no"
+              for P in "${SCOPE_PREFIX[@]}"; do
+                case "${F}" in
+                  "${P}"*) IN_SCOPE="yes" ;;
+                esac
+              done
+              case "${F}" in
+                README.md|CONTRIBUTING.md|LICENSE|.gitignore|*.md)
+                  IN_SCOPE="yes" ;;
+              esac
+              # Workflow and dependency files: in-scope for their own
+              # scopes, otherwise flagged as high-risk.
+              case "${F}" in
+                .github/workflows/*)
+                  case "${SCOPE}" in
+                    ci|infra|workflow|test|e2e)
+                      IN_SCOPE="yes" ;;
+                    *)
+                      if [[ "${LOWB}" =~ ci|workflow|action ]]; then
+                        IN_SCOPE="yes"
+                      else
+                        FLAGS+="* \`${F}\` — workflow change; CI can't validate"
+                        FLAGS+=" policy impact. Confirm intent."
+                        FLAGS+=$'\n'
+                      fi ;;
+                  esac ;;
+                *package-lock.json|*Cargo.lock|*Cargo.toml)
+                  case "${SCOPE}" in
+                    deps|dependabot|test|e2e|frontend|sdk|contract)
+                      IN_SCOPE="yes" ;;
+                    *)
+                      FLAGS+="* \`${F}\` — dependency change outside the"
+                      FLAGS+=" declared scope. Confirm intent."
+                      FLAGS+=$'\n' ;;
+                  esac ;;
+              esac
+              if [ "${IN_SCOPE}" = "no" ]; then
+                FLAGS+="* \`${F}\` — outside the declared scope (${SCOPE:-none})."
+                FLAGS+=$'\n'
+              fi
+            done
+            # Production code changed in a test/docs/chore PR is a red flag.
+            case "${PR_TYPE}" in
+              test|docs|chore)
+                for F in "${FILES[@]}"; do
+                  case "${F}" in
+                    *src/test/*|*.test.*|*.spec.*|vitest.config.*|*test.rs) ;;
+                    *src/*|*.rs)
+                      FLAGS+="* \`${F}\` — production code in a"
+                      FLAGS+=" ${PR_TYPE}-scoped PR. Confirm intent."
+                      FLAGS+=$'\n' ;;
+                  esac
+                done ;;
+            esac
+            # Divergence from base: absurdly large or lopsided diff.
+            if [ "${NFILES}" -gt 40 ] || [ "${NADD}" -gt 2500 ]; then
+              FLAGS+="* Very large diff (${NFILES} files, +${NADD}) — verify"
+              FLAGS+=" nothing unrelated drifted in."
+              FLAGS+=$'\n'
+            fi
+            printf '%s' "${FLAGS}"
+          }
+
+          # Pull the "what changed" bullets from the PR body (up to 10)
+          # so the merge announcement lists what the PR accomplished.
+          accomplishments() {
+            local PR="$1" OUT="" LINE
+            while IFS= read -r LINE; do
+              LINE="${LINE%"${LINE##*[![:space:]]}"}"
+              case "${LINE}" in
+                "- "*|"* "*) OUT+="${LINE}"$'\n' ;;
+              esac
+              if [ "$(printf '%s' "${OUT}" | grep -c .)" -ge 10 ]; then
+                break
+              fi
+            done <<< "$(gh pr view "${PR}" --repo "${REPO}" \
+              --json body --jq .body 2>/dev/null || echo)"
+            printf '%s' "${OUT}"
+          }
+
           for PR in "${PRS[@]}"; do
             echo "── PR #${PR} ──"
 
             META="$(gh pr view "${PR}" --repo "${REPO}" \
-              --json state,isDraft,mergeable,headRefOid,author \
-              --jq '{state,isDraft,mergeable,headRefOid,author:.author.login}' \
-              2>/dev/null || true)"
+              --json state,isDraft,mergeable,headRefOid,author,title,body \
+              --jq '{state,isDraft,mergeable,headRefOid,author:.author.login,
+                title,body}' 2>/dev/null || true)"
             [ -n "${META}" ] || { echo "  cannot read PR — skip"; continue; }
 
             STATE="$(printf '%s' "${META}" | jq -r .state)"
@@ -206,6 +330,8 @@ jobs:
             MERGEABLE="$(printf '%s' "${META}" | jq -r .mergeable)"
             SHA="$(printf '%s' "${META}" | jq -r .headRefOid)"
             AUTHOR="$(printf '%s' "${META}" | jq -r .author)"
+            PR_TITLE="$(printf '%s' "${META}" | jq -r .title)"
+            PR_BODY="$(printf '%s' "${META}" | jq -r .body)"
 
             [ "${STATE}" = "OPEN" ] || { echo "  skip (state=${STATE})"; continue; }
             [ "${DRAFT}" = "false" ] || { echo "  skip (draft)"; continue; }
@@ -229,7 +355,7 @@ jobs:
               BODY="🤖 **Bot review** — ${SUMMARY}"
               BODY+=$'\n\n'
               BODY+="I will approve and merge this PR automatically once all"
-              BODY+=" required CI checks pass."
+              BODY+=" required CI checks pass and the diff review passes."
               BODY+=$'\n'
               BODY+="If a required check fails, I'll leave a note here for you"
               BODY+=" to fix."
@@ -297,22 +423,60 @@ jobs:
               continue
             fi
 
-            # ── all required checks passed → announce, approve, merge ──
+            # ── all required checks passed → diff review, then merge ──
             echo "  all required checks passed"
             [ "${MERGEABLE}" = "MERGEABLE" ] || {
               echo "  not mergeable (${MERGEABLE}) — will retry"; continue; }
 
+            # Diff-review gate: a green CI is not enough. If the PR drifts
+            # outside its declared scope, post the findings and hold the
+            # merge for a maintainer.
+            DREV="$(diff_review "${PR}" "${PR_TITLE}" "${PR_BODY}")"
+            if [ -n "${DREV}" ]; then
+              echo "  ⚠️ diff review flagged issues — holding for maintainer"
+              MARKER4="<!-- BOT-DIFF-REVIEW sha=${SHA} -->"
+              ALREADY4="$(gh pr view "${PR}" --repo "${REPO}" \
+                --json reviews \
+                --jq "[.reviews[] | select(.author.login == \"${BOT_LOGIN}\")
+                  | select(.body | contains(\"${MARKER4}\"))] | length" \
+                2>/dev/null || echo 0)"
+              if [ "${ALREADY4}" -eq 0 ]; then
+                BODY4="🤖 **Bot review** — ⚠️ CI is green but my diff review"
+                BODY4+=" found scope concerns. Holding the merge for a"
+                BODY4+=" maintainer:"
+                BODY4+=$'\n\n'
+                BODY4+="${DREV}"
+                BODY4+=$'\n\n'
+                BODY4+="${MARKER4}"
+                gh pr review "${PR}" --repo "${REPO}" --comment \
+                  --body "${BODY4}" 2>/dev/null || true
+              fi
+              continue
+            fi
+
             # Announce the merge with a plain review comment first — this
             # works even when the token cannot submit APPROVED reviews.
+            # The message lists what the PR accomplished before merging.
             ANNOUNCE="$(gh pr view "${PR}" --repo "${REPO}" \
               --json reviews \
               --jq "[.reviews[] | select(.author.login == \"${BOT_LOGIN}\")
                 | select(.body | contains(\"BOT-MERGE-ANNOUNCE ${SHA}\"))]
                 | length" 2>/dev/null || echo 0)"
             if [ "${ANNOUNCE}" -eq 0 ] && [ "${SELF}" != "true" ]; then
+              ACCOMP="$(accomplishments "${PR}")"
+              STATS="$(gh pr view "${PR}" --repo "${REPO}" \
+                --json changedFiles,additions,deletions \
+                --jq '\"+\" + (.additions|tostring) + \"/−\"
+                  + (.deletions|tostring) + \" across \"
+                  + (.changedFiles|tostring) + \" file(s)\"' \
+                2>/dev/null || echo "the diff")"
               BODY="🤖 **Bot review** — ✅ All required CI checks passed."
               BODY+=$'\n'
-              BODY+="Merging now."
+              if [ -n "${ACCOMP}" ]; then
+                BODY+=$'\n'"**This PR accomplishes:**"$'\n'"${ACCOMP}"
+              fi
+              BODY+=$'\n'"Diff: ${STATS} — verified within scope."$'\n'
+              BODY+="CI is green — merging now."
               BODY+=$'\n\n'
               BODY+="<!-- BOT-MERGE-ANNOUNCE ${SHA} -->"
               gh pr review "${PR}" --repo "${REPO}" --comment \
