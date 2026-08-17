@@ -79,6 +79,7 @@ fn assert_not_blacklisted(env: &Env, address: &Address) {
         .get(&symbol_short!("registry"))
         .unwrap_or_else(|| panic!("Not initialized"));
     let registry_client = RegistryClient::new(env, &registry_addr);
+    // CEI: Read-only cross-contract call, safe before state mutations.
     if registry_client.is_blacklisted(address) {
         panic!("Address is blacklisted");
     }
@@ -294,6 +295,7 @@ impl FinancingContract {
             .get(&symbol_short!("registry"))
             .unwrap_or_else(|| panic!("Not initialized"));
         let registry_client = RegistryClient::new(&env, &registry_addr);
+        // CEI: Read-only cross-contract call before state mutations.
         let invoice: Invoice = registry_client.get_invoice(&invoice_id);
         assert!(
             invoice.status == InvoiceStatus::Pending,
@@ -399,6 +401,7 @@ impl FinancingContract {
             .get(&symbol_short!("registry"))
             .unwrap_or_else(|| panic!("Not initialized"));
         let registry_client = RegistryClient::new(&env, &registry_addr);
+        // CEI: Read-only cross-contract call.
         let invoice: Invoice = registry_client.get_invoice(&offer.invoice_id);
 
         if invoice.originator != invoice_originator {
@@ -411,6 +414,7 @@ impl FinancingContract {
         // Pull the lender's principal and pay it straight to the business.
         let token_id = resolve_token(&env, &offer.currency);
         let token_client = token::TokenClient::new(&env, &token_id);
+        // CEI: External interaction before state writes. Safe because token is a standard Soroban token without reentrant hooks.
         token_client.transfer_from(
             &env.current_contract_address(),
             &offer.lender,
@@ -426,6 +430,7 @@ impl FinancingContract {
         // Cross-contract: mark the invoice Financed in the registry via the
         // system transition (the financing contract is the authorized caller;
         // user auth does not propagate across contract boundaries in Soroban).
+        // CEI: External interaction before local state writes (stats). Safe because registry is a trusted protocol contract.
         registry_client.financing_marks_invoice_financed(&offer.invoice_id);
 
         // Mint the lender's position token representing their claim on this
@@ -439,6 +444,7 @@ impl FinancingContract {
             // internally via require_auth, which resolves through implicit
             // contract-invoker auth when we call it cross-contract.
             let pos_client = token::StellarAssetClient::new(&env, &pos_token);
+            // CEI: External interaction before local state writes. Safe because pos_token is a trusted admin-configured token.
             pos_client.mint(&offer.lender, &offer.amount);
             env.events().publish(
                 (symbol_short!("pos_mint"), offer.id.clone()),
@@ -481,6 +487,7 @@ impl FinancingContract {
             .get(&symbol_short!("registry"))
             .unwrap_or_else(|| panic!("Not initialized"));
         let registry_client = RegistryClient::new(&env, &registry_addr);
+        // CEI: Read-only cross-contract call before state mutations.
         let invoice: Invoice = registry_client.get_invoice(&offer.invoice_id);
         if invoice.originator != invoice_originator {
             panic!("Only the invoice originator can reject offers");
@@ -728,6 +735,7 @@ impl FinancingContract {
             .get(&symbol_short!("registry"))
             .unwrap_or_else(|| panic!("Not initialized"));
         let registry_client = RegistryClient::new(&env, &registry_addr);
+        // CEI: Read-only cross-contract call before state mutations.
         let invoice: Invoice = registry_client.get_invoice(&offer.invoice_id);
 
         if caller != offer.lender && caller != invoice.originator {
