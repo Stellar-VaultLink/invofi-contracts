@@ -7,6 +7,17 @@ and are enforced by commitlint in CI.
 
 ## [Unreleased]
 
+### Added
+- **Cross-crate integration test harness** — new `integration/` workspace crate
+  that deploys all five contracts (registry, financing, repayment, insurance,
+  reputation) with mock tokens and drives the full invoice lifecycle across
+  contract boundaries. Tests cover every cross-crate boundary: registry ↔
+  financing (offer acceptance), financing ↔ repayment (repay), repayment ↔
+  insurance (default payout), repayment ↔ reputation (outcome recording),
+  and registry ↔ repayment (overdue/delegate). At least one happy-path and
+  one negative test per boundary. Existing per-crate unit tests are untouched
+  (issue #103).
+
 ### Docs
 - **Migration runbook**: add `docs/migration-runbook.md` with the snapshot
   state reads, the five-contract redeploy (workflow and manual stellar-cli
