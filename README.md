@@ -257,6 +257,13 @@ Thanks to everyone who has contributed to InvoFi — the list below is generated
                 </a>
             </td>
             <td align="center">
+                <a href="https://github.com/Abdulrasaq1515">
+                    <img src="https://avatars.githubusercontent.com/u/209874744?v=4" width="100;" alt="Abdulrasaq1515"/>
+                    <br />
+                    <sub><b>Abdulrasaq1515</b></sub>
+                </a>
+            </td>
+            <td align="center">
                 <a href="https://github.com/MJ-RWA">
                     <img src="https://avatars.githubusercontent.com/u/240063069?v=4" width="100;" alt="MJ-RWA"/>
                     <br />
@@ -271,19 +278,21 @@ Thanks to everyone who has contributed to InvoFi — the list below is generated
                 </a>
             </td>
             <td align="center">
-                <a href="https://github.com/DevSolex">
-                    <img src="https://avatars.githubusercontent.com/u/220715997?v=4" width="100;" alt="DevSolex"/>
-                    <br />
-                    <sub><b>Dev solex</b></sub>
-                </a>
-            </td>
-            <td align="center">
                 <a href="https://github.com/p3ris0n">
                     <img src="https://avatars.githubusercontent.com/u/94976593?v=4" width="100;" alt="p3ris0n"/>
                     <br />
                     <sub><b>Promise Raji</b></sub>
                 </a>
             </td>
+            <td align="center">
+                <a href="https://github.com/DevSolex">
+                    <img src="https://avatars.githubusercontent.com/u/220715997?v=4" width="100;" alt="DevSolex"/>
+                    <br />
+                    <sub><b>Dev solex</b></sub>
+                </a>
+            </td>
+		</tr>
+		<tr>
             <td align="center">
                 <a href="https://github.com/RawNuke">
                     <img src="https://avatars.githubusercontent.com/u/67506722?v=4" width="100;" alt="RawNuke"/>
