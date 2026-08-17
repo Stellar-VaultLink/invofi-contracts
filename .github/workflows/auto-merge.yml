@@ -4,8 +4,9 @@ name: Auto-merge bot
 #
 # Behavior:
 #   - Reviews every open PR: a summary review on first sight, an approving
-#     review when CI is green, or a review note listing failed checks when a
-#     required check fails.
+#     review when CI is green, or a review that explains WHAT failed when a
+#     required check fails (error details pulled from the check annotations
+#     and the failed job's log — not just the check name).
 #   - Auto-merges once all required CI checks pass: normal merge by
 #     default (preserves history); rebase when the branch is behind base.
 #     Never squashes — squash rewrites history and can hide changes.
@@ -116,6 +117,64 @@ jobs:
             fi
           done
 
+          # Build a per-check failure summary: annotations first (what the
+          # checks UI shows), then error lines from the failed job's log.
+          failure_report() {
+            local SHA="$1"
+            local OUT="" NAME ID CONC URL R RUN_ID JOB_ID
+            local CHECK_JSON ANN ERRS
+            CHECK_JSON="$(gh api "repos/${REPO}/commits/${SHA}/check-runs" \
+              --jq '.check_runs[] | select(.conclusion != null)
+                | select(.conclusion != "success")
+                | select(.conclusion != "neutral")
+                | select(.conclusion != "skipped")
+                | [.name, (.id|tostring), .conclusion, (.details_url // "")]
+                | @tsv' 2>/dev/null || true)"
+            while IFS=$'\t' read -r NAME ID CONC URL; do
+              [ -n "${NAME}" ] || continue
+              NEEDED=false
+              for R in "${REQUIRED[@]}"; do
+                [ "${R}" = "${NAME}" ] && NEEDED=true
+              done
+              [ "${NEEDED}" = "true" ] || continue
+              OUT+="* **${NAME}** (\`${CONC}\`)"
+              ANN="$(gh api "repos/${REPO}/check-runs/${ID}/annotations" \
+                --jq '[.[] | select(.level == "failure")
+                  | "- " + (.title // "") + " — " + (.message // "")]
+                  | .[:5] | join("\n")' 2>/dev/null | cut -c1-250 || true)"
+              if [ -n "${ANN}" ]; then
+                OUT+=$'\n'"${ANN}"
+              else
+                RUN_ID="$(printf '%s' "${URL}" \
+                  | sed -n 's#.*/runs/\([0-9][0-9]*\).*#\1#p')"
+                if [ -n "${RUN_ID}" ]; then
+                  JOB_ID="$(gh api \
+                    "repos/${REPO}/actions/runs/${RUN_ID}/jobs" \
+                    --jq '.jobs[] | select(.conclusion != "success")
+                      | .id' 2>/dev/null | head -1 || true)"
+                  if [ -n "${JOB_ID}" ]; then
+                    ERRS="$(gh api \
+                      "repos/${REPO}/actions/jobs/${JOB_ID}/logs" \
+                      2>/dev/null \
+                      | sed -E 's/^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9:.]+Z[[:space:]]*//' \
+                      | grep -aiE 'error|failed|panic|✖|✗|⧗|FAILED' \
+                      | grep -aviE 'runner|watchdog|cleanup|post job' \
+                      | grep -aviE 'process-completion|docker run|failOnErrors|INPUT_' \
+                      | sed -e 's/##\[error\]/❌ /' -e 's/##\[warning\]/⚠️ /' \
+                      | head -8 | sed 's/^/  /' | cut -c1-250 || true)"
+                    if [ -n "${ERRS}" ]; then
+                      OUT+=$'\n'"${ERRS}"
+                    else
+                      OUT+=$'\n'"  (no details — see the check log)"
+                    fi
+                  fi
+                fi
+              fi
+              OUT+=$'\n'
+            done <<< "${CHECK_JSON}"
+            printf '%s' "${OUT}"
+          }
+
           for PR in "${PRS[@]}"; do
             echo "── PR #${PR} ──"
 
@@ -146,9 +205,9 @@ jobs:
             if [ "${EXISTING}" -eq 0 ] && [ "${SELF}" != "true" ]; then
               SUMMARY="$(gh pr view "${PR}" --repo "${REPO}" \
                 --json title,changedFiles,additions,deletions \
-                --jq '"`" + .title + "` — +" + (.additions|tostring)
-                  + "/−" + (.deletions|tostring) + " across "
-                  + (.changedFiles|tostring) + " file(s)."' \
+                --jq '\"`\" + .title + \"` — +\" + (.additions|tostring)
+                  + \"/−\" + (.deletions|tostring) + \" across \"
+                  + (.changedFiles|tostring) + \" file(s).\"' \
                 2>/dev/null || echo "PR #${PR}")"
               BODY="🤖 **Bot review** — ${SUMMARY}"
               BODY+=$'\n\n'
@@ -199,20 +258,22 @@ jobs:
 
             if [ "${OUTCOME}" = "fail" ]; then
               echo "  FAILED:${FAILED}"
+              MARKER="<!-- BOT-FAIL-REPORT sha=${SHA} -->"
               ALREADY="$(gh pr view "${PR}" --repo "${REPO}" \
                 --json reviews \
                 --jq "[.reviews[] | select(.author.login == \"${BOT_LOGIN}\")
-                  | select(.commit.oid == \"${SHA}\")
-                  | select(.body | contains(\"did not pass\"))] | length" \
+                  | select(.body | contains(\"${MARKER}\"))] | length" \
                 2>/dev/null || echo 0)"
               if [ "${ALREADY}" -eq 0 ]; then
-                BODY="🤖 **Bot review** — the following required CI checks"
-                BODY+=" did not pass:"
+                REPORT="$(failure_report "${SHA}")"
+                if [ -z "${REPORT}" ]; then REPORT="${FAILED}"; fi
+                BODY="🤖 **Bot review** — ❌ CI failed. What broke:"
                 BODY+=$'\n\n'
-                BODY+="${FAILED}"
+                BODY+="${REPORT}"
                 BODY+=$'\n\n'
-                BODY+="Please fix them and push — I will re-check"
-                BODY+=" automatically."
+                BODY+="${MARKER}"
+                BODY+=$'\n'
+                BODY+="Please fix and push — I will re-check automatically."
                 gh pr review "${PR}" --repo "${REPO}" --comment \
                   --body "${BODY}" 2>/dev/null || true
               fi
@@ -231,9 +292,9 @@ jobs:
                 | select(.state == \"APPROVED\")] | length" \
               2>/dev/null || echo 0)"
             if [ "${APPROVED}" -eq 0 ] && [ "${SELF}" != "true" ]; then
-              BODY="🤖 **Bot review** — all required CI checks passed."
+              BODY="🤖 **Bot review** — ✅ All required CI checks passed."
               BODY+=$'\n'
-              BODY+="Merging automatically."
+              BODY+="Merging now."
               gh pr review "${PR}" --repo "${REPO}" --approve \
                 --body "${BODY}" 2>/dev/null || true
             fi
@@ -243,8 +304,18 @@ jobs:
             # possible, rebase instead. Never squash — it rewrites history.
             if gh pr merge "${PR}" --repo "${REPO}" --merge 2>/dev/null; then
               echo "  ✅ merged #${PR}"
+              if [ "${SELF}" != "true" ]; then
+                gh pr comment "${PR}" --repo "${REPO}" \
+                  --body "🎉 Merged — thanks for the contribution!" \
+                  2>/dev/null || true
+              fi
             elif gh pr merge "${PR}" --repo "${REPO}" --rebase 2>/dev/null; then
               echo "  ✅ rebased and merged #${PR}"
+              if [ "${SELF}" != "true" ]; then
+                gh pr comment "${PR}" --repo "${REPO}" \
+                  --body "🎉 Merged — thanks for the contribution!" \
+                  2>/dev/null || true
+              fi
             else
               BODY="🤖 **Bot review** — CI is green but I could not merge"
               BODY+=$'\n'
