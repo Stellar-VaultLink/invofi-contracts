@@ -834,6 +834,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "invofi-integration"
+version = "0.7.0"
+dependencies = [
+ "invofi-common",
+ "invofi-financing",
+ "invofi-insurance",
+ "invofi-registry",
+ "invofi-repayment",
+ "invofi-reputation",
+ "soroban-sdk",
+]
+
+[[package]]
 name = "invofi-registry"
 version = "0.7.0"
 dependencies = [
