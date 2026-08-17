@@ -363,7 +363,7 @@ impl RepaymentContract {
         if let Some(insurance_addr) = insurance_opt {
             let insurance_client = InsuranceClient::new(&env, &insurance_addr);
             // CEI: External interaction. Safe because this contract has no local state to protect.
-            payout = insurance_client.pay_out(&offer.lender, &remaining_due);
+            payout = insurance_client.pay_out(&invoice_id, &offer.lender, &remaining_due);
         }
 
         // Task 11: reputation hook — record the originator's default.

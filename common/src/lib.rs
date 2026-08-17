@@ -377,8 +377,10 @@ pub trait FinancingInterface {
 pub trait InsuranceInterface {
     /// Pay `amount` to `beneficiary` from the insurance pool, capped at the
     /// pool's available balance. Only callable by the configured payout
-    /// caller (the repayment contract). Returns the amount actually paid.
-    fn pay_out(env: Env, beneficiary: Address, amount: i128) -> i128;
+    /// caller (the repayment contract). Verifies on-chain that `invoice_id`
+    /// is in `Defaulted` status before moving any funds. Returns the amount
+    /// actually paid.
+    fn pay_out(env: Env, invoice_id: Symbol, beneficiary: Address, amount: i128) -> i128;
 }
 
 // ─── Reputation Cross-Contract Interface ─────────────────────────────────────
