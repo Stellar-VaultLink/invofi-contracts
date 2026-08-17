@@ -824,3 +824,6 @@ impl FinancingContract {
 
 #[cfg(test)]
 mod test;
+
+#[cfg(test)]
+mod proptest;
