@@ -294,6 +294,13 @@ Thanks to everyone who has contributed to InvoFi — the list below is generated
 		</tr>
 		<tr>
             <td align="center">
+                <a href="https://github.com/Chigybillionz">
+                    <img src="https://avatars.githubusercontent.com/u/184784116?v=4" width="100;" alt="Chigybillionz"/>
+                    <br />
+                    <sub><b>OKORIE CHIGOZIE JEHOSHAPHAT</b></sub>
+                </a>
+            </td>
+            <td align="center">
                 <a href="https://github.com/RawNuke">
                     <img src="https://avatars.githubusercontent.com/u/67506722?v=4" width="100;" alt="RawNuke"/>
                     <br />
