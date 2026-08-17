@@ -561,3 +561,7 @@ fn test_payout_without_registry_panics() {
 
     client.pay_out(&invoice_id, &beneficiary, &500_000);
 }
+
+// NOTE: If test_pause_blocks_all_insurance_state_changes exists after merge,
+// update its pay_out call to:
+// client.pay_out(&soroban_sdk::symbol_short!("inv_x"), &beneficiary, &1_000i128);
