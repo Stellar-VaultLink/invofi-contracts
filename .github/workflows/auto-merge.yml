@@ -3,18 +3,23 @@ name: Auto-merge bot
 # Maintainer-managed bot (do NOT modify from PRs — the PR template forbids it).
 #
 # Behavior:
-#   - Reviews every open PR: a summary review on first sight, an approving
-#     review when CI is green, or a review that explains WHAT failed when a
-#     required check fails (error details pulled from the check annotations
-#     and the failed job's log — not just the check name).
-#   - Runs a diff review before merging: compares the changed files against
+#   - Code review is handled by CodeRabbit (see .coderabbit.yaml) — the bot
+#     does NOT post AI code reviews. The bot's job is merge automation plus
+#     the safety gates a reviewer can't see: CI status, scope/tamper checks,
+#     and waiting for CodeRabbit's review check-run before merging.
+#   - Reports WHAT failed when a required check fails (error details pulled
+#     from the check annotations and the failed job's log — not just the
+#     check name).
+#   - Runs a scope check before merging: compares the changed files against
 #     the scope declared in the PR title/body, flags high-risk files
 #     (workflows, lockfiles, configs) and very large diffs. If anything is
-#     flagged, the bot posts a review and holds the merge for a maintainer —
-#     a green CI is not enough when a PR drifts outside its declared scope.
-#   - Auto-merges once CI is green AND the diff review passes: normal merge
-#     by default (preserves history); rebase when the branch is behind base.
-#     Never squashes — squash rewrites history and can hide changes.
+#     flagged, the bot holds the merge for a maintainer — a green CI is not
+#     enough when a PR drifts outside its declared scope.
+#   - Waits for CodeRabbit's review check-run to complete before merging, so
+#     problems are caught before the merge, not after.
+#   - Auto-merges once CI is green AND the scope check passes AND CodeRabbit
+#     has reviewed: normal merge by default (preserves history); rebase when
+#     the branch is behind base. Never squashes — squash rewrites history.
 #   - The merge announcement lists what the PR accomplishes (from its body)
 #     before merging.
 #   - Triggers: PR events, an hourly sweep (catches PRs whose CI finished
@@ -339,29 +344,9 @@ jobs:
             SELF=false
             [ "${AUTHOR}" = "${BOT_LOGIN}" ] && SELF=true
 
-            # ── initial summary review (once per head sha) ──
-            EXISTING="$(gh pr view "${PR}" --repo "${REPO}" \
-              --json reviews \
-              --jq "[.reviews[] | select(.author.login == \"${BOT_LOGIN}\")
-                | select(.commit.oid == \"${SHA}\")] | length" \
-              2>/dev/null || echo 0)"
-            if [ "${EXISTING}" -eq 0 ] && [ "${SELF}" != "true" ]; then
-              SUMMARY="$(gh pr view "${PR}" --repo "${REPO}" \
-                --json title,changedFiles,additions,deletions \
-                --jq '\"`\" + .title + \"` — +\" + (.additions|tostring)
-                  + \"/−\" + (.deletions|tostring) + \" across \"
-                  + (.changedFiles|tostring) + \" file(s).\"' \
-                2>/dev/null || echo "PR #${PR}")"
-              BODY="🤖 **Bot review** — ${SUMMARY}"
-              BODY+=$'\n\n'
-              BODY+="I will approve and merge this PR automatically once all"
-              BODY+=" required CI checks pass and the diff review passes."
-              BODY+=$'\n'
-              BODY+="If a required check fails, I'll leave a note here for you"
-              BODY+=" to fix."
-              gh pr review "${PR}" --repo "${REPO}" --comment \
-                --body "${BODY}" 2>/dev/null || true
-            fi
+            # (No bot code-review posts — CodeRabbit handles code review.
+            #  The bot below only reports CI failures, gates scope, and
+            #  merges.)
 
             # ── wait for required checks (up to ~40 min) ──
             DEADLINE=$(( $(date +%s) + 2400 ))
@@ -410,7 +395,7 @@ jobs:
               if [ "${ALREADY}" -eq 0 ]; then
                 REPORT="$(failure_report "${SHA}")"
                 if [ -z "${REPORT}" ]; then REPORT="${FAILED}"; fi
-                BODY="🤖 **Bot review** — ❌ CI failed. What broke:"
+                BODY="🤖 **Auto-merge bot** — ❌ CI failed. What broke:"
                 BODY+=$'\n\n'
                 BODY+="${REPORT}"
                 BODY+=$'\n\n'
@@ -441,9 +426,9 @@ jobs:
                   | select(.body | contains(\"${MARKER4}\"))] | length" \
                 2>/dev/null || echo 0)"
               if [ "${ALREADY4}" -eq 0 ]; then
-                BODY4="🤖 **Bot review** — ⚠️ CI is green but my diff review"
-                BODY4+=" found scope concerns. Holding the merge for a"
-                BODY4+=" maintainer:"
+                BODY4="🤖 **Auto-merge bot** — ⚠️ CI is green but the scope"
+                BODY4+=" check found files outside the PR's declared scope."
+                BODY4+=" Holding the merge for a maintainer:"
                 BODY4+=$'\n\n'
                 BODY4+="${DREV}"
                 BODY4+=$'\n\n'
@@ -451,6 +436,43 @@ jobs:
                 gh pr review "${PR}" --repo "${REPO}" --comment \
                   --body "${BODY4}" 2>/dev/null || true
               fi
+              continue
+            fi
+
+            # ── wait for CodeRabbit's review check-run (if installed) ──
+            # CodeRabbit posts a check-run named "CodeRabbit" on the head SHA
+            # once its AI review completes. Wait for it so problems are
+            # caught BEFORE the merge, not after. If the check never appears
+            # (CodeRabbit not installed yet, or the PR was skipped), proceed
+            # without it.
+            CR_DEADLINE=$(( $(date +%s) + 600 ))
+            CR_HOLD=""
+            while [ "$(date +%s)" -lt "${CR_DEADLINE}" ]; do
+              CR_STATE="$(gh api "repos/${REPO}/commits/${SHA}/check-runs" \
+                --jq '[.check_runs[] | select((.name | ascii_downcase)
+                  | contains("coderabbit"))
+                  | (.conclusion // .status // "pending")] | last' \
+                2>/dev/null || echo "")"
+              case "${CR_STATE}" in
+                "")
+                  echo "  no CodeRabbit check — proceeding without its review"
+                  break ;;
+                success|neutral)
+                  echo "  ✅ CodeRabbit review complete (${CR_STATE})"
+                  break ;;
+                failure|cancelled|timed_out|action_required)
+                  echo "  ⚠️ CodeRabbit check ${CR_STATE} — holding for maintainer"
+                  CR_HOLD="yes"
+                  break ;;
+                *) sleep 20 ;;
+              esac
+            done
+            if [ "${CR_HOLD}" = "yes" ]; then
+              echo "  CodeRabbit flagged issues — skipping merge for maintainer"
+              continue
+            fi
+            if [ "$(date +%s)" -ge "${CR_DEADLINE}" ]; then
+              echo "  CodeRabbit still reviewing — leaving for a later run"
               continue
             fi
 
@@ -470,7 +492,8 @@ jobs:
                   + (.deletions|tostring) + \" across \"
                   + (.changedFiles|tostring) + \" file(s)\"' \
                 2>/dev/null || echo "the diff")"
-              BODY="🤖 **Bot review** — ✅ All required CI checks passed."
+              BODY="🤖 **Auto-merge bot** — ✅ All required CI checks and the"
+              BODY+=" CodeRabbit review passed."
               BODY+=$'\n'
               if [ -n "${ACCOMP}" ]; then
                 BODY+=$'\n'"**This PR accomplishes:**"$'\n'"${ACCOMP}"
@@ -491,7 +514,7 @@ jobs:
               2>/dev/null || echo 0)"
             if [ "${APPROVED}" -eq 0 ] && [ "${SELF}" != "true" ]; then
               gh pr review "${PR}" --repo "${REPO}" --approve \
-                --body "🤖 Approved — all required CI checks passed." \
+                --body "🤖 Approved — all required CI checks and the CodeRabbit review passed." \
                 2>/dev/null || true
             fi
 
@@ -525,7 +548,7 @@ jobs:
                   | select(.body | contains(\"${MARKER2}\"))] | length" \
                 2>/dev/null || echo 0)"
               if [ "${ALREADY2}" -eq 0 ]; then
-                BODY="🤖 **Bot review** — CI is green but the merge failed:"
+                BODY="🤖 **Auto-merge bot** — checks passed but the merge failed:"
                 BODY+=$'\n\n'
                 BODY+="> ${MERGE_ERR}"
                 BODY+=$'\n\n'
