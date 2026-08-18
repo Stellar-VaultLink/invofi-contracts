@@ -356,6 +356,39 @@ pub struct TransitionRecord {
     pub timestamp: u64,
 }
 
+/// The field being amended on an invoice.
+#[contracttype]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[repr(u32)]
+pub enum AmendmentField {
+    Amount = 0,
+    DueDate = 1,
+}
+
+/// Status of an amendment request.
+#[contracttype]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[repr(u32)]
+pub enum AmendmentStatus {
+    Pending = 0,
+    Approved = 1,
+    Rejected = 2,
+}
+
+/// An on-chain audit record for an invoice amendment.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct AmendmentRecord {
+    pub field: AmendmentField,
+    pub old_amount: i128,
+    pub new_amount: i128,
+    pub old_due_date: u64,
+    pub new_due_date: u64,
+    pub reason: Symbol,
+    pub timestamp: u64,
+    pub status: AmendmentStatus,
+}
+
 /// A financing offer submitted by a lender against an invoice.
 #[contracttype]
 #[derive(Clone, Debug, Eq, PartialEq)]
