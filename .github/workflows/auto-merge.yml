@@ -219,6 +219,32 @@ jobs:
             printf '%s' "${OUT}"
           }
 
+          # Returns 0 when every +/- line in the diff for the given
+          # Cargo.toml falls under a [dev-dependencies] section, 1
+          # otherwise. Used by the scope gate to avoid false positives on
+          # test-only dependency additions (testutils features etc.).
+          toml_devdeps_only() {
+            gh pr diff "${PR}" --repo "${REPO}" 2>/dev/null \
+              | awk -v f="$1" '
+                  BEGIN { ok = 1 }
+                  /^diff --git / {
+                    file = (index($0, " b/" f) > 0) ? 1 : 0
+                    next
+                  }
+                  file {
+                    raw = $0
+                    sub(/^[+-]/, "", raw)
+                    if (raw ~ /^[[:space:]]*\[[a-zA-Z_.-]+\]/) {
+                      section = raw
+                      next
+                    }
+                    if ($0 ~ /^[+-][^+-]/ \
+                      && section !~ /dev-dependencies/) ok = 0
+                  }
+                  END { exit (ok ? 0 : 1) }
+                '
+          }
+
           # ── diff review: scope + divergence gate ──
           # Compares the PR's changed files against the scope declared in
           # its title/body. Flags out-of-scope files, high-risk files, and
@@ -272,9 +298,18 @@ jobs:
                     deps|dependabot|test|e2e|frontend|sdk|contract)
                       IN_SCOPE="yes" ;;
                     *)
-                      FLAGS+="* \`${F}\` — dependency change outside the"
-                      FLAGS+=" declared scope. Confirm intent."
-                      FLAGS+=$'\n' ;;
+                      # A Cargo.toml change that only touches
+                      # [dev-dependencies] (e.g. testutils features added
+                      # for the PR's own tests) is part of the change, not
+                      # scope creep — don't flag it.
+                      if [[ "${F}" == *Cargo.toml ]] \
+                         && toml_devdeps_only "${F}"; then
+                        IN_SCOPE="yes"
+                      else
+                        FLAGS+="* \`${F}\` — dependency change outside the"
+                        FLAGS+=" declared scope. Confirm intent."
+                        FLAGS+=$'\n'
+                      fi ;;
                   esac ;;
               esac
               if [ "${IN_SCOPE}" = "no" ]; then
