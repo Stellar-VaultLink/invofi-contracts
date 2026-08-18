@@ -1,24 +1,127 @@
 #![no_std]
 
-use soroban_sdk::{contract, contractimpl, symbol_short, Address, Env, Map, Symbol, Vec};
+use soroban_sdk::{
+    contract, contractimpl, symbol_short,
+    xdr::ToXdr,
+    Address, Env, Map, Symbol, Vec,
+};
 
 use invofi_common::{
-    assert_not_paused, Invoice, InvoiceStatus, ProtocolStats, RiskTier, MIN_INVOICE_AMOUNT,
+    assert_not_paused, Invoice, InvoiceStatus, ProtocolStats, RiskTier, StorageEvictionReason,
+    DEFAULT_INVOICE_STORAGE_BUDGET_BYTES, EVICTION_GRACE_PERIOD_SECS, MIN_INVOICE_AMOUNT,
+    TERMINAL_INVOICE_RETENTION_SECS,
 };
 
 // ─── Storage Helpers ─────────────────────────────────────────────────────────
 
-fn load_invoices(env: &Env) -> Map<Symbol, Invoice> {
-    env.storage()
-        .persistent()
-        .get(&symbol_short!("invoices"))
-        .unwrap_or(Map::new(env))
+fn invoice_key(id: &Symbol) -> (Symbol, Symbol) {
+    (symbol_short!("inv"), id.clone())
 }
 
-fn save_invoices(env: &Env, map: &Map<Symbol, Invoice>) {
+fn terminal_at_key(id: &Symbol) -> (Symbol, Symbol) {
+    (symbol_short!("term_at"), id.clone())
+}
+
+fn load_invoice_ids(env: &Env) -> Vec<Symbol> {
     env.storage()
         .persistent()
-        .set(&symbol_short!("invoices"), map);
+        .get(&symbol_short!("inv_ids"))
+        .unwrap_or(Vec::new(env))
+}
+
+fn save_invoice_ids(env: &Env, ids: &Vec<Symbol>) {
+    env.storage().persistent().set(&symbol_short!("inv_ids"), ids);
+}
+
+fn load_invoice(env: &Env, id: &Symbol) -> Option<Invoice> {
+    env.storage().persistent().get(&invoice_key(id))
+}
+
+fn invoice_storage_bytes(env: &Env, invoice: &Invoice) -> u32 {
+    // SDK 22 exposes no Storage::bytes API. XDR is the SDK's canonical
+    // serialization, so this is the deterministic size attributed to the
+    // invoice key/value payload (not ledger-entry framing).
+    invoice_key(&invoice.id)
+        .to_xdr(env)
+        .len()
+        .saturating_add(invoice.clone().to_xdr(env).len())
+}
+
+fn invoice_storage_budget(env: &Env) -> u32 {
+    env.storage()
+        .instance()
+        .get(&symbol_short!("inv_budg"))
+        .unwrap_or(DEFAULT_INVOICE_STORAGE_BUDGET_BYTES)
+}
+
+fn assert_invoice_within_budget(env: &Env, invoice: &Invoice) {
+    if invoice_storage_bytes(env, invoice) > invoice_storage_budget(env) {
+        panic!("Invoice storage budget exceeded");
+    }
+}
+
+fn save_invoice(env: &Env, invoice: &Invoice) {
+    assert_invoice_within_budget(env, invoice);
+    env.storage().persistent().set(&invoice_key(&invoice.id), invoice);
+}
+
+fn is_terminal(status: &InvoiceStatus) -> bool {
+    *status == InvoiceStatus::Repaid
+        || *status == InvoiceStatus::Defaulted
+        || *status == InvoiceStatus::Cancelled
+}
+
+fn save_terminal_timestamp(env: &Env, invoice: &Invoice) {
+    let key = terminal_at_key(&invoice.id);
+    if is_terminal(&invoice.status) {
+        env.storage().persistent().set(&key, &env.ledger().timestamp());
+        let max_ttl = env.storage().max_ttl();
+        env.storage().persistent().extend_ttl(&key, max_ttl, max_ttl);
+        env.storage()
+            .persistent()
+            .extend_ttl(&invoice_key(&invoice.id), max_ttl, max_ttl);
+        env.storage()
+            .persistent()
+            .extend_ttl(&symbol_short!("inv_ids"), max_ttl, max_ttl);
+    } else {
+        env.storage().persistent().remove(&key);
+    }
+}
+
+fn load_invoices(env: &Env) -> Map<Symbol, Invoice> {
+    let mut invoices = Map::new(env);
+    for id in load_invoice_ids(env).iter() {
+        if let Some(invoice) = load_invoice(env, &id) {
+            invoices.set(id, invoice);
+        }
+    }
+    invoices
+}
+
+fn save_invoices(env: &Env, invoices: &Map<Symbol, Invoice>) {
+    for (_id, invoice) in invoices.iter() {
+        save_invoice(env, &invoice);
+    }
+}
+
+fn add_invoice_id(env: &Env, id: &Symbol) {
+    let mut ids = load_invoice_ids(env);
+    ids.push_back(id.clone());
+    save_invoice_ids(env, &ids);
+    let max_ttl = env.storage().max_ttl();
+    env.storage()
+        .persistent()
+        .extend_ttl(&symbol_short!("inv_ids"), max_ttl, max_ttl);
+}
+
+fn remove_invoice_id(env: &Env, id: &Symbol) {
+    let mut retained = Vec::new(env);
+    for existing_id in load_invoice_ids(env).iter() {
+        if existing_id != *id {
+            retained.push_back(existing_id);
+        }
+    }
+    save_invoice_ids(env, &retained);
 }
 
 fn load_rates(env: &Env) -> Map<RiskTier, u32> {
@@ -81,6 +184,61 @@ fn assert_admin(env: &Env, caller: &Address) {
     if current != *caller {
         panic!("Only the current admin can perform this action");
     }
+}
+
+fn assert_keeper(env: &Env, caller: &Address) {
+    caller.require_auth();
+    let keeper: Address = env
+        .storage()
+        .instance()
+        .get(&symbol_short!("strgkeep"))
+        .unwrap_or_else(|| panic!("Storage keeper not configured"));
+    if keeper != *caller {
+        panic!("Only the storage keeper can perform this action");
+    }
+}
+
+fn assert_evictable(env: &Env, invoice: &Invoice) {
+    if !is_invoice_eviction_eligible(env, invoice) {
+        if !is_terminal(&invoice.status) {
+            panic!("Only terminal invoices can be evicted");
+        }
+        panic!("Invoice retention and eviction grace periods have not elapsed");
+    }
+}
+
+fn is_invoice_eviction_eligible(env: &Env, invoice: &Invoice) -> bool {
+    if !is_terminal(&invoice.status) {
+        return false;
+    }
+    let Some(terminal_at) = env
+        .storage()
+        .persistent()
+        .get::<_, u64>(&terminal_at_key(&invoice.id))
+    else {
+        return false;
+    };
+    let Some(eligible_at) = terminal_at
+        .checked_add(TERMINAL_INVOICE_RETENTION_SECS)
+        .and_then(|timestamp| timestamp.checked_add(EVICTION_GRACE_PERIOD_SECS))
+    else {
+        return false;
+    };
+    env.ledger().timestamp() >= eligible_at
+}
+
+fn evict_invoice(env: &Env, id: &Symbol, reason: StorageEvictionReason) -> u32 {
+    let invoice = load_invoice(env, id).unwrap_or_else(|| panic!("Invoice not found"));
+    assert_evictable(env, &invoice);
+    let reclaimed_bytes = invoice_storage_bytes(env, &invoice);
+    env.storage().persistent().remove(&invoice_key(id));
+    env.storage().persistent().remove(&terminal_at_key(id));
+    remove_invoice_id(env, id);
+    env.events().publish(
+        (Symbol::new(env, "storage_evicted"), id.clone()),
+        (reason, reclaimed_bytes),
+    );
+    reclaimed_bytes
 }
 
 // ─── Contract ────────────────────────────────────────────────────────────────
@@ -257,6 +415,7 @@ impl RegistryContract {
         };
         invoices.set(id, invoice.clone());
         save_invoices(&env, &invoices);
+        add_invoice_id(&env, &invoice.id);
 
         let mut s = load_stats(&env);
         s.total_invoices += 1;
@@ -271,8 +430,7 @@ impl RegistryContract {
 
     /// Get an invoice by ID.
     pub fn get_invoice(env: Env, id: Symbol) -> Invoice {
-        load_invoices(&env)
-            .get(id)
+        load_invoice(&env, &id)
             .unwrap_or_else(|| panic!("Invoice not found"))
     }
 
@@ -299,6 +457,7 @@ impl RegistryContract {
         invoice.status = new_status.clone();
         invoices.set(id, invoice.clone());
         save_invoices(&env, &invoices);
+        save_terminal_timestamp(&env, &invoice);
         env.events()
             .publish((symbol_short!("inv_sts"), invoice.id.clone()), new_status);
         invoice
@@ -330,6 +489,7 @@ impl RegistryContract {
         invoice.amount = new_amount;
         invoices.set(invoice_id, invoice.clone());
         save_invoices(&env, &invoices);
+        save_terminal_timestamp(&env, &invoice);
         env.events().publish(
             (symbol_short!("inv_amt"), invoice.id.clone()),
             new_amount,
@@ -354,6 +514,7 @@ impl RegistryContract {
         invoice.status = InvoiceStatus::Cancelled;
         invoices.set(invoice_id, invoice.clone());
         save_invoices(&env, &invoices);
+        save_terminal_timestamp(&env, &invoice);
         env.events().publish(
             (symbol_short!("inv_cxl"), invoice.id.clone()),
             invoice.originator.clone(),
@@ -387,6 +548,7 @@ impl RegistryContract {
         };
         invoices.set(id, invoice.clone());
         save_invoices(&env, &invoices);
+        save_terminal_timestamp(&env, &invoice);
         env.events()
             .publish((symbol_short!("inv_sts"), invoice.id.clone()), invoice.status.clone());
         invoice
@@ -416,6 +578,7 @@ impl RegistryContract {
         invoice.status = InvoiceStatus::Financed;
         invoices.set(id, invoice.clone());
         save_invoices(&env, &invoices);
+        save_terminal_timestamp(&env, &invoice);
         env.events().publish(
             (symbol_short!("inv_sts"), invoice.id.clone()),
             InvoiceStatus::Financed,
@@ -449,6 +612,7 @@ impl RegistryContract {
         };
         invoices.set(id, invoice.clone());
         save_invoices(&env, &invoices);
+        save_terminal_timestamp(&env, &invoice);
         env.events()
             .publish((symbol_short!("inv_sts"), invoice.id.clone()), invoice.status.clone());
         invoice
@@ -480,6 +644,7 @@ impl RegistryContract {
         invoice.status = InvoiceStatus::Defaulted;
         invoices.set(id, invoice.clone());
         save_invoices(&env, &invoices);
+        save_terminal_timestamp(&env, &invoice);
         env.events().publish(
             (symbol_short!("inv_def"), invoice.id.clone()),
             invoice.originator.clone(),
@@ -531,6 +696,7 @@ impl RegistryContract {
         invoice.status = InvoiceStatus::Disputed;
         invoices.set(invoice_id, invoice.clone());
         save_invoices(&env, &invoices);
+        save_terminal_timestamp(&env, &invoice);
         env.events().publish(
             (symbol_short!("inv_dsp"), invoice.id.clone()),
             invoice.originator.clone(),
@@ -560,6 +726,7 @@ impl RegistryContract {
         invoice.status = target_status;
         invoices.set(invoice_id, invoice.clone());
         save_invoices(&env, &invoices);
+        save_terminal_timestamp(&env, &invoice);
         env.events().publish(
             (symbol_short!("inv_rsl"), invoice.id.clone()),
             invoice.status.clone(),
@@ -568,6 +735,95 @@ impl RegistryContract {
     }
 
     // ── Query helpers ────────────────────────────────────────────────────────
+
+    /// Configure the account authorized to run storage maintenance. Panics
+    /// unless `admin` is the current admin.
+    pub fn set_storage_keeper(env: Env, admin: Address, keeper: Address) {
+        assert_not_paused(&env);
+        assert_admin(&env, &admin);
+        env.storage()
+            .instance()
+            .set(&symbol_short!("strgkeep"), &keeper);
+    }
+
+    /// Return the configured storage keeper, if one has been configured.
+    pub fn get_storage_keeper(env: Env) -> Option<Address> {
+        env.storage().instance().get(&symbol_short!("strgkeep"))
+    }
+
+    /// Configure the maximum XDR key/value payload size permitted for an
+    /// invoice. Panics unless `admin` is current admin or `bytes` is nonzero.
+    pub fn set_invoice_storage_budget(env: Env, admin: Address, bytes: u32) {
+        assert_not_paused(&env);
+        assert_admin(&env, &admin);
+        if bytes == 0 {
+            panic!("Invoice storage budget must be greater than zero");
+        }
+        env.storage().instance().set(&symbol_short!("inv_budg"), &bytes);
+    }
+
+    /// Return the invoice storage budget. Defaults to 10 KiB.
+    pub fn get_invoice_storage_budget(env: Env) -> u32 {
+        invoice_storage_budget(&env)
+    }
+
+    /// Return the deterministic XDR key/value payload size attributed to an
+    /// invoice. SDK 22 does not expose host storage-byte accounting.
+    pub fn get_invoice_storage_bytes(env: Env, id: Symbol) -> u32 {
+        let invoice = load_invoice(&env, &id).unwrap_or_else(|| panic!("Invoice not found"));
+        invoice_storage_bytes(&env, &invoice)
+    }
+
+    /// Return whether a terminal invoice has passed both retention windows.
+    /// Missing invoices and non-terminal invoices return `false`.
+    pub fn is_invoice_eviction_eligible(env: Env, id: Symbol) -> bool {
+        let Some(invoice) = load_invoice(&env, &id) else {
+            return false;
+        };
+        is_invoice_eviction_eligible(&env, &invoice)
+    }
+
+    /// Extend an active invoice's persistent-entry TTL to the network maximum.
+    /// Panics unless `keeper` is configured and authorized, or the invoice is
+    /// terminal. The ID index is bumped at the same time so keeper queries
+    /// remain available.
+    pub fn bump_invoice_ttl(env: Env, keeper: Address, id: Symbol) {
+        assert_not_paused(&env);
+        assert_keeper(&env, &keeper);
+        let invoice = load_invoice(&env, &id).unwrap_or_else(|| panic!("Invoice not found"));
+        if is_terminal(&invoice.status) {
+            panic!("Terminal invoices cannot have their active TTL bumped");
+        }
+        let max_ttl = env.storage().max_ttl();
+        env.storage()
+            .persistent()
+            .extend_ttl(&invoice_key(&id), max_ttl, max_ttl);
+        env.storage()
+            .persistent()
+            .extend_ttl(&symbol_short!("inv_ids"), max_ttl, max_ttl);
+        env.events().publish(
+            (Symbol::new(&env, "ttl_bumped"), id),
+            (keeper, max_ttl),
+        );
+    }
+
+    /// Evict an eligible terminal invoice during keeper automation. Panics
+    /// unless `keeper` is authorized and the one-year retention plus 30-day
+    /// notice period have elapsed. Returns XDR payload bytes reclaimed.
+    pub fn keeper_evict_invoice(env: Env, keeper: Address, id: Symbol) -> u32 {
+        assert_not_paused(&env);
+        assert_keeper(&env, &keeper);
+        evict_invoice(&env, &id, StorageEvictionReason::RetentionExpired)
+    }
+
+    /// Evict an eligible terminal invoice at the admin's direction. This does
+    /// not bypass the retention or notice period. Returns XDR payload bytes
+    /// reclaimed and emits `storage_evicted` with reason `Admin`.
+    pub fn evict_invoice(env: Env, admin: Address, id: Symbol) -> u32 {
+        assert_not_paused(&env);
+        assert_admin(&env, &admin);
+        evict_invoice(&env, &id, StorageEvictionReason::Admin)
+    }
 
     pub fn get_invoices_by_status(env: Env, status: InvoiceStatus) -> Vec<Invoice> {
         let invoices = load_invoices(&env);

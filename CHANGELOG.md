@@ -8,6 +8,15 @@ and are enforced by commitlint in CI.
 ## [Unreleased]
 
 ### Added
+- **Storage rent lifecycle management** — registry invoices are stored as
+  individually TTL-manageable persistent entries. Terminal invoices record a
+  one-year retention timestamp followed by a 30-day eviction grace period;
+  authorized keepers can bump active TTLs or evict eligible records, while
+  admins can perform the same eligible manual eviction. `storage_evicted` and
+  `ttl_bumped` events include the eviction reason, serialized bytes reclaimed,
+  keeper, and target TTL. A configurable per-invoice serialized storage budget
+  defaults to 10 KiB (SDK 22 has no host `storage().bytes()` API, so XDR size is
+  used for deterministic accounting).
 - **Cross-crate integration test harness** — new `integration/` workspace crate
   that deploys all five contracts (registry, financing, repayment, insurance,
   reputation) with mock tokens and drives the full invoice lifecycle across

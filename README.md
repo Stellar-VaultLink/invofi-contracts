@@ -67,6 +67,12 @@ register_invoice()  →  create_offer()  →  accept_offer()
 | `__constructor(admin)` | Deployer (at deploy) | Sets admin atomically in the deploy operation — no `initialize()` to front-run (ADR-0005) |
 | `register_invoice(id, originator, amount, currency, due_date)` | Originator | Register invoice; rejects dust (< 10 XLM) and past-due dates |
 | `get_invoice(id)` | Anyone | Read invoice state |
+| `get_invoices_by_status(status)` | Anyone | Keeper-friendly lifecycle query |
+| `set_storage_keeper(admin, keeper)` | Admin | Authorize storage maintenance automation |
+| `bump_invoice_ttl(keeper, id)` | Storage keeper | Extend an active invoice's persistent TTL |
+| `keeper_evict_invoice(keeper, id)` | Storage keeper | Evict an eligible terminal invoice |
+| `evict_invoice(admin, id)` | Admin | Manually evict an eligible terminal invoice |
+| `set_invoice_storage_budget(admin, bytes)` | Admin | Set the per-invoice serialized storage cap |
 | `cancel_invoice(id, originator)` | Originator | Cancel a Pending invoice |
 | `set_financing_contract(admin, addr)` / `set_repayment_contract(admin, addr)` | Admin | Authorize the only cross-contract callers |
 | `financing_marks_invoice_financed(id)` | financing | System transition: Pending → Financed |
@@ -172,6 +178,8 @@ Every state-mutating function publishes a Soroban contract event. Topics are
 | `pool_un` | `unstake` (insurance) | `amount` |
 | `pool_pay` | `pay_out` (insurance) | `amount paid` |
 | `reputn` | `record_outcome` (reputation) | `outcome` |
+| `storage_evicted` | registry eviction | `(reason, reclaimed_bytes)` |
+| `ttl_bumped` | registry keeper maintenance | `(keeper, extend_to_ledgers)` |
 
 ---
 
@@ -183,6 +191,9 @@ Every state-mutating function publishes a Soroban contract event. Topics are
 | `MIN_OFFER_DURATION_SECS` | 86,400 | Minimum offer duration (1 day) |
 | `MAX_OFFER_DURATION_SECS` | 31,536,000 | Maximum offer duration (1 year) |
 | `MIN_INVOICE_AMOUNT` | 10,000,000 | Minimum invoice amount in stroops (10 XLM / 10 USDC) |
+| `DEFAULT_INVOICE_STORAGE_BUDGET_BYTES` | 10,240 | Default serialized per-invoice storage budget (10 KiB) |
+| `TERMINAL_INVOICE_RETENTION_SECS` | 31,536,000 | One-year retention after terminal transition |
+| `EVICTION_GRACE_PERIOD_SECS` | 2,592,000 | 30-day eviction notice after retention |
 
 ---
 

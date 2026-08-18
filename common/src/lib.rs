@@ -25,6 +25,15 @@ pub const MAX_OFFER_DURATION_SECS: u64 = 31_536_000;
 /// Prevents dust invoices that would cost more in fees than they're worth.
 pub const MIN_INVOICE_AMOUNT: i128 = 10_000_000;
 
+/// Default maximum serialized storage attributed to one invoice record.
+pub const DEFAULT_INVOICE_STORAGE_BUDGET_BYTES: u32 = 10 * 1024;
+
+/// Retain a terminal invoice for one calendar year before its eviction notice.
+pub const TERMINAL_INVOICE_RETENTION_SECS: u64 = 31_536_000;
+
+/// Notice period between the retention threshold and eviction eligibility.
+pub const EVICTION_GRACE_PERIOD_SECS: u64 = 2_592_000;
+
 // ─── Types ───────────────────────────────────────────────────────────────────
 
 /// Risk tier for yield-rate lookups. A = low risk, C = high risk.
@@ -61,6 +70,15 @@ pub enum InvoiceStatus {
     Cancelled = 4,
     Disputed = 5,
     Defaulted = 6,
+}
+
+/// Why a terminal invoice was removed from registry storage.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+#[repr(u32)]
+pub enum StorageEvictionReason {
+    RetentionExpired = 0,
+    Admin = 1,
 }
 
 /// A financing offer submitted by a lender against an invoice.
