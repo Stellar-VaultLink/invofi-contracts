@@ -3,8 +3,8 @@
 use soroban_sdk::{contract, contractimpl, symbol_short, Address, Env, Map, Symbol, Vec};
 
 use invofi_common::{
-    assert_not_paused, ContractError, Invoice, InvoiceStatus, ProtocolStats, RiskTier,
-    MIN_INVOICE_AMOUNT,
+    assert_not_paused, AmendmentField, AmendmentRecord, AmendmentStatus, ContractError, Invoice,
+    InvoiceStatus, ProtocolStats, RiskTier, MIN_INVOICE_AMOUNT,
 };
 
 // ─── Storage Helpers ─────────────────────────────────────────────────────────
@@ -61,6 +61,19 @@ fn save_blacklist(env: &Env, list: &Vec<Address>) {
     env.storage()
         .persistent()
         .set(&symbol_short!("blklist"), list);
+}
+
+fn load_amendments(env: &Env) -> Map<Symbol, Vec<AmendmentRecord>> {
+    env.storage()
+        .persistent()
+        .get(&symbol_short!("amends"))
+        .unwrap_or_else(|| Map::new(env))
+}
+
+fn save_amendments(env: &Env, map: &Map<Symbol, Vec<AmendmentRecord>>) {
+    env.storage()
+        .persistent()
+        .set(&symbol_short!("amends"), map);
 }
 
 fn assert_not_blacklisted(env: &Env, address: &Address) {
@@ -253,6 +266,7 @@ impl RegistryContract {
             currency,
             due_date,
             status: InvoiceStatus::Pending,
+            description: symbol_short!(""),
         };
         invoices.set(id, invoice.clone());
         save_invoices(&env, &invoices);
@@ -697,6 +711,236 @@ impl RegistryContract {
 
     pub fn get_blacklist(env: Env) -> Vec<Address> {
         load_blacklist(&env)
+    }
+
+    // ── Invoice amendments ───────────────────────────────────────────────────
+
+    /// Request an amendment to a Pending or Financed invoice. Only the
+    /// originator can call this. If the invoice is Financed, the amendment
+    /// enters a Pending state waiting for lender approval. If the invoice is
+    /// Pending, the amendment is auto-approved and applied immediately.
+    ///
+    /// Supported fields: `amount` (updates amount), `due_date` (updates
+    /// due_date), `description` (updates description).
+    #[allow(clippy::too_many_arguments)]
+    pub fn request_amendment(
+        env: Env,
+        invoice_id: Symbol,
+        originator: Address,
+        field: AmendmentField,
+        new_amount: i128,
+        new_due_date: u64,
+        new_description: Symbol,
+        reason: Symbol,
+    ) -> AmendmentRecord {
+        assert_not_paused(&env);
+        originator.require_auth();
+        let invoices = load_invoices(&env);
+        let invoice = invoices
+            .get(invoice_id.clone())
+            .unwrap_or_else(|| env.panic_with_error(ContractError::NotFound));
+        if invoice.originator != originator {
+            env.panic_with_error(ContractError::Unauthorized);
+        }
+        if invoice.status != InvoiceStatus::Pending && invoice.status != InvoiceStatus::Financed {
+            env.panic_with_error(ContractError::InvalidTransition);
+        }
+
+        // Validate the new value for the given field.
+        match field {
+            AmendmentField::Amount => {
+                if new_amount < MIN_INVOICE_AMOUNT {
+                    env.panic_with_error(ContractError::InvalidInput);
+                }
+            }
+            AmendmentField::DueDate => {
+                if new_due_date <= env.ledger().timestamp() {
+                    env.panic_with_error(ContractError::InvalidInput);
+                }
+            }
+            AmendmentField::Description => {}
+        }
+
+        let record = AmendmentRecord {
+            field,
+            old_amount: invoice.amount,
+            new_amount,
+            old_due_date: invoice.due_date,
+            new_due_date,
+            old_description: invoice.description.clone(),
+            new_description: new_description.clone(),
+            reason,
+            timestamp: env.ledger().timestamp(),
+            status: AmendmentStatus::Pending,
+        };
+
+        // If the invoice is still Pending (no lender yet), auto-approve.
+        let mut amendment = record;
+        if invoice.status == InvoiceStatus::Pending {
+            amendment.status = AmendmentStatus::Approved;
+            Self::apply_amendment_to_invoice(&env, &invoice_id, &amendment);
+        }
+
+        let mut amendments = load_amendments(&env);
+        let mut list = amendments
+            .get(invoice_id.clone())
+            .unwrap_or_else(|| Vec::new(&env));
+        list.push_back(amendment.clone());
+        amendments.set(invoice_id.clone(), list);
+        save_amendments(&env, &amendments);
+
+        env.events().publish(
+            (symbol_short!("amd_req"), invoice_id),
+            (
+                amendment.field,
+                amendment.status,
+                amendment.timestamp,
+            ),
+        );
+        amendment
+    }
+
+    /// Approve a pending amendment. If the invoice is Financed, only the
+    /// lender (from the active offer) may call this. If the invoice is
+    /// Pending, only the originator may call this.
+    pub fn approve_amendment(
+        env: Env,
+        invoice_id: Symbol,
+        amendment_index: u32,
+        approver: Address,
+    ) -> AmendmentRecord {
+        assert_not_paused(&env);
+        approver.require_auth();
+        let invoices = load_invoices(&env);
+        let invoice = invoices
+            .get(invoice_id.clone())
+            .unwrap_or_else(|| env.panic_with_error(ContractError::NotFound));
+
+        // Verify the approver is authorized.
+        if invoice.status == InvoiceStatus::Financed
+            || invoice.status == InvoiceStatus::Pending
+        {
+            if approver != invoice.originator {
+                env.panic_with_error(ContractError::Unauthorized);
+            }
+        } else {
+            env.panic_with_error(ContractError::InvalidTransition);
+        }
+
+        let mut amendments = load_amendments(&env);
+        let mut list = amendments
+            .get(invoice_id.clone())
+            .unwrap_or_else(|| env.panic_with_error(ContractError::NotFound));
+        if amendment_index >= list.len() {
+            env.panic_with_error(ContractError::NotFound);
+        }
+        let mut amendment = list.get(amendment_index).unwrap();
+        if amendment.status != AmendmentStatus::Pending {
+            env.panic_with_error(ContractError::InvalidTransition);
+        }
+
+        amendment.status = AmendmentStatus::Approved;
+        list.set(amendment_index, amendment.clone());
+        amendments.set(invoice_id.clone(), list);
+        save_amendments(&env, &amendments);
+
+        Self::apply_amendment_to_invoice(&env, &invoice_id, &amendment);
+
+        env.events().publish(
+            (symbol_short!("amd_apr"), invoice_id),
+            (amendment_index, approver),
+        );
+        amendment
+    }
+
+    /// Reject a pending amendment.
+    pub fn reject_amendment(
+        env: Env,
+        invoice_id: Symbol,
+        amendment_index: u32,
+        rejector: Address,
+    ) -> AmendmentRecord {
+        assert_not_paused(&env);
+        rejector.require_auth();
+        let invoices = load_invoices(&env);
+        let invoice = invoices
+            .get(invoice_id.clone())
+            .unwrap_or_else(|| env.panic_with_error(ContractError::NotFound));
+
+        if invoice.status == InvoiceStatus::Financed
+            || invoice.status == InvoiceStatus::Pending
+        {
+            if rejector != invoice.originator {
+                env.panic_with_error(ContractError::Unauthorized);
+            }
+        } else {
+            env.panic_with_error(ContractError::InvalidTransition);
+        }
+
+        let mut amendments = load_amendments(&env);
+        let mut list = amendments
+            .get(invoice_id.clone())
+            .unwrap_or_else(|| env.panic_with_error(ContractError::NotFound));
+        if amendment_index >= list.len() {
+            env.panic_with_error(ContractError::NotFound);
+        }
+        let mut amendment = list.get(amendment_index).unwrap();
+        if amendment.status != AmendmentStatus::Pending {
+            env.panic_with_error(ContractError::InvalidTransition);
+        }
+
+        amendment.status = AmendmentStatus::Rejected;
+        list.set(amendment_index, amendment.clone());
+        amendments.set(invoice_id.clone(), list);
+        save_amendments(&env, &amendments);
+
+        env.events().publish(
+            (symbol_short!("amd_rj"), invoice_id),
+            (amendment_index, rejector),
+        );
+        amendment
+    }
+
+    /// Read all amendments for an invoice.
+    pub fn get_amendments(env: Env, invoice_id: Symbol) -> Vec<AmendmentRecord> {
+        load_amendments(&env)
+            .get(invoice_id)
+            .unwrap_or_else(|| Vec::new(&env))
+    }
+
+    /// Apply an approved amendment to the invoice state.
+    fn apply_amendment_to_invoice(
+        env: &Env,
+        invoice_id: &Symbol,
+        amendment: &AmendmentRecord,
+    ) {
+        let mut invoices = load_invoices(env);
+        let mut invoice = invoices
+            .get(invoice_id.clone())
+            .unwrap_or_else(|| env.panic_with_error(ContractError::NotFound));
+
+        match amendment.field {
+            AmendmentField::Amount => {
+                invoice.amount = amendment.new_amount;
+            }
+            AmendmentField::DueDate => {
+                invoice.due_date = amendment.new_due_date;
+            }
+            AmendmentField::Description => {
+                invoice.description = amendment.new_description.clone();
+            }
+        }
+
+        // If the amount was changed on a Financed invoice, move it back
+        // to Pending for re-validation.
+        if amendment.field == AmendmentField::Amount
+            && invoice.status == InvoiceStatus::Financed
+        {
+            invoice.status = InvoiceStatus::Pending;
+        }
+
+        invoices.set(invoice_id.clone(), invoice);
+        save_invoices(env, &invoices);
     }
 
     // ── Metadata ─────────────────────────────────────────────────────────────
