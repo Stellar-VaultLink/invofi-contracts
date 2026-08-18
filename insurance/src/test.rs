@@ -610,7 +610,7 @@ mod schema_version_tests {
     use crate::InsuranceContractClient;
     use soroban_sdk::{symbol_short, testutils::Address as _, token, Address, Env};
 
-    fn deploy(env: &Env, admin: &Address) -> (Address, Address, InsuranceContractClient) {
+    fn deploy<'a>(env: &'a Env, admin: &Address) -> (Address, Address, InsuranceContractClient<'a>) {
         let sac = env.register_stellar_asset_contract_v2(admin.clone());
         let token_id = sac.address();
         let contract_id = env.register(InsuranceContract, (admin.clone(), token_id.clone()));

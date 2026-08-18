@@ -1524,16 +1524,17 @@ fn test_daily_frequency_period() {
 
 mod schema_version_tests {
     use super::FinancingContract;
+    use crate::FinancingContractClient;
     use invofi_registry::RegistryContract;
     use soroban_sdk::{symbol_short, testutils::Address as _, Address, Env};
 
-    fn deploy(env: &Env) -> (Address, Address, super::FinancingContractClient) {
+    fn deploy(env: &'_ Env) -> (Address, Address, FinancingContractClient<'_>) {
         let admin = Address::generate(env);
         let token = Address::generate(env);
         let registry_id = env.register(RegistryContract, (admin.clone(),));
         let financing_id =
             env.register(FinancingContract, (admin.clone(), registry_id.clone(), token.clone()));
-        let client = super::FinancingContractClient::new(env, &financing_id);
+        let client = FinancingContractClient::new(env, &financing_id);
         invofi_registry::RegistryContractClient::new(env, &registry_id)
             .set_financing_contract(&admin, &financing_id);
         (admin, financing_id, client)

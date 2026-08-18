@@ -537,7 +537,25 @@ mod schema_version_tests {
     extern crate std;
 
     use super::{assert_schema_version, write_schema_version, ContractError};
-    use soroban_sdk::{symbol_short, Env};
+    use soroban_sdk::{contract, contractimpl, symbol_short, Address, Env};
+
+    // ── Dummy contract ────────────────────────────────────────────────────────
+    // Soroban's `env.storage()` can only be accessed from within a contract
+    // execution context. We register a minimal no-op contract here so every
+    // test can call `env.as_contract(&id, || {...})` to wrap the
+    // `write_schema_version` / `assert_schema_version` invocations.
+
+    #[contract]
+    struct Dummy;
+
+    #[contractimpl]
+    impl Dummy {}
+
+    fn setup() -> (Env, Address) {
+        let env = Env::default();
+        let id = env.register(Dummy, ());
+        (env, id)
+    }
 
     // ── Helper constants ──────────────────────────────────────────────────────
 
@@ -551,20 +569,23 @@ mod schema_version_tests {
     /// `assert_schema_version` must pass silently so legacy instances keep working.
     #[test]
     fn legacy_absent_key_succeeds() {
-        let env = Env::default();
+        let (env, id) = setup();
         // No write_schema_version call — key is absent, simulating pre-versioning deployment.
-        assert_schema_version(&env, V1); // must not panic
+        env.as_contract(&id, || {
+            assert_schema_version(&env, V1); // must not panic
+        });
     }
 
     /// Verify that after `write_schema_version` the key is present (not absent).
     #[test]
     fn written_key_is_present() {
-        let env = Env::default();
-        write_schema_version(&env, V1);
-        let stored: Option<u32> = env
-            .storage()
-            .instance()
-            .get(&symbol_short!("schver"));
+        let (env, id) = setup();
+        env.as_contract(&id, || {
+            write_schema_version(&env, V1);
+        });
+        let stored: Option<u32> = env.as_contract(&id, || {
+            env.storage().instance().get(&symbol_short!("schver"))
+        });
         assert_eq!(stored, Some(V1));
     }
 
@@ -574,20 +595,24 @@ mod schema_version_tests {
     /// `assert_schema_version` must proceed normally (no panic).
     #[test]
     fn matching_version_succeeds() {
-        let env = Env::default();
-        write_schema_version(&env, V1);
-        assert_schema_version(&env, V1); // must not panic
+        let (env, id) = setup();
+        env.as_contract(&id, || {
+            write_schema_version(&env, V1);
+            assert_schema_version(&env, V1); // must not panic
+        });
     }
 
     /// Matching version continues to succeed even when called multiple times
     /// (idempotent read).
     #[test]
     fn matching_version_idempotent() {
-        let env = Env::default();
-        write_schema_version(&env, V1);
-        assert_schema_version(&env, V1);
-        assert_schema_version(&env, V1);
-        assert_schema_version(&env, V1);
+        let (env, id) = setup();
+        env.as_contract(&id, || {
+            write_schema_version(&env, V1);
+            assert_schema_version(&env, V1);
+            assert_schema_version(&env, V1);
+            assert_schema_version(&env, V1);
+        });
     }
 
     // ── Mismatch → panic (SchemaMismatch = discriminant 10) ──────────────────
@@ -597,9 +622,11 @@ mod schema_version_tests {
     #[test]
     #[should_panic(expected = "Error(Contract, #10)")]
     fn stored_newer_panics() {
-        let env = Env::default();
-        write_schema_version(&env, V2);
-        assert_schema_version(&env, V1); // stored=2, expected=1 → mismatch
+        let (env, id) = setup();
+        env.as_contract(&id, || {
+            write_schema_version(&env, V2);
+            assert_schema_version(&env, V1); // stored=2, expected=1 → mismatch
+        });
     }
 
     /// When the stored version is lower than expected (binary is ahead of stored),
@@ -607,18 +634,22 @@ mod schema_version_tests {
     #[test]
     #[should_panic(expected = "Error(Contract, #10)")]
     fn stored_older_panics() {
-        let env = Env::default();
-        write_schema_version(&env, V1);
-        assert_schema_version(&env, V2); // stored=1, expected=2 → mismatch
+        let (env, id) = setup();
+        env.as_contract(&id, || {
+            write_schema_version(&env, V1);
+            assert_schema_version(&env, V2); // stored=1, expected=2 → mismatch
+        });
     }
 
     /// A wider gap also panics — version numbers are exact-match, not ranges.
     #[test]
     #[should_panic(expected = "Error(Contract, #10)")]
     fn large_version_gap_panics() {
-        let env = Env::default();
-        write_schema_version(&env, 5);
-        assert_schema_version(&env, 1);
+        let (env, id) = setup();
+        env.as_contract(&id, || {
+            write_schema_version(&env, 5);
+            assert_schema_version(&env, 1);
+        });
     }
 
     // ── write_schema_version overwrite ────────────────────────────────────────
@@ -628,13 +659,15 @@ mod schema_version_tests {
     /// use the new value.
     #[test]
     fn write_advances_version() {
-        let env = Env::default();
-        write_schema_version(&env, V1);
-        assert_schema_version(&env, V1); // ok
+        let (env, id) = setup();
+        env.as_contract(&id, || {
+            write_schema_version(&env, V1);
+            assert_schema_version(&env, V1); // ok
 
-        // Simulate what migrate() does at the end of a successful pass.
-        write_schema_version(&env, V2);
-        assert_schema_version(&env, V2); // ok with new version
+            // Simulate what migrate() does at the end of a successful pass.
+            write_schema_version(&env, V2);
+            assert_schema_version(&env, V2); // ok with new version
+        });
     }
 
     /// After advancing the version, the old expected value panics — callers
@@ -642,10 +675,12 @@ mod schema_version_tests {
     #[test]
     #[should_panic(expected = "Error(Contract, #10)")]
     fn old_expected_fails_after_advance() {
-        let env = Env::default();
-        write_schema_version(&env, V1);
-        write_schema_version(&env, V2);
-        assert_schema_version(&env, V1); // stored=2, expected=1 → mismatch
+        let (env, id) = setup();
+        env.as_contract(&id, || {
+            write_schema_version(&env, V1);
+            write_schema_version(&env, V2);
+            assert_schema_version(&env, V1); // stored=2, expected=1 → mismatch
+        });
     }
 
     // ── SchemaMismatch discriminant value ────────────────────────────────────
