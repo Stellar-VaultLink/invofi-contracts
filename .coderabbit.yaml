@@ -14,11 +14,12 @@ reviews:
   # protocol repo). The bot holds the merge until this review is done, so
   # being thorough costs nothing.
   profile: assertive
-  # Keep CodeRabbit reviews non-blocking on their own: issues are reported in
-  # the review, but the bot (scope gate + CI + CodeRabbit check) owns the
-  # merge decision. Set to true only if you want CodeRabbit's "request
-  # changes" to block merges directly.
-  request_changes_workflow: false
+  # When CodeRabbit finds issues it posts a REQUEST_CHANGES review, and the
+  # auto-merge bot holds the merge until that is resolved (CodeRabbit
+  # re-reviews on each push). This is what stops problems from being
+  # discovered only after a merge. Set false only if you want issues
+  # reported without ever blocking the merge.
+  request_changes_workflow: true
   # High-level summary of the PR in the review comment.
   high_level_summary: true
   # No poems — keep the review professional.

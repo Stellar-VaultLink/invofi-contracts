@@ -474,23 +474,30 @@ jobs:
               continue
             fi
 
-            # ── wait for CodeRabbit's review check-run (if installed) ──
-            # CodeRabbit posts a check-run named "CodeRabbit" on the head SHA
-            # once its AI review completes. Wait for it so problems are
-            # caught BEFORE the merge, not after. If the check never appears
-            # (CodeRabbit not installed yet, or the PR was skipped), proceed
-            # without it.
+            # ── wait for CodeRabbit's review (if installed) ──
+            # CodeRabbit reports completion as a legacy commit status
+            # (context "CodeRabbit") and/or a check-run on the head SHA.
+            # Wait for it so problems are caught BEFORE the merge, not after.
+            # If no CodeRabbit status ever appears (not installed yet, or the
+            # PR was skipped), proceed without it.
             CR_DEADLINE=$(( $(date +%s) + 600 ))
             CR_HOLD=""
             while [ "$(date +%s)" -lt "${CR_DEADLINE}" ]; do
-              CR_STATE="$(gh api "repos/${REPO}/commits/${SHA}/check-runs" \
+              CR_STATE="$( { gh api \
+                "repos/${REPO}/commits/${SHA}/check-runs" \
                 --jq '[.check_runs[] | select((.name | ascii_downcase)
                   | contains("coderabbit"))
                   | (.conclusion // .status // "pending")] | last' \
-                2>/dev/null || echo "")"
+                2>/dev/null; \
+                gh api "repos/${REPO}/commits/${SHA}/status" \
+                --jq '[.statuses[] | select((.context | ascii_downcase)
+                  | contains("coderabbit"))
+                  | (.state | ascii_downcase
+                    | if . == "error" then "failure" else . end)] | last' \
+                2>/dev/null; } | grep -v '^$' | tail -1 )"
               case "${CR_STATE}" in
                 "")
-                  echo "  no CodeRabbit check — proceeding without its review"
+                  echo "  no CodeRabbit status — proceeding without its review"
                   break ;;
                 success|neutral)
                   echo "  ✅ CodeRabbit review complete (${CR_STATE})"
@@ -508,6 +515,20 @@ jobs:
             fi
             if [ "$(date +%s)" -ge "${CR_DEADLINE}" ]; then
               echo "  CodeRabbit still reviewing — leaving for a later run"
+              continue
+            fi
+            # Hold the merge while CodeRabbit has an active REQUEST_CHANGES
+            # review on this head (issues not yet resolved). CodeRabbit posts
+            # REQUEST_CHANGES when .coderabbit.yaml sets
+            # request_changes_workflow: true and it finds issues; it re-reviews
+            # on each push and the review clears once they're addressed.
+            CR_REQ="$(gh api "repos/${REPO}/pulls/${PR}/reviews" \
+              --jq "[.[] | select(.user.login == \"coderabbitai[bot]\")
+                | select(.state == \"REQUEST_CHANGES\")
+                | select(.commit_id == \"${SHA}\")] | length" \
+              2>/dev/null || echo 0)"
+            if [ "${CR_REQ:-0}" -gt 0 ]; then
+              echo "  CodeRabbit requested changes — holding merge for maintainer"
               continue
             fi
 
