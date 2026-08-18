@@ -2,7 +2,10 @@
 extern crate std;
 
 use super::RegistryContract;
-use invofi_common::{InvoiceStatus, RiskTier, VerificationStatus, VerificationType};
+use invofi_common::{
+    AmendmentField, AmendmentStatus, InvoiceStatus, RiskTier, VerificationStatus,
+    VerificationType,
+};
 use soroban_sdk::{
     symbol_short,
     testutils::{Address as _, Events as _, Ledger as _},
@@ -3376,5 +3379,234 @@ fn test_rotated_out_verifiers_cannot_lock_an_invoice() {
     assert_eq!(
         client.get_verification_status(&invoice_id, &VerificationType::DocumentHash),
         VerificationStatus::Verified
+    );
+}
+
+// ─── Amendment tests (#185) ──────────────────────────────────────────────────
+
+#[test]
+fn test_request_amendment_amount_on_pending_auto_approves() {
+    let env = Env::default();
+    env.mock_all_auths();
+    env.ledger().set_timestamp(1_000_000);
+    let contract_id = env.register(RegistryContract, (Address::generate(&env),));
+    let client = super::RegistryContractClient::new(&env, &contract_id);
+
+    let originator = Address::generate(&env);
+    client.register_invoice(
+        &symbol_short!("amd1"),
+        &originator,
+        &10_000_000i128,
+        &symbol_short!("XLM"),
+        &3_000_000u64,
+    );
+
+    let amendment = client.request_amendment(
+        &symbol_short!("amd1"),
+        &originator,
+        &AmendmentField::Amount,
+        &20_000_000i128,
+        &0u64,
+        &symbol_short!("fix"),
+    );
+
+    assert_eq!(amendment.status, AmendmentStatus::Approved);
+    assert_eq!(amendment.old_amount, 10_000_000i128);
+    assert_eq!(amendment.new_amount, 20_000_000i128);
+
+    let invoice = client.get_invoice(&symbol_short!("amd1"));
+    assert_eq!(invoice.amount, 20_000_000i128);
+}
+
+#[test]
+fn test_request_amendment_due_date_on_pending_auto_approves() {
+    let env = Env::default();
+    env.mock_all_auths();
+    env.ledger().set_timestamp(1_000_000);
+    let contract_id = env.register(RegistryContract, (Address::generate(&env),));
+    let client = super::RegistryContractClient::new(&env, &contract_id);
+
+    let originator = Address::generate(&env);
+    client.register_invoice(
+        &symbol_short!("amd2"),
+        &originator,
+        &10_000_000i128,
+        &symbol_short!("XLM"),
+        &3_000_000u64,
+    );
+
+    let amendment = client.request_amendment(
+        &symbol_short!("amd2"),
+        &originator,
+        &AmendmentField::DueDate,
+        &0i128,
+        &4_000_000u64,
+        &symbol_short!("ext"),
+    );
+
+    assert_eq!(amendment.status, AmendmentStatus::Approved);
+    assert_eq!(amendment.old_due_date, 3_000_000u64);
+    assert_eq!(amendment.new_due_date, 4_000_000u64);
+
+    let invoice = client.get_invoice(&symbol_short!("amd2"));
+    assert_eq!(invoice.due_date, 4_000_000u64);
+}
+
+#[test]
+fn test_get_amendments_empty() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let contract_id = env.register(RegistryContract, (Address::generate(&env),));
+    let client = super::RegistryContractClient::new(&env, &contract_id);
+
+    assert_eq!(client.get_amendments(&symbol_short!("nope")).len(), 0);
+}
+
+#[test]
+#[should_panic(expected = "Error(Contract, #1)")] // ContractError::Unauthorized
+fn test_request_amendment_unauthorized_panics() {
+    let env = Env::default();
+    env.mock_all_auths();
+    env.ledger().set_timestamp(1_000_000);
+    let contract_id = env.register(RegistryContract, (Address::generate(&env),));
+    let client = super::RegistryContractClient::new(&env, &contract_id);
+
+    let originator = Address::generate(&env);
+    client.register_invoice(
+        &symbol_short!("amd3"),
+        &originator,
+        &10_000_000i128,
+        &symbol_short!("XLM"),
+        &3_000_000u64,
+    );
+
+    // Not the originator -> must panic.
+    client.request_amendment(
+        &symbol_short!("amd3"),
+        &Address::generate(&env),
+        &AmendmentField::Amount,
+        &20_000_000i128,
+        &0u64,
+        &symbol_short!("fix"),
+    );
+}
+
+#[test]
+#[should_panic(expected = "Error(Contract, #6)")] // ContractError::InvalidInput
+fn test_request_amendment_invalid_amount_panics() {
+    let env = Env::default();
+    env.mock_all_auths();
+    env.ledger().set_timestamp(1_000_000);
+    let contract_id = env.register(RegistryContract, (Address::generate(&env),));
+    let client = super::RegistryContractClient::new(&env, &contract_id);
+
+    let originator = Address::generate(&env);
+    client.register_invoice(
+        &symbol_short!("amd4"),
+        &originator,
+        &10_000_000i128,
+        &symbol_short!("XLM"),
+        &3_000_000u64,
+    );
+
+    // Below MIN_INVOICE_AMOUNT -> must panic.
+    client.request_amendment(
+        &symbol_short!("amd4"),
+        &originator,
+        &AmendmentField::Amount,
+        &1i128,
+        &0u64,
+        &symbol_short!("fix"),
+    );
+}
+
+#[test]
+#[should_panic(expected = "Error(Contract, #3)")] // ContractError::InvalidTransition
+fn test_request_amendment_on_financed_panics() {
+    // Only Pending invoices are amendable in this pass; Financed invoices need
+    // the lender-approval flow (follow-up issue).
+    let env = Env::default();
+    env.mock_all_auths();
+    env.ledger().set_timestamp(1_000_000);
+    let contract_id = env.register(RegistryContract, (Address::generate(&env),));
+    let client = super::RegistryContractClient::new(&env, &contract_id);
+
+    let originator = Address::generate(&env);
+    client.register_invoice(
+        &symbol_short!("amd5"),
+        &originator,
+        &10_000_000i128,
+        &symbol_short!("XLM"),
+        &3_000_000u64,
+    );
+    client.update_invoice_status(
+        &symbol_short!("amd5"),
+        &originator,
+        &InvoiceStatus::Financed,
+    );
+
+    client.request_amendment(
+        &symbol_short!("amd5"),
+        &originator,
+        &AmendmentField::Amount,
+        &20_000_000i128,
+        &0u64,
+        &symbol_short!("fix"),
+    );
+}
+
+#[test]
+#[should_panic(expected = "Error(Contract, #3)")] // ContractError::InvalidTransition
+fn test_request_amendment_on_repaid_panics() {
+    let env = Env::default();
+    env.mock_all_auths();
+    env.ledger().set_timestamp(1_000_000);
+    let contract_id = env.register(RegistryContract, (Address::generate(&env),));
+    let client = super::RegistryContractClient::new(&env, &contract_id);
+
+    let originator = Address::generate(&env);
+    client.register_invoice(
+        &symbol_short!("amd6"),
+        &originator,
+        &10_000_000i128,
+        &symbol_short!("XLM"),
+        &3_000_000u64,
+    );
+    client.update_invoice_status(
+        &symbol_short!("amd6"),
+        &originator,
+        &InvoiceStatus::Financed,
+    );
+    client.update_invoice_status(
+        &symbol_short!("amd6"),
+        &originator,
+        &InvoiceStatus::Repaid,
+    );
+
+    client.request_amendment(
+        &symbol_short!("amd6"),
+        &originator,
+        &AmendmentField::Amount,
+        &20_000_000i128,
+        &0u64,
+        &symbol_short!("fix"),
+    );
+}
+
+#[test]
+#[should_panic(expected = "Error(Contract, #2)")] // ContractError::NotFound
+fn test_request_amendment_on_nonexistent_invoice_panics() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let contract_id = env.register(RegistryContract, (Address::generate(&env),));
+    let client = super::RegistryContractClient::new(&env, &contract_id);
+
+    client.request_amendment(
+        &symbol_short!("ghost"),
+        &Address::generate(&env),
+        &AmendmentField::Amount,
+        &20_000_000i128,
+        &0u64,
+        &symbol_short!("fix"),
     );
 }
