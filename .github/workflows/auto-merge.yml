@@ -474,7 +474,33 @@ jobs:
               continue
             fi
 
-            # ── wait for CodeRabbit's review (if installed) ──
+            # ── CodeRabbit review: trigger, then wait (if installed) ──
+            # CodeRabbit normally auto-reviews on push events (webhook), but
+            # as a fallback — e.g. a PR opened before the app was installed,
+            # or a missed webhook — ask it to review now. Deduped per head
+            # sha, so a merge never happens without a CodeRabbit review.
+            CR_PRESENT="$( { gh api \
+              "repos/${REPO}/commits/${SHA}/check-runs" \
+              --jq '[.check_runs[] | select((.name | ascii_downcase)
+                | contains("coderabbit"))] | length' 2>/dev/null; \
+              gh api "repos/${REPO}/commits/${SHA}/status" \
+              --jq '[.statuses[] | select((.context | ascii_downcase)
+                | contains("coderabbit"))] | length' 2>/dev/null; } \
+              | awk '{s+=$1} END {print s+0}' )"
+            if [ "${CR_PRESENT:-0}" -eq 0 ] && [ "${SELF}" != "true" ]; then
+              CR_MARKER="<!-- BOT-CR-TRIGGER sha=${SHA} -->"
+              CR_TRIGGERED="$(gh api "repos/${REPO}/issues/${PR}/comments" \
+                --jq "[.[] | select(.user.login == \"${BOT_LOGIN}\")
+                  | select(.body | contains(\"${CR_MARKER}\"))] | length" \
+                2>/dev/null || echo 0)"
+              if [ "${CR_TRIGGERED:-0}" -eq 0 ]; then
+                echo "  CodeRabbit has not reviewed this head — requesting one"
+                CR_BODY="$(printf '@coderabbitai review\n%s' "${CR_MARKER}")"
+                gh pr comment "${PR}" --repo "${REPO}" \
+                  --body "${CR_BODY}" 2>/dev/null || true
+              fi
+            fi
+
             # CodeRabbit reports completion as a legacy commit status
             # (context "CodeRabbit") and/or a check-run on the head SHA.
             # Wait for it so problems are caught BEFORE the merge, not after.
