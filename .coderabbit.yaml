@@ -1,0 +1,36 @@
+# CodeRabbit AI code review configuration.
+# Full reference: https://docs.coderabbit.ai/reference/configuration
+#
+# Division of labor with the auto-merge bot (.github/workflows/auto-merge.yml):
+#   - CodeRabbit does the actual code review (summary, walkthrough, line-level
+#     comments) on every PR.
+#   - The auto-merge bot does NOT post code reviews. It gates on CI status and
+#     PR scope, waits for CodeRabbit's review check-run to complete, and then
+#     merges.
+language: en-US
+
+reviews:
+  # assertive: thorough reviews (the default "chill" is too light for a
+  # protocol repo). The bot holds the merge until this review is done, so
+  # being thorough costs nothing.
+  profile: assertive
+  # When CodeRabbit finds issues it posts a REQUEST_CHANGES review, and the
+  # auto-merge bot holds the merge until that is resolved (CodeRabbit
+  # re-reviews on each push). This is what stops problems from being
+  # discovered only after a merge. Set false only if you want issues
+  # reported without ever blocking the merge.
+  request_changes_workflow: true
+  # High-level summary of the PR in the review comment.
+  high_level_summary: true
+  # No poems — keep the review professional.
+  poem: false
+  # Show the walkthrough expanded (not collapsed) so findings are visible.
+  collapse_walkthrough: false
+  # Post review-status updates (e.g. when a review is skipped).
+  review_status: true
+  auto_review:
+    enabled: true
+    drafts: false
+
+chat:
+  auto_reply: true

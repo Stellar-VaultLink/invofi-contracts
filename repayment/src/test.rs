@@ -177,7 +177,7 @@ fn test_repay_invoice_partial_then_full() {
 // ─── Edge case tests ──────────────────────────────────────────────────────
 
 #[test]
-#[should_panic(expected = "Repayment amount exceeds remaining balance")]
+#[should_panic(expected = "Error(Contract, #5)")]
 fn test_repay_invoice_overpayment_panics() {
     let env = Env::default();
     env.mock_all_auths();
@@ -247,7 +247,7 @@ fn test_repay_invoice_overpayment_panics() {
 }
 
 #[test]
-#[should_panic(expected = "Invoice must be Financed before repayment")]
+#[should_panic(expected = "Error(Contract, #3)")]
 fn test_repay_unfinanced_invoice_panics() {
     let env = Env::default();
     env.mock_all_auths();
@@ -424,7 +424,7 @@ fn test_reclaim_invoice_after_grace_period() {
 }
 
 #[test]
-#[should_panic(expected = "Grace period has not elapsed")]
+#[should_panic(expected = "Error(Contract, #3)")]
 fn test_reclaim_before_grace_period_panics() {
     let env = Env::default();
     env.mock_all_auths();
@@ -489,7 +489,7 @@ fn test_reclaim_before_grace_period_panics() {
 }
 
 #[test]
-#[should_panic(expected = "Invoice must be Overdue before reclaim")]
+#[should_panic(expected = "Error(Contract, #3)")]
 fn test_reclaim_on_non_overdue_panics() {
     let env = Env::default();
     env.mock_all_auths();
@@ -725,7 +725,7 @@ fn test_get_duration_limits() {
 // ─── Task 4A: emergency pause / circuit breaker ──────────────────────────────
 
 #[test]
-#[should_panic(expected = "Contract is paused")]
+#[should_panic(expected = "Error(Contract, #4)")]
 fn test_pause_blocks_repay_invoice() {
     let env = Env::default();
     env.mock_all_auths();
@@ -1156,4 +1156,479 @@ fn test_repayment_get_installment_due_zero_after_full_repay() {
     // Advance past all 12 periods — proxy must return 0 (Repaid offer).
     env.ledger().set_timestamp(first_due + 12 * 604_800 + 1);
     assert_eq!(rep.get_installment_due(&symbol_short!("off_fd")), 0);
+}
+
+// ─── Overdue penalty interest (ADR-0007, issue #49) ─────────────────────────
+
+/// Principal for the penalty fixtures.
+const PEN_AMOUNT: i128 = 1_000_000_000;
+/// 5.00% flat yield → 50_000_000.
+const PEN_RATE: u32 = 500;
+/// The **frozen** accrual base: principal + yield. Per ADR-0007 decision 2
+/// this does not shrink as repayments land.
+const PEN_TOTAL_DUE: i128 = 1_050_000_000;
+/// Invoice due date used by every penalty fixture.
+const PEN_DUE_DATE: u64 = 1_735_689_600;
+/// 0.10% per day of the frozen base → 1_050_000 per elapsed day.
+const PEN_BPS: u32 = 10;
+/// Ceiling at 30% of the frozen base → 315_000_000, reached at day 300.
+const PEN_CAP_BPS: u32 = 3_000;
+const PEN_PER_DAY: i128 = 1_050_000;
+const PEN_CAP: i128 = 315_000_000;
+
+struct PenCase<'a> {
+    reg: invofi_registry::RegistryContractClient<'a>,
+    fin: invofi_financing::FinancingContractClient<'a>,
+    rep: super::RepaymentContractClient<'a>,
+    token_id: Address,
+    registry_id: Address,
+    repayment_id: Address,
+    admin: Address,
+    originator: Address,
+    lender: Address,
+}
+
+/// A Financed invoice of `PEN_AMOUNT` at `PEN_RATE`, due at `PEN_DUE_DATE`,
+/// with the originator funded well past `PEN_TOTAL_DUE` so tests can settle
+/// principal, yield and penalty. Penalty accrual is left **disabled** — each
+/// test opts in via `set_penalty`, which is the deployed default per ADR-0007
+/// decision 6.
+fn setup_penalty_case<'a>(env: &'a Env) -> PenCase<'a> {
+    let admin = Address::generate(env);
+    let originator = Address::generate(env);
+    let lender = Address::generate(env);
+
+    let token_id = create_token(env);
+    let registry_id = env.register(RegistryContract, (admin.clone(),));
+    let reg = invofi_registry::RegistryContractClient::new(env, &registry_id);
+
+    let financing_id = env.register(
+        FinancingContract,
+        (admin.clone(), registry_id.clone(), token_id.clone()),
+    );
+    let fin = invofi_financing::FinancingContractClient::new(env, &financing_id);
+
+    let repayment_id = env.register(
+        RepaymentContract,
+        (
+            admin.clone(),
+            registry_id.clone(),
+            financing_id.clone(),
+            token_id.clone(),
+        ),
+    );
+    let rep = super::RepaymentContractClient::new(env, &repayment_id);
+
+    mint_and_approve(env, &token_id, &financing_id, &lender, PEN_AMOUNT);
+    fin.set_repayment_contract(&admin, &repayment_id);
+    reg.set_repayment_contract(&admin, &repayment_id);
+    reg.set_financing_contract(&admin, &financing_id);
+
+    reg.register_invoice(
+        &symbol_short!("inv_pen"),
+        &originator,
+        &PEN_AMOUNT,
+        &symbol_short!("USDC"),
+        &PEN_DUE_DATE,
+    );
+    fin.create_offer(
+        &symbol_short!("off_pen"),
+        &symbol_short!("inv_pen"),
+        &lender,
+        &PEN_AMOUNT,
+        &symbol_short!("USDC"),
+        &PEN_RATE,
+        &(2_592_000u64),
+    );
+    fin.accept_offer(&symbol_short!("off_pen"), &originator);
+
+    // Fund the originator beyond the capped worst case.
+    token::StellarAssetClient::new(env, &token_id).mint(&originator, &2_000_000_000);
+
+    PenCase {
+        reg,
+        fin,
+        rep,
+        token_id,
+        registry_id,
+        repayment_id,
+        admin,
+        originator,
+        lender,
+    }
+}
+
+/// Advance the ledger to exactly `days` whole days past the due date.
+fn at_days_overdue(env: &Env, days: u64) {
+    env.ledger().set_timestamp(PEN_DUE_DATE + days * 86_400);
+}
+
+#[test]
+fn test_penalty_disabled_by_default() {
+    let env = Env::default();
+    env.mock_all_auths();
+    env.ledger().set_timestamp(1_000_000);
+    let c = setup_penalty_case(&env);
+
+    // Deployed default: both parameters zero, accrual inert.
+    assert_eq!(c.rep.get_penalty_bps(), 0);
+    assert_eq!(c.rep.get_penalty_cap_bps(), 0);
+
+    // Ten days past due and still no penalty — a deployment that never calls
+    // set_penalty behaves exactly as it did before ADR-0007.
+    at_days_overdue(&env, 10);
+    assert_eq!(c.rep.calculate_penalty(&symbol_short!("off_pen")), 0);
+    assert_eq!(
+        c.rep.calculate_total_due(&symbol_short!("off_pen")),
+        PEN_TOTAL_DUE
+    );
+}
+
+#[test]
+fn test_penalty_zero_cap_disables_accrual() {
+    let env = Env::default();
+    env.mock_all_auths();
+    env.ledger().set_timestamp(1_000_000);
+    let c = setup_penalty_case(&env);
+
+    // A rate with a zero ceiling accrues nothing — the cap is a hard bound,
+    // so a zero cap is a hard zero.
+    c.rep.set_penalty(&c.admin, &PEN_BPS, &0u32);
+    at_days_overdue(&env, 10);
+    assert_eq!(c.rep.calculate_penalty(&symbol_short!("off_pen")), 0);
+}
+
+#[test]
+fn test_penalty_accrues_in_whole_days() {
+    let env = Env::default();
+    env.mock_all_auths();
+    env.ledger().set_timestamp(1_000_000);
+    let c = setup_penalty_case(&env);
+    c.rep.set_penalty(&c.admin, &PEN_BPS, &PEN_CAP_BPS);
+
+    at_days_overdue(&env, 1);
+    assert_eq!(
+        c.rep.calculate_penalty(&symbol_short!("off_pen")),
+        PEN_PER_DAY
+    );
+
+    at_days_overdue(&env, 5);
+    assert_eq!(
+        c.rep.calculate_penalty(&symbol_short!("off_pen")),
+        5 * PEN_PER_DAY
+    );
+
+    // calculate_total_due reports principal + yield + penalty - repaid.
+    assert_eq!(
+        c.rep.calculate_total_due(&symbol_short!("off_pen")),
+        PEN_TOTAL_DUE + 5 * PEN_PER_DAY
+    );
+}
+
+#[test]
+fn test_penalty_truncates_partial_day_toward_borrower() {
+    let env = Env::default();
+    env.mock_all_auths();
+    env.ledger().set_timestamp(1_000_000);
+    let c = setup_penalty_case(&env);
+    c.rep.set_penalty(&c.admin, &PEN_BPS, &PEN_CAP_BPS);
+
+    // One second short of day 5: the day in progress is not charged, so the
+    // borrower is billed for 4 days. ADR-0007 decision 3 — rounding runs in
+    // the borrower's favour, deliberately.
+    env.ledger().set_timestamp(PEN_DUE_DATE + 5 * 86_400 - 1);
+    assert_eq!(
+        c.rep.calculate_penalty(&symbol_short!("off_pen")),
+        4 * PEN_PER_DAY
+    );
+
+    // The boundary second itself tips it to 5.
+    env.ledger().set_timestamp(PEN_DUE_DATE + 5 * 86_400);
+    assert_eq!(
+        c.rep.calculate_penalty(&symbol_short!("off_pen")),
+        5 * PEN_PER_DAY
+    );
+}
+
+#[test]
+fn test_penalty_not_accrued_before_or_at_due_date() {
+    let env = Env::default();
+    env.mock_all_auths();
+    env.ledger().set_timestamp(1_000_000);
+    let c = setup_penalty_case(&env);
+    c.rep.set_penalty(&c.admin, &PEN_BPS, &PEN_CAP_BPS);
+
+    env.ledger().set_timestamp(PEN_DUE_DATE - 1);
+    assert_eq!(c.rep.calculate_penalty(&symbol_short!("off_pen")), 0);
+
+    // Exactly on the due date is not yet late.
+    env.ledger().set_timestamp(PEN_DUE_DATE);
+    assert_eq!(c.rep.calculate_penalty(&symbol_short!("off_pen")), 0);
+
+    // And the first second past it has not completed a day.
+    env.ledger().set_timestamp(PEN_DUE_DATE + 1);
+    assert_eq!(c.rep.calculate_penalty(&symbol_short!("off_pen")), 0);
+}
+
+#[test]
+fn test_penalty_stops_at_hard_cap() {
+    let env = Env::default();
+    env.mock_all_auths();
+    env.ledger().set_timestamp(1_000_000);
+    let c = setup_penalty_case(&env);
+    c.rep.set_penalty(&c.admin, &PEN_BPS, &PEN_CAP_BPS);
+
+    // Day 299: still below the ceiling, accruing linearly.
+    at_days_overdue(&env, 299);
+    assert_eq!(
+        c.rep.calculate_penalty(&symbol_short!("off_pen")),
+        299 * PEN_PER_DAY
+    );
+
+    // Day 300: raw accrual meets the ceiling exactly.
+    at_days_overdue(&env, 300);
+    assert_eq!(c.rep.calculate_penalty(&symbol_short!("off_pen")), PEN_CAP);
+
+    // Day 400 and day 5_000: pinned at the ceiling. Without this bound a
+    // long-abandoned invoice would accrue purely as a function of neglect.
+    at_days_overdue(&env, 400);
+    assert_eq!(c.rep.calculate_penalty(&symbol_short!("off_pen")), PEN_CAP);
+    at_days_overdue(&env, 5_000);
+    assert_eq!(c.rep.calculate_penalty(&symbol_short!("off_pen")), PEN_CAP);
+}
+
+#[test]
+fn test_penalty_base_frozen_across_partial_repayment() {
+    let env = Env::default();
+    env.mock_all_auths();
+    env.ledger().set_timestamp(1_000_000);
+    let c = setup_penalty_case(&env);
+    c.rep.set_penalty(&c.admin, &PEN_BPS, &PEN_CAP_BPS);
+
+    at_days_overdue(&env, 5);
+    let before = c.rep.calculate_penalty(&symbol_short!("off_pen"));
+    assert_eq!(before, 5 * PEN_PER_DAY);
+
+    // Pay down almost the entire obligation at day 5.
+    c.rep.repay_invoice(
+        &symbol_short!("inv_pen"),
+        &symbol_short!("off_pen"),
+        &c.originator,
+        &1_000_000_000i128,
+    );
+
+    // The accrued penalty is unchanged. This is the retroactive-erasure hole
+    // ADR-0007 decision 2 closes: if the base tracked the *outstanding*
+    // balance, this 95% paydown would have collapsed the 5 days of accrued
+    // penalty to a fraction of its value.
+    assert_eq!(c.rep.calculate_penalty(&symbol_short!("off_pen")), before);
+
+    // Accrual continues on the frozen base, not on the reduced outstanding.
+    at_days_overdue(&env, 10);
+    assert_eq!(
+        c.rep.calculate_penalty(&symbol_short!("off_pen")),
+        10 * PEN_PER_DAY
+    );
+
+    // Monotonically non-decreasing across the whole window, repayment or not.
+    let mut last = 0i128;
+    for day in [6u64, 7, 20, 100, 299, 300, 900] {
+        at_days_overdue(&env, day);
+        let p = c.rep.calculate_penalty(&symbol_short!("off_pen"));
+        assert!(p >= last, "penalty must never decrease over time");
+        last = p;
+    }
+}
+
+#[test]
+fn test_penalty_must_be_settled_for_full_repayment() {
+    let env = Env::default();
+    env.mock_all_auths();
+    env.ledger().set_timestamp(1_000_000);
+    let c = setup_penalty_case(&env);
+    c.rep.set_penalty(&c.admin, &PEN_BPS, &PEN_CAP_BPS);
+
+    at_days_overdue(&env, 5);
+    let penalty = 5 * PEN_PER_DAY;
+
+    // Paying the pre-penalty figure in full is no longer a full settlement.
+    let inv = c.rep.repay_invoice(
+        &symbol_short!("inv_pen"),
+        &symbol_short!("off_pen"),
+        &c.originator,
+        &PEN_TOTAL_DUE,
+    );
+    assert_eq!(inv.status, InvoiceStatus::Financed);
+    assert_eq!(
+        c.fin.get_offer(&symbol_short!("off_pen")).status,
+        OfferStatus::Financed
+    );
+    assert_eq!(
+        c.rep.calculate_total_due(&symbol_short!("off_pen")),
+        penalty
+    );
+
+    // Clearing the penalty in the same ledger closes it out.
+    let inv = c.rep.repay_invoice(
+        &symbol_short!("inv_pen"),
+        &symbol_short!("off_pen"),
+        &c.originator,
+        &penalty,
+    );
+    assert_eq!(inv.status, InvoiceStatus::Repaid);
+    let offer = c.fin.get_offer(&symbol_short!("off_pen"));
+    assert_eq!(offer.status, OfferStatus::Repaid);
+    assert_eq!(offer.amount_repaid, PEN_TOTAL_DUE + penalty);
+    assert_eq!(c.rep.calculate_total_due(&symbol_short!("off_pen")), 0);
+
+    // The lender received principal + yield + penalty (no protocol fee is
+    // configured in this fixture, so the full amount lands with them).
+    assert_eq!(
+        token::TokenClient::new(&env, &c.token_id).balance(&c.lender),
+        PEN_TOTAL_DUE + penalty
+    );
+}
+
+#[test]
+#[should_panic(expected = "Error(Contract, #5)")]
+fn test_penalty_overpayment_beyond_accrued_total_panics() {
+    let env = Env::default();
+    env.mock_all_auths();
+    env.ledger().set_timestamp(1_000_000);
+    let c = setup_penalty_case(&env);
+    c.rep.set_penalty(&c.admin, &PEN_BPS, &PEN_CAP_BPS);
+
+    at_days_overdue(&env, 5);
+    // One stroop past principal + yield + accrued penalty.
+    c.rep.repay_invoice(
+        &symbol_short!("inv_pen"),
+        &symbol_short!("off_pen"),
+        &c.originator,
+        &(PEN_TOTAL_DUE + 5 * PEN_PER_DAY + 1),
+    );
+}
+
+#[test]
+fn test_penalty_accrues_while_invoice_marked_overdue() {
+    let env = Env::default();
+    env.mock_all_auths();
+    env.ledger().set_timestamp(1_000_000);
+    let c = setup_penalty_case(&env);
+    c.rep.set_penalty(&c.admin, &PEN_BPS, &PEN_CAP_BPS);
+
+    // Accrual is anchored on due_date, not on the status transition, so
+    // flipping the invoice to Overdue neither starts nor resets the meter.
+    at_days_overdue(&env, 5);
+    let before = c.rep.calculate_penalty(&symbol_short!("off_pen"));
+    c.rep.mark_overdue(&symbol_short!("inv_pen"));
+    assert_eq!(
+        c.reg.get_invoice(&symbol_short!("inv_pen")).status,
+        InvoiceStatus::Overdue
+    );
+    assert_eq!(c.rep.calculate_penalty(&symbol_short!("off_pen")), before);
+
+    at_days_overdue(&env, 9);
+    assert_eq!(
+        c.rep.calculate_penalty(&symbol_short!("off_pen")),
+        9 * PEN_PER_DAY
+    );
+}
+
+#[test]
+fn test_penalty_excluded_from_insurance_payout() {
+    let env = Env::default();
+    env.mock_all_auths();
+    env.ledger().set_timestamp(1_000_000);
+    let c = setup_penalty_case(&env);
+    c.rep.set_penalty(&c.admin, &PEN_BPS, &PEN_CAP_BPS);
+
+    // A pool deliberately deep enough to cover the full claim, so the
+    // assertion below distinguishes "penalty excluded" from "pool exhausted".
+    let staker = Address::generate(&env);
+    let insurance_id = env.register(InsuranceContract, (c.admin.clone(), c.token_id.clone()));
+    let ins = invofi_insurance::InsuranceContractClient::new(&env, &insurance_id);
+    let asset = token::StellarAssetClient::new(&env, &c.token_id);
+    asset.mint(&staker, &3_000_000_000);
+    let tok = token::TokenClient::new(&env, &c.token_id);
+    tok.approve(
+        &staker,
+        &insurance_id,
+        &3_000_000_000,
+        &(env.ledger().sequence() + 1000),
+    );
+    ins.stake(&staker, &3_000_000_000);
+    ins.set_payout_caller(&c.admin, &c.repayment_id);
+    // pay_out verifies on-chain that the invoice is Defaulted before moving
+    // staked funds, so the pool needs the registry wired or it fails closed.
+    ins.set_registry(&c.admin, &c.registry_id);
+    c.rep.set_insurance(&c.admin, &insurance_id);
+
+    // Past due plus the grace period, then default.
+    env.ledger()
+        .set_timestamp(PEN_DUE_DATE + invofi_common::GRACE_PERIOD_SECS + 1);
+    c.rep.mark_overdue(&symbol_short!("inv_pen"));
+
+    // Seven whole days elapsed, so a non-trivial penalty has accrued — the
+    // test would be vacuous if this were zero.
+    let accrued = c.rep.calculate_penalty(&symbol_short!("off_pen"));
+    assert_eq!(accrued, 7 * PEN_PER_DAY);
+    assert_eq!(tok.balance(&c.lender), 0);
+
+    c.rep.reclaim_invoice(
+        &symbol_short!("inv_pen"),
+        &symbol_short!("off_pen"),
+        &c.lender,
+    );
+
+    // The pool paid principal + yield only. ADR-0007 decision 8: penalty is a
+    // punitive charge owed by the originator, not an insured credit loss, so
+    // stakers do not fund it.
+    assert_eq!(tok.balance(&c.lender), PEN_TOTAL_DUE);
+    assert_eq!(ins.get_pool_total(), 3_000_000_000 - PEN_TOTAL_DUE);
+}
+
+#[test]
+#[should_panic(expected = "Error(Contract, #1)")]
+fn test_set_penalty_admin_only() {
+    let env = Env::default();
+    env.mock_all_auths();
+    env.ledger().set_timestamp(1_000_000);
+    let c = setup_penalty_case(&env);
+
+    let stranger = Address::generate(&env);
+    c.rep.set_penalty(&stranger, &PEN_BPS, &PEN_CAP_BPS);
+}
+
+#[test]
+#[should_panic(expected = "Error(Contract, #6)")]
+fn test_set_penalty_rejects_excessive_rate() {
+    let env = Env::default();
+    env.mock_all_auths();
+    env.ledger().set_timestamp(1_000_000);
+    let c = setup_penalty_case(&env);
+
+    c.rep.set_penalty(&c.admin, &501u32, &PEN_CAP_BPS);
+}
+
+#[test]
+#[should_panic(expected = "Error(Contract, #6)")]
+fn test_set_penalty_rejects_excessive_cap() {
+    let env = Env::default();
+    env.mock_all_auths();
+    env.ledger().set_timestamp(1_000_000);
+    let c = setup_penalty_case(&env);
+
+    c.rep.set_penalty(&c.admin, &PEN_BPS, &10_001u32);
+}
+
+#[test]
+#[should_panic(expected = "Error(Contract, #4)")]
+fn test_set_penalty_blocked_while_paused() {
+    let env = Env::default();
+    env.mock_all_auths();
+    env.ledger().set_timestamp(1_000_000);
+    let c = setup_penalty_case(&env);
+
+    c.rep.pause(&c.admin);
+    c.rep.set_penalty(&c.admin, &PEN_BPS, &PEN_CAP_BPS);
 }

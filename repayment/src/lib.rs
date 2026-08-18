@@ -3,10 +3,95 @@
 use soroban_sdk::{contract, contractimpl, symbol_short, token, Address, Env, Symbol};
 
 use invofi_common::{
-    assert_not_paused, resolve_token, FinancingClient, FinancingOffer, InsuranceClient, Invoice,
-    InvoiceStatus, OfferStatus, RegistryClient, ReputationClient, GRACE_PERIOD_SECS,
-    MAX_OFFER_DURATION_SECS, MIN_OFFER_DURATION_SECS,
+    assert_not_paused, resolve_token, ContractError, FinancingClient, FinancingOffer,
+    InsuranceClient, Invoice, InvoiceStatus, OfferStatus, RegistryClient, ReputationClient,
+    GRACE_PERIOD_SECS, MAX_OFFER_DURATION_SECS, MIN_OFFER_DURATION_SECS,
 };
+
+// ─── Overdue penalty (ADR-0007) ──────────────────────────────────────────────
+
+/// Seconds in a day. Penalty accrues in whole elapsed days.
+const SECS_PER_DAY: u64 = 86_400;
+
+/// Upper bound on the configurable per-day penalty rate: 500 bps = 5%/day.
+/// Guards against a mis-keyed admin call setting an absurd rate.
+pub const MAX_PENALTY_BPS: u32 = 500;
+
+/// Accrued overdue penalty on an obligation, in the offer's currency.
+///
+/// Per ADR-0007:
+/// - accrual is anchored on `due_date`, not on the Overdue status transition
+///   (which is permissionless and therefore gameable);
+/// - the base is **frozen** at `total_due` (principal + yield) and does not
+///   shrink as repayments land, so a late partial payment cannot retroactively
+///   erase penalty that has already accrued;
+/// - elapsed time truncates to whole days, so the partial day in progress is
+///   not charged — rounding runs in the borrower's favour;
+/// - the result is capped at `total_due * cap_bps / 10_000`.
+///
+/// Returns 0 when the feature is disabled (`penalty_bps == 0`), which is the
+/// default for a freshly deployed contract.
+fn accrued_penalty(
+    env: &Env,
+    total_due: i128,
+    due_date: u64,
+    penalty_bps: u32,
+    cap_bps: u32,
+) -> i128 {
+    if penalty_bps == 0 || cap_bps == 0 || total_due <= 0 {
+        return 0;
+    }
+    let now = env.ledger().timestamp();
+    if now <= due_date {
+        return 0;
+    }
+    let elapsed_days = ((now - due_date) / SECS_PER_DAY) as i128;
+    if elapsed_days == 0 {
+        return 0;
+    }
+
+    // Multiply in i128 with saturation, divide by 10_000 last so the two
+    // multiplications do not compound truncation error.
+    let raw = total_due
+        .saturating_mul(penalty_bps as i128)
+        .saturating_mul(elapsed_days)
+        / 10_000;
+    let cap = total_due.saturating_mul(cap_bps as i128) / 10_000;
+    raw.min(cap)
+}
+
+/// Accrued penalty for an already-loaded offer. Reads the invoice (for
+/// `due_date`) and the penalty config. Shared by `calculate_total_due` and
+/// `calculate_penalty` so neither has to re-fetch the offer.
+fn penalty_for_offer(env: &Env, offer: &FinancingOffer) -> i128 {
+    let registry_addr: Address = env
+        .storage()
+        .instance()
+        .get(&symbol_short!("registry"))
+        .unwrap_or_else(|| panic!("Not initialized"));
+    let registry_client = RegistryClient::new(env, &registry_addr);
+    let invoice: Invoice = registry_client.get_invoice(&offer.invoice_id);
+
+    let yield_amount = offer.amount * (offer.interest_rate as i128) / 10_000;
+    let total_due = offer.amount + yield_amount;
+    let (penalty_bps, cap_bps) = load_penalty_config(env);
+    accrued_penalty(env, total_due, invoice.due_date, penalty_bps, cap_bps)
+}
+
+/// Read the configured penalty parameters, defaulting to disabled.
+fn load_penalty_config(env: &Env) -> (u32, u32) {
+    let penalty_bps: u32 = env
+        .storage()
+        .instance()
+        .get(&symbol_short!("penbps"))
+        .unwrap_or(0);
+    let cap_bps: u32 = env
+        .storage()
+        .instance()
+        .get(&symbol_short!("pencap"))
+        .unwrap_or(0);
+    (penalty_bps, cap_bps)
+}
 
 // ─── Contract ────────────────────────────────────────────────────────────────
 
@@ -66,7 +151,7 @@ impl RepaymentContract {
             .get(&symbol_short!("admin"))
             .unwrap_or_else(|| panic!("Not initialized"));
         if current != admin {
-            panic!("Only the current admin can set the insurance contract");
+            env.panic_with_error(ContractError::Unauthorized);
         }
         env.storage()
             .instance()
@@ -89,7 +174,7 @@ impl RepaymentContract {
             .get(&symbol_short!("admin"))
             .unwrap_or_else(|| panic!("Not initialized"));
         if current != admin {
-            panic!("Only the current admin can set the reputation contract");
+            env.panic_with_error(ContractError::Unauthorized);
         }
         env.storage()
             .instance()
@@ -98,6 +183,48 @@ impl RepaymentContract {
 
     pub fn get_reputation(env: Env) -> Option<Address> {
         env.storage().instance().get(&symbol_short!("repadd"))
+    }
+
+    /// Configure overdue penalty accrual (ADR-0007). Admin only.
+    ///
+    /// `penalty_bps` is the **per-day** rate applied to the frozen base
+    /// (principal + yield); `cap_bps` bounds total accrued penalty as a
+    /// fraction of that same base. Both default to 0, which disables accrual
+    /// entirely — a freshly deployed contract behaves exactly as before until
+    /// an admin calls this.
+    pub fn set_penalty(env: Env, admin: Address, penalty_bps: u32, cap_bps: u32) {
+        assert_not_paused(&env);
+        admin.require_auth();
+        let current: Address = env
+            .storage()
+            .instance()
+            .get(&symbol_short!("admin"))
+            .unwrap_or_else(|| panic!("Not initialized"));
+        if current != admin {
+            env.panic_with_error(ContractError::Unauthorized);
+        }
+        if penalty_bps > MAX_PENALTY_BPS {
+            env.panic_with_error(ContractError::InvalidInput);
+        }
+        if cap_bps > 10_000 {
+            env.panic_with_error(ContractError::InvalidInput);
+        }
+        env.storage()
+            .instance()
+            .set(&symbol_short!("penbps"), &penalty_bps);
+        env.storage()
+            .instance()
+            .set(&symbol_short!("pencap"), &cap_bps);
+    }
+
+    /// The configured per-day penalty rate in basis points (0 = disabled).
+    pub fn get_penalty_bps(env: Env) -> u32 {
+        load_penalty_config(&env).0
+    }
+
+    /// The configured penalty ceiling in basis points of the frozen base.
+    pub fn get_penalty_cap_bps(env: Env) -> u32 {
+        load_penalty_config(&env).1
     }
 
     /// Transfers admin rights. Only current admin.
@@ -110,7 +237,7 @@ impl RepaymentContract {
             .get(&symbol_short!("admin"))
             .unwrap_or_else(|| panic!("Not initialized"));
         if current != admin {
-            panic!("Only the current admin can transfer admin rights");
+            env.panic_with_error(ContractError::Unauthorized);
         }
         env.storage()
             .instance()
@@ -127,7 +254,7 @@ impl RepaymentContract {
             .get(&symbol_short!("admin"))
             .unwrap_or_else(|| panic!("Not initialized"));
         if current != admin {
-            panic!("Only admin can pause");
+            env.panic_with_error(ContractError::Unauthorized);
         }
         env.storage()
             .instance()
@@ -142,7 +269,7 @@ impl RepaymentContract {
             .get(&symbol_short!("admin"))
             .unwrap_or_else(|| panic!("Not initialized"));
         if current != admin {
-            panic!("Only admin can unpause");
+            env.panic_with_error(ContractError::Unauthorized);
         }
         env.storage()
             .instance()
@@ -182,10 +309,10 @@ impl RepaymentContract {
         let invoice: Invoice = registry_client.get_invoice(&invoice_id);
 
         if invoice.originator != repayer {
-            panic!("Only the invoice originator can repay");
+            env.panic_with_error(ContractError::Unauthorized);
         }
         if invoice.status != InvoiceStatus::Financed {
-            panic!("Invoice must be Financed before repayment");
+            env.panic_with_error(ContractError::InvalidTransition);
         }
 
         // Cross-contract: read offer from financing
@@ -199,10 +326,10 @@ impl RepaymentContract {
         let mut offer: FinancingOffer = financing_client.get_offer(&offer_id);
 
         if offer.invoice_id != invoice_id {
-            panic!("Offer does not belong to this invoice");
+            env.panic_with_error(ContractError::InvalidInput);
         }
         if offer.status != OfferStatus::Accepted && offer.status != OfferStatus::Financed {
-            panic!("Offer must be Accepted or Financed before repayment");
+            env.panic_with_error(ContractError::InvalidTransition);
         }
         assert!(amount > 0, "repayment amount must be greater than zero");
 
@@ -210,11 +337,18 @@ impl RepaymentContract {
         let token_client = token::TokenClient::new(&env, &token_id);
         let yield_amount = offer.amount * (offer.interest_rate as i128) / 10_000;
         let total_due = offer.amount + yield_amount;
-        let remaining_balance = total_due - offer.amount_repaid;
-        assert!(
-            amount <= remaining_balance,
-            "Repayment amount exceeds remaining balance"
-        );
+
+        // Overdue penalty (ADR-0007). Accrues from the invoice due date, on a
+        // base frozen at principal + yield. Zero unless an admin has enabled
+        // it, and zero while the invoice is not yet past due.
+        let (penalty_bps, cap_bps) = load_penalty_config(&env);
+        let penalty = accrued_penalty(&env, total_due, invoice.due_date, penalty_bps, cap_bps);
+        let total_owed = total_due + penalty;
+
+        let remaining_balance = total_owed - offer.amount_repaid;
+        if amount > remaining_balance {
+            env.panic_with_error(ContractError::InsufficientBalance);
+        }
 
         // Protocol fee deduction
         let fee_bps: u32 = financing_client.get_fee_bps();
@@ -233,7 +367,7 @@ impl RepaymentContract {
         }
 
         offer.amount_repaid += amount;
-        let fully_repaid = offer.amount_repaid >= total_due;
+        let fully_repaid = offer.amount_repaid >= total_owed;
         let new_status = if fully_repaid {
             OfferStatus::Repaid
         } else {
@@ -313,10 +447,10 @@ impl RepaymentContract {
         let invoice: Invoice = registry_client.get_invoice(&invoice_id);
 
         if invoice.status != InvoiceStatus::Overdue {
-            panic!("Invoice must be Overdue before reclaim");
+            env.panic_with_error(ContractError::InvalidTransition);
         }
         if env.ledger().timestamp() < invoice.due_date + GRACE_PERIOD_SECS {
-            panic!("Grace period has not elapsed");
+            env.panic_with_error(ContractError::InvalidTransition);
         }
 
         // Cross-contract: read offer from financing
@@ -330,13 +464,13 @@ impl RepaymentContract {
         let mut offer: FinancingOffer = financing_client.get_offer(&offer_id);
 
         if offer.invoice_id != invoice_id {
-            panic!("Offer does not belong to this invoice");
+            env.panic_with_error(ContractError::InvalidInput);
         }
         if offer.lender != lender {
-            panic!("Only the financing lender can reclaim");
+            env.panic_with_error(ContractError::Unauthorized);
         }
         if offer.status != OfferStatus::Accepted && offer.status != OfferStatus::Financed {
-            panic!("Offer must be Accepted or Financed before reclaim");
+            env.panic_with_error(ContractError::InvalidTransition);
         }
 
         // Cross-contract: update offer status in financing
@@ -357,7 +491,18 @@ impl RepaymentContract {
         // the pool is empty). Skipped entirely when no insurance contract is
         // configured.
         let yield_amount = offer.amount * (offer.interest_rate as i128) / 10_000;
-        let remaining_due = (offer.amount + yield_amount - offer.amount_repaid).max(0);
+        let total_due = offer.amount + yield_amount;
+        let remaining_due = (total_due - offer.amount_repaid).max(0);
+
+        // Overdue penalty (ADR-0007). Deliberately **excluded** from the
+        // insured amount: the pool covers realized credit loss (principal +
+        // yield, per ADR-0003), not the punitive charge owed by the
+        // originator. Including it would make staker losses grow with how
+        // long a defaulted invoice went unreclaimed. It is reported on the
+        // event so indexers can track the lender's uncovered claim.
+        let (penalty_bps, cap_bps) = load_penalty_config(&env);
+        let penalty = accrued_penalty(&env, total_due, invoice.due_date, penalty_bps, cap_bps);
+
         let mut payout: i128 = 0;
         let insurance_opt: Option<Address> = env.storage().instance().get(&symbol_short!("insadd"));
         if let Some(insurance_addr) = insurance_opt {
@@ -377,15 +522,24 @@ impl RepaymentContract {
 
         env.events().publish(
             (symbol_short!("off_def"), offer.id.clone()),
-            (offer.invoice_id.clone(), offer.lender.clone(), payout),
+            (
+                offer.invoice_id.clone(),
+                offer.lender.clone(),
+                payout,
+                penalty,
+            ),
         );
         offer
     }
 
     // ── Query helpers ────────────────────────────────────────────────────────
 
-    /// Calculate the remaining total due on an offer (principal + yield - repaid).
-    /// Cross-contract: reads offer from financing.
+    /// Calculate the remaining total due on an offer
+    /// (principal + yield + accrued overdue penalty - repaid).
+    ///
+    /// Cross-contract: reads the offer from financing and — since ADR-0007 —
+    /// the invoice from the registry, because penalty accrual is anchored on
+    /// `invoice.due_date`.
     pub fn calculate_total_due(env: Env, offer_id: Symbol) -> i128 {
         let financing_addr: Address = env
             .storage()
@@ -401,7 +555,30 @@ impl RepaymentContract {
         }
         let yield_amount = offer.amount * (offer.interest_rate as i128) / 10_000;
         let total_due = offer.amount + yield_amount;
-        (total_due - offer.amount_repaid).max(0)
+        let penalty = penalty_for_offer(&env, &offer);
+        (total_due + penalty - offer.amount_repaid).max(0)
+    }
+
+    /// The overdue penalty accrued on an offer so far (ADR-0007), before
+    /// subtracting anything already repaid. Returns 0 when accrual is
+    /// disabled, when the invoice is not yet past due, or when the offer has
+    /// reached a terminal status.
+    ///
+    /// Exposed separately so a UI can show the penalty component rather than
+    /// only the combined figure from `calculate_total_due`.
+    pub fn calculate_penalty(env: Env, offer_id: Symbol) -> i128 {
+        let financing_addr: Address = env
+            .storage()
+            .instance()
+            .get(&symbol_short!("financing"))
+            .unwrap_or_else(|| panic!("Not initialized"));
+        let financing_client = FinancingClient::new(&env, &financing_addr);
+        let offer: FinancingOffer = financing_client.get_offer(&offer_id);
+
+        if offer.status == OfferStatus::Repaid || offer.status == OfferStatus::Defaulted {
+            return 0;
+        }
+        penalty_for_offer(&env, &offer)
     }
 
     pub fn version(env: Env) -> soroban_sdk::String {

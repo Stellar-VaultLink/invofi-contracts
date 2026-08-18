@@ -7,7 +7,7 @@
 
 #![no_std]
 
-use soroban_sdk::{contractclient, contracttype, symbol_short, Address, Env, Map, Symbol};
+use soroban_sdk::{contractclient, contracterror, contracttype, symbol_short, Address, Env, Map, Symbol};
 
 // ─── Constants ───────────────────────────────────────────────────────────────
 
@@ -258,7 +258,7 @@ pub fn resolve_token(env: &Env, currency: &Symbol) -> Address {
 ///   - exceptions: pause, unpause, contract_is_paused, getters.
 /// - Repayment:
 ///   - state-changing: repay_invoice, mark_overdue, reclaim_invoice, set_insurance,
-///     set_reputation, transfer_admin.
+///     set_reputation, set_penalty, transfer_admin.
 ///   - exceptions: pause, unpause, contract_is_paused, getters.
 /// - Insurance:
 ///   - state-changing: stake, unstake, pay_out, set_staking_token, set_payout_caller,
@@ -274,7 +274,7 @@ pub fn assert_not_paused(env: &Env) {
         .get(&symbol_short!("paused"))
         .unwrap_or(false);
     if paused {
-        panic!("Contract is paused");
+        env.panic_with_error(ContractError::Paused);
     }
 }
 

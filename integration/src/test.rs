@@ -344,7 +344,7 @@ fn test_financing_repayment_partial_keeps_financed() {
 
 /// Negative test: Repaying a Pending (unfinanced) invoice must fail.
 #[test]
-#[should_panic(expected = "Invoice must be Financed before repayment")]
+#[should_panic(expected = "Error(Contract, #3)")]
 fn test_financing_repayment_on_pending_panics() {
     let env = Env::default();
     env.mock_all_auths();
@@ -452,7 +452,7 @@ fn test_repayment_insurance_default_triggers_payout() {
 
 /// Negative test: Reclaiming before the grace period must fail.
 #[test]
-#[should_panic(expected = "Grace period has not elapsed")]
+#[should_panic(expected = "Error(Contract, #3)")]
 fn test_repayment_insurance_reclaim_before_grace_panics() {
     let env = Env::default();
     env.mock_all_auths();
@@ -669,7 +669,7 @@ fn test_registry_repayment_overdue_delegates_to_registry() {
 
 /// Negative test: Marking overdue on a Pending invoice must fail.
 #[test]
-#[should_panic(expected = "Only Financed invoices can be marked Overdue")]
+#[should_panic(expected = "Error(Contract, #3)")]
 fn test_registry_repayment_overdue_on_pending_panics() {
     let env = Env::default();
     env.mock_all_auths();

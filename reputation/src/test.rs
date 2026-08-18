@@ -128,7 +128,7 @@ fn test_pause_blocks_all_reputation_state_changes() {
 }
 
 #[test]
-#[should_panic(expected = "outcome must be 0 (repaid) or 1 (defaulted)")]
+#[should_panic(expected = "Error(Contract, #6)")]
 fn test_record_outcome_invalid_outcome_panics() {
     let env = Env::default();
     env.mock_all_auths();

@@ -14,7 +14,7 @@
 
 use soroban_sdk::{contract, contractimpl, symbol_short, token, Address, Env, Map, Symbol, Vec};
 
-use invofi_common::{assert_not_paused, InvoiceStatus, RegistryClient};
+use invofi_common::{assert_not_paused, ContractError, InvoiceStatus, RegistryClient};
 
 // ─── Storage Helpers ─────────────────────────────────────────────────────────
 
@@ -95,7 +95,7 @@ impl InsuranceContract {
             .get(&symbol_short!("admin"))
             .unwrap_or_else(|| panic!("Not initialized"));
         if current != admin {
-            panic!("Only the current admin can transfer admin rights");
+            env.panic_with_error(ContractError::Unauthorized);
         }
         env.storage()
             .instance()
@@ -113,7 +113,7 @@ impl InsuranceContract {
             .get(&symbol_short!("admin"))
             .unwrap_or_else(|| panic!("Not initialized"));
         if current != admin {
-            panic!("Only the current admin can set the staking token");
+            env.panic_with_error(ContractError::Unauthorized);
         }
         env.storage()
             .instance()
@@ -136,7 +136,7 @@ impl InsuranceContract {
             .get(&symbol_short!("admin"))
             .unwrap_or_else(|| panic!("Not initialized"));
         if current != admin {
-            panic!("Only the current admin can set the payout caller");
+            env.panic_with_error(ContractError::Unauthorized);
         }
         env.storage()
             .instance()
@@ -159,7 +159,7 @@ impl InsuranceContract {
             .get(&symbol_short!("admin"))
             .unwrap_or_else(|| panic!("Not initialized"));
         if current != admin {
-            panic!("Only the current admin can set the registry");
+            env.panic_with_error(ContractError::Unauthorized);
         }
         env.storage()
             .instance()
@@ -180,7 +180,7 @@ impl InsuranceContract {
             .get(&symbol_short!("admin"))
             .unwrap_or_else(|| panic!("Not initialized"));
         if current != admin {
-            panic!("Only admin can pause");
+            env.panic_with_error(ContractError::Unauthorized);
         }
         env.storage()
             .instance()
@@ -195,7 +195,7 @@ impl InsuranceContract {
             .get(&symbol_short!("admin"))
             .unwrap_or_else(|| panic!("Not initialized"));
         if current != admin {
-            panic!("Only admin can unpause");
+            env.panic_with_error(ContractError::Unauthorized);
         }
         env.storage()
             .instance()
@@ -218,7 +218,9 @@ impl InsuranceContract {
     pub fn stake(env: Env, staker: Address, amount: i128) {
         assert_not_paused(&env);
         staker.require_auth();
-        assert!(amount > 0, "stake amount must be greater than zero");
+        if amount <= 0 {
+            env.panic_with_error(ContractError::InvalidInput);
+        }
 
         let token_addr = load_token(&env);
         let token_client = token::TokenClient::new(&env, &token_addr);
@@ -248,11 +250,15 @@ impl InsuranceContract {
     pub fn unstake(env: Env, staker: Address, amount: i128) {
         assert_not_paused(&env);
         staker.require_auth();
-        assert!(amount > 0, "unstake amount must be greater than zero");
+        if amount <= 0 {
+            env.panic_with_error(ContractError::InvalidInput);
+        }
 
         let mut stakes = load_stakes(&env);
         let balance = stakes.get(staker.clone()).unwrap_or(0);
-        assert!(balance >= amount, "Insufficient stake");
+        if balance < amount {
+            env.panic_with_error(ContractError::InsufficientBalance);
+        }
 
         let new_balance = balance - amount;
         if new_balance == 0 {
@@ -306,7 +312,9 @@ impl InsuranceContract {
             .get(&symbol_short!("paycall"))
             .unwrap_or_else(|| panic!("No payout caller configured"));
         payout_caller.require_auth();
-        assert!(amount > 0, "payout amount must be greater than zero");
+        if amount <= 0 {
+            env.panic_with_error(ContractError::InvalidInput);
+        }
 
         // ── Safety check 1: invoice must be Defaulted, not merely Overdue ──
         // Cross-contract read from the registry provides on-chain proof that
@@ -319,7 +327,7 @@ impl InsuranceContract {
         let registry_client = RegistryClient::new(&env, &registry_addr);
         let invoice = registry_client.get_invoice(&invoice_id);
         if invoice.status != InvoiceStatus::Defaulted {
-            panic!("Invoice is not Defaulted");
+            env.panic_with_error(ContractError::InvalidTransition);
         }
 
         // ── Safety check 2: payout ≤ available pool balance ───────────────

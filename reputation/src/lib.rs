@@ -15,7 +15,7 @@
 
 use soroban_sdk::{contract, contractimpl, contracttype, symbol_short, Address, Env, Map};
 
-use invofi_common::assert_not_paused;
+use invofi_common::{assert_not_paused, ContractError};
 
 /// Outcome discriminant for a successful full repayment.
 pub const OUTCOME_REPAID: u32 = 0;
@@ -87,7 +87,7 @@ impl ReputationContract {
             .get(&symbol_short!("admin"))
             .unwrap_or_else(|| panic!("Not initialized"));
         if current != admin {
-            panic!("Only the current admin can set the recorder");
+            env.panic_with_error(ContractError::Unauthorized);
         }
         env.storage()
             .instance()
@@ -108,7 +108,7 @@ impl ReputationContract {
             .get(&symbol_short!("admin"))
             .unwrap_or_else(|| panic!("Not initialized"));
         if current != admin {
-            panic!("Only admin can pause");
+            env.panic_with_error(ContractError::Unauthorized);
         }
         env.storage()
             .instance()
@@ -123,7 +123,7 @@ impl ReputationContract {
             .get(&symbol_short!("admin"))
             .unwrap_or_else(|| panic!("Not initialized"));
         if current != admin {
-            panic!("Only admin can unpause");
+            env.panic_with_error(ContractError::Unauthorized);
         }
         env.storage()
             .instance()
@@ -155,10 +155,9 @@ impl ReputationContract {
             .get(&symbol_short!("recorder"))
             .unwrap_or_else(|| panic!("No recorder configured"));
         recorder.require_auth();
-        assert!(
-            outcome == OUTCOME_REPAID || outcome == OUTCOME_DEFAULTED,
-            "outcome must be 0 (repaid) or 1 (defaulted)"
-        );
+        if outcome != OUTCOME_REPAID && outcome != OUTCOME_DEFAULTED {
+            env.panic_with_error(ContractError::InvalidInput);
+        }
 
         let mut records = load_records(&env);
         let mut record = records.get(originator.clone()).unwrap_or(ReputationRecord {

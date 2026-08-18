@@ -123,7 +123,7 @@ fn test_stake_increases_existing_balance() {
 // ─── Failure paths ───────────────────────────────────────────────────────────
 
 #[test]
-#[should_panic(expected = "Insufficient stake")]
+#[should_panic(expected = "Error(Contract, #5)")]
 fn test_unstake_exceeds_stake_panics() {
     let env = Env::default();
     env.mock_all_auths();
@@ -139,7 +139,7 @@ fn test_unstake_exceeds_stake_panics() {
 }
 
 #[test]
-#[should_panic(expected = "Insufficient stake")]
+#[should_panic(expected = "Error(Contract, #5)")]
 fn test_unstake_without_stake_panics() {
     let env = Env::default();
     env.mock_all_auths();
@@ -152,7 +152,7 @@ fn test_unstake_without_stake_panics() {
 }
 
 #[test]
-#[should_panic(expected = "stake amount must be greater than zero")]
+#[should_panic(expected = "Error(Contract, #6)")]
 fn test_stake_zero_panics() {
     let env = Env::default();
     env.mock_all_auths();
@@ -165,7 +165,7 @@ fn test_stake_zero_panics() {
 }
 
 #[test]
-#[should_panic(expected = "unstake amount must be greater than zero")]
+#[should_panic(expected = "Error(Contract, #6)")]
 fn test_unstake_zero_panics() {
     let env = Env::default();
     env.mock_all_auths();
@@ -178,7 +178,7 @@ fn test_unstake_zero_panics() {
 }
 
 #[test]
-#[should_panic(expected = "Contract is paused")]
+#[should_panic(expected = "Error(Contract, #4)")]
 fn test_paused_blocks_stake() {
     let env = Env::default();
     env.mock_all_auths();
@@ -236,7 +236,7 @@ fn test_pause_blocks_all_insurance_state_changes() {
 }
 
 #[test]
-#[should_panic(expected = "Contract is paused")]
+#[should_panic(expected = "Error(Contract, #4)")]
 fn test_paused_blocks_unstake() {
     let env = Env::default();
     env.mock_all_auths();
@@ -440,7 +440,7 @@ fn test_payout_pro_rata_multiple_stakers_exact() {
 /// We test the most dangerous case: the invoice is Overdue (one step before
 /// Defaulted) — the payout must still revert with a clear error.
 #[test]
-#[should_panic(expected = "Invoice is not Defaulted")]
+#[should_panic(expected = "Error(Contract, #3)")]
 fn test_payout_rejected_when_invoice_overdue_not_defaulted() {
     use invofi_common::InvoiceStatus;
     use soroban_sdk::symbol_short;
@@ -489,7 +489,7 @@ fn test_payout_rejected_when_invoice_overdue_not_defaulted() {
 
 /// pay_out must reject when the invoice is Pending (completely wrong state).
 #[test]
-#[should_panic(expected = "Invoice is not Defaulted")]
+#[should_panic(expected = "Error(Contract, #3)")]
 fn test_payout_rejected_when_invoice_pending() {
     use soroban_sdk::symbol_short;
 
@@ -542,7 +542,7 @@ fn test_payout_without_caller_panics() {
 }
 
 #[test]
-#[should_panic(expected = "payout amount must be greater than zero")]
+#[should_panic(expected = "Error(Contract, #6)")]
 fn test_payout_zero_amount_panics() {
     use soroban_sdk::symbol_short;
 
@@ -560,7 +560,7 @@ fn test_payout_zero_amount_panics() {
 }
 
 #[test]
-#[should_panic(expected = "Contract is paused")]
+#[should_panic(expected = "Error(Contract, #4)")]
 fn test_paused_blocks_payout() {
     use soroban_sdk::symbol_short;
 
