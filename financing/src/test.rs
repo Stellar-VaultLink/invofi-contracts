@@ -334,7 +334,7 @@ fn test_accept_offer() {
         &(1_296_000u64),
     );
 
-    let accepted = fin.accept_offer(&offer_id, &originator);
+    let accepted = fin.accept_offer(&offer_id, &originator, &0);
     assert_eq!(accepted.status, OfferStatus::Accepted);
 
     // Invoice should now be Financed in registry
@@ -949,7 +949,8 @@ fn test_pause_blocks_all_financing_state_changes() {
         fin.withdraw_offer(&symbol_short!("offx2"), &lender);
     });
     assert_paused(|| {
-        fin.accept_offer(&symbol_short!("offx3"), &originator);
+        // Pause fires before the version guard; any version value is fine.
+        fin.accept_offer(&symbol_short!("offx3"), &originator, &0);
     });
     assert_paused(|| {
         fin.reject_offer(&symbol_short!("offx4"), &originator);
@@ -1036,7 +1037,7 @@ fn test_accept_offer_mints_position_token() {
         &1_296_000u64,
     );
 
-    fin.accept_offer(&offer_id, &originator);
+    fin.accept_offer(&offer_id, &originator, &0);
 
     // DoD: lender's position-token balance equals the offer amount.
     let pos_client = token::TokenClient::new(&env, &pos_token_id);
@@ -1093,7 +1094,7 @@ fn test_accept_offer_without_position_token_still_works() {
         &1_296_000u64,
     );
 
-    let accepted = fin.accept_offer(&offer_id, &originator);
+    let accepted = fin.accept_offer(&offer_id, &originator, &0);
     assert_eq!(accepted.status, OfferStatus::Accepted);
 
     let token_client = token::TokenClient::new(&env, &token_id);
@@ -1518,4 +1519,111 @@ fn test_daily_frequency_period() {
     // Advance past 2 daily periods — installment 1 paid, installment 2 is now due.
     env.ledger().set_timestamp(first_due + 86_400 + 1);
     assert_eq!(fin.get_installment_due(&symbol_short!("off_sc1")), 2);
+}
+
+// ─── Concurrency / version-guard tests (issue #110) ──────────────────────────
+//
+// Soroban is a single-threaded VM, so we cannot truly run two transactions in
+// parallel. Instead we simulate the race by:
+//   1. Both "callers" read the invoice at version V (they both see the same
+//      snapshot before any write has landed).
+//   2. Caller A executes first and succeeds — version advances to V+1.
+//   3. Caller B is retried with the *stale* version V it originally read;
+//      the guard fires and rejects it.
+//
+// The panic message is `Error(Contract, #9)` — that is `ContractError::StaleVersion`.
+
+/// Two lenders both call `accept_offer` after reading the invoice at version 0.
+/// The first call succeeds; the second call, re-attempted with stale version 0,
+/// must be rejected with `StaleVersion`.
+#[test]
+fn test_accept_offer_race_first_succeeds() {
+    let env = Env::default();
+    env.mock_all_auths();
+    env.ledger().set_timestamp(1_000_000);
+
+    let admin = Address::generate(&env);
+    let originator = Address::generate(&env);
+    let lender_a = Address::generate(&env);
+    let lender_b = Address::generate(&env);
+    let invoice_id = symbol_short!("inv_rc1");
+    // Lender A and lender B each created an offer on the same invoice.
+    let offer_a = symbol_short!("off_ra1");
+    let offer_b = symbol_short!("off_rb1");
+    let amount: i128 = 1_000_000_000;
+
+    let token_id = create_token(&env);
+    let registry_id = env.register(RegistryContract, (admin.clone(),));
+    let reg = invofi_registry::RegistryContractClient::new(&env, &registry_id);
+    let financing_id =
+        env.register(FinancingContract, (admin.clone(), registry_id.clone(), token_id.clone()));
+    let fin = super::FinancingContractClient::new(&env, &financing_id);
+
+    mint_and_approve(&env, &token_id, &financing_id, &lender_a, amount);
+    mint_and_approve(&env, &token_id, &financing_id, &lender_b, amount);
+    reg.set_financing_contract(&admin, &financing_id);
+
+    reg.register_invoice(
+        &invoice_id,
+        &originator,
+        &amount,
+        &symbol_short!("USDC"),
+        &3_000_000u64,
+    );
+    fin.create_offer(&offer_a, &invoice_id, &lender_a, &amount, &symbol_short!("USDC"), &500u32, &2_592_000u64);
+    fin.create_offer(&offer_b, &invoice_id, &lender_b, &amount, &symbol_short!("USDC"), &500u32, &2_592_000u64);
+
+    // Both lenders read the invoice at version 0 (simulated concurrent read).
+    let version_at_read: u64 = 0;
+
+    // Caller A wins: accept with the version both callers read.
+    let accepted = fin.accept_offer(&offer_a, &originator, &version_at_read);
+    assert_eq!(accepted.status, OfferStatus::Accepted);
+
+    // Caller B is now stale (version advanced to 1 after A's write).
+    // Re-attempting with the same version_at_read must be rejected.
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        fin.accept_offer(&offer_b, &originator, &version_at_read);
+    }));
+    assert!(result.is_err(), "second concurrent accept_offer must panic with StaleVersion");
+}
+
+/// Guard fires when the caller explicitly supplies a version that is already
+/// stale — regardless of concurrency.  This is the unit-level contract for
+/// `check_invoice_version`.
+#[test]
+#[should_panic(expected = "Error(Contract, #9)")]
+fn test_accept_offer_stale_version_panics() {
+    let env = Env::default();
+    env.mock_all_auths();
+    env.ledger().set_timestamp(1_000_000);
+
+    let admin = Address::generate(&env);
+    let originator = Address::generate(&env);
+    let lender = Address::generate(&env);
+    let invoice_id = symbol_short!("inv_sv1");
+    let offer_id = symbol_short!("off_sv1");
+    let amount: i128 = 1_000_000_000;
+
+    let token_id = create_token(&env);
+    let registry_id = env.register(RegistryContract, (admin.clone(),));
+    let reg = invofi_registry::RegistryContractClient::new(&env, &registry_id);
+    let financing_id =
+        env.register(FinancingContract, (admin.clone(), registry_id.clone(), token_id.clone()));
+    let fin = super::FinancingContractClient::new(&env, &financing_id);
+
+    mint_and_approve(&env, &token_id, &financing_id, &lender, amount);
+    reg.set_financing_contract(&admin, &financing_id);
+
+    reg.register_invoice(
+        &invoice_id,
+        &originator,
+        &amount,
+        &symbol_short!("USDC"),
+        &3_000_000u64,
+    );
+    fin.create_offer(&offer_id, &invoice_id, &lender, &amount, &symbol_short!("USDC"), &500u32, &2_592_000u64);
+
+    // Invoice is at version 0; passing version 99 must fire StaleVersion.
+    fin.accept_offer(&offer_id, &originator, &99);
 }

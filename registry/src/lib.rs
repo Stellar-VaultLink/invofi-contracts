@@ -253,6 +253,7 @@ impl RegistryContract {
             currency,
             due_date,
             status: InvoiceStatus::Pending,
+            version: 0,
         };
         invoices.set(id, invoice.clone());
         save_invoices(&env, &invoices);
@@ -295,6 +296,7 @@ impl RegistryContract {
         }
         assert_transition(&env, invoice.status.clone(), new_status.clone());
         invoice.status = new_status.clone();
+        invoice.version += 1;
         invoices.set(id, invoice.clone());
         save_invoices(&env, &invoices);
         env.events()
@@ -325,6 +327,7 @@ impl RegistryContract {
             env.panic_with_error(ContractError::InvalidInput);
         }
         invoice.amount = new_amount;
+        invoice.version += 1;
         invoices.set(invoice_id, invoice.clone());
         save_invoices(&env, &invoices);
         env.events().publish(
@@ -347,6 +350,7 @@ impl RegistryContract {
         }
         assert_transition(&env, invoice.status.clone(), InvoiceStatus::Cancelled);
         invoice.status = InvoiceStatus::Cancelled;
+        invoice.version += 1;
         invoices.set(invoice_id, invoice.clone());
         save_invoices(&env, &invoices);
         env.events().publish(
@@ -379,6 +383,7 @@ impl RegistryContract {
         };
         assert_transition(&env, invoice.status.clone(), new_status.clone());
         invoice.status = new_status;
+        invoice.version += 1;
         invoices.set(id, invoice.clone());
         save_invoices(&env, &invoices);
         env.events()
@@ -406,6 +411,7 @@ impl RegistryContract {
             .unwrap_or_else(|| env.panic_with_error(ContractError::NotFound));
         assert_transition(&env, invoice.status.clone(), InvoiceStatus::Financed);
         invoice.status = InvoiceStatus::Financed;
+        invoice.version += 1;
         invoices.set(id, invoice.clone());
         save_invoices(&env, &invoices);
         env.events().publish(
@@ -438,6 +444,7 @@ impl RegistryContract {
         };
         assert_transition(&env, invoice.status.clone(), new_status.clone());
         invoice.status = new_status;
+        invoice.version += 1;
         invoices.set(id, invoice.clone());
         save_invoices(&env, &invoices);
         env.events()
@@ -467,6 +474,7 @@ impl RegistryContract {
             .unwrap_or_else(|| env.panic_with_error(ContractError::NotFound));
         assert_transition(&env, invoice.status.clone(), InvoiceStatus::Defaulted);
         invoice.status = InvoiceStatus::Defaulted;
+        invoice.version += 1;
         invoices.set(id, invoice.clone());
         save_invoices(&env, &invoices);
         env.events().publish(
@@ -490,6 +498,7 @@ impl RegistryContract {
             env.panic_with_error(ContractError::InvalidTransition);
         }
         invoice.status = InvoiceStatus::Overdue;
+        invoice.version += 1;
         invoices.set(id, invoice.clone());
         save_invoices(&env, &invoices);
         env.events().publish(
@@ -514,6 +523,7 @@ impl RegistryContract {
         }
         assert_transition(&env, invoice.status.clone(), InvoiceStatus::Disputed);
         invoice.status = InvoiceStatus::Disputed;
+        invoice.version += 1;
         invoices.set(invoice_id, invoice.clone());
         save_invoices(&env, &invoices);
         env.events().publish(
@@ -539,6 +549,7 @@ impl RegistryContract {
             .unwrap_or_else(|| env.panic_with_error(ContractError::NotFound));
         assert_transition(&env, invoice.status.clone(), target_status.clone());
         invoice.status = target_status;
+        invoice.version += 1;
         invoices.set(invoice_id, invoice.clone());
         save_invoices(&env, &invoices);
         env.events().publish(

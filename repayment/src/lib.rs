@@ -3,9 +3,9 @@
 use soroban_sdk::{contract, contractimpl, symbol_short, token, Address, Env, Symbol};
 
 use invofi_common::{
-    assert_not_paused, resolve_token, ContractError, FinancingClient, FinancingOffer,
-    InsuranceClient, Invoice, InvoiceStatus, OfferStatus, RegistryClient, ReputationClient,
-    GRACE_PERIOD_SECS, MAX_OFFER_DURATION_SECS, MIN_OFFER_DURATION_SECS,
+    assert_not_paused, check_invoice_version, resolve_token, ContractError, FinancingClient,
+    FinancingOffer, InsuranceClient, Invoice, InvoiceStatus, OfferStatus, RegistryClient,
+    ReputationClient, GRACE_PERIOD_SECS, MAX_OFFER_DURATION_SECS, MIN_OFFER_DURATION_SECS,
 };
 
 // ─── Overdue penalty (ADR-0007) ──────────────────────────────────────────────
@@ -294,6 +294,7 @@ impl RepaymentContract {
         offer_id: Symbol,
         repayer: Address,
         amount: i128,
+        expected_version: u64,
     ) -> Invoice {
         assert_not_paused(&env);
         repayer.require_auth();
@@ -314,6 +315,10 @@ impl RepaymentContract {
         if invoice.status != InvoiceStatus::Financed {
             env.panic_with_error(ContractError::InvalidTransition);
         }
+
+        // Optimistic-concurrency guard (issue #110): reject if another
+        // transaction has already mutated the invoice since the caller read it.
+        check_invoice_version(&env, invoice.version, expected_version);
 
         // Cross-contract: read offer from financing
         let financing_addr: Address = env
