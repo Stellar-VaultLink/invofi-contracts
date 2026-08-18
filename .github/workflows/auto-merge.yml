@@ -517,18 +517,17 @@ jobs:
               echo "  CodeRabbit still reviewing — leaving for a later run"
               continue
             fi
-            # Hold the merge while CodeRabbit has an active REQUEST_CHANGES
-            # review on this head (issues not yet resolved). CodeRabbit posts
-            # REQUEST_CHANGES when .coderabbit.yaml sets
-            # request_changes_workflow: true and it finds issues; it re-reviews
-            # on each push and the review clears once they're addressed.
-            CR_REQ="$(gh api "repos/${REPO}/pulls/${PR}/reviews" \
-              --jq "[.[] | select(.user.login == \"coderabbitai[bot]\")
-                | select(.state == \"REQUEST_CHANGES\")
-                | select(.commit_id == \"${SHA}\")] | length" \
-              2>/dev/null || echo 0)"
-            if [ "${CR_REQ:-0}" -gt 0 ]; then
-              echo "  CodeRabbit requested changes — holding merge for maintainer"
+            # Hold the merge while the PR has an active CHANGES_REQUESTED
+            # review decision (from CodeRabbit with request_changes_workflow
+            # enabled, or from a maintainer reviewing manually). CodeRabbit
+            # re-reviews on each push and the decision clears once issues are
+            # addressed — the status wait above already ensured the latest
+            # CodeRabbit review for this head has completed.
+            REVIEW_DECISION="$(gh pr view "${PR}" --repo "${REPO}" \
+              --json reviewDecision --jq .reviewDecision \
+              2>/dev/null || echo "")"
+            if [ "${REVIEW_DECISION}" = "CHANGES_REQUESTED" ]; then
+              echo "  changes requested on #${PR} — holding merge for maintainer"
               continue
             fi
 
