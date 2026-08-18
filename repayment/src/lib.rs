@@ -3,10 +3,17 @@
 use soroban_sdk::{contract, contractimpl, symbol_short, token, Address, Env, Symbol};
 
 use invofi_common::{
-    assert_not_paused, resolve_token, ContractError, FinancingClient, FinancingOffer,
-    InsuranceClient, Invoice, InvoiceStatus, OfferStatus, RegistryClient, ReputationClient,
-    GRACE_PERIOD_SECS, MAX_OFFER_DURATION_SECS, MIN_OFFER_DURATION_SECS,
+    assert_not_paused, assert_schema_version, write_schema_version, resolve_token, ContractError,
+    FinancingClient, FinancingOffer, InsuranceClient, Invoice, InvoiceStatus, OfferStatus,
+    RegistryClient, ReputationClient, GRACE_PERIOD_SECS, MAX_OFFER_DURATION_SECS,
+    MIN_OFFER_DURATION_SECS,
 };
+
+/// Current storage schema version for the repayment contract.
+///
+/// Increment this constant when a new release changes the layout of any
+/// persistent or instance storage key. See docs/adr/0009-storage-schema-versioning.md.
+pub const SCHEMA_VERSION: u32 = 1;
 
 // ─── Overdue penalty (ADR-0007) ──────────────────────────────────────────────
 
@@ -130,6 +137,7 @@ impl RepaymentContract {
         env.storage()
             .instance()
             .set(&symbol_short!("token"), &token);
+        write_schema_version(&env, SCHEMA_VERSION);
     }
 
     pub fn get_admin(env: Env) -> Address {
@@ -144,6 +152,7 @@ impl RepaymentContract {
     /// insurance pool (Task 10).
     pub fn set_insurance(env: Env, admin: Address, insurance: Address) {
         assert_not_paused(&env);
+        assert_schema_version(&env, SCHEMA_VERSION);
         admin.require_auth();
         let current: Address = env
             .storage()
@@ -167,6 +176,7 @@ impl RepaymentContract {
     /// (Task 11).
     pub fn set_reputation(env: Env, admin: Address, reputation: Address) {
         assert_not_paused(&env);
+        assert_schema_version(&env, SCHEMA_VERSION);
         admin.require_auth();
         let current: Address = env
             .storage()
@@ -194,6 +204,7 @@ impl RepaymentContract {
     /// an admin calls this.
     pub fn set_penalty(env: Env, admin: Address, penalty_bps: u32, cap_bps: u32) {
         assert_not_paused(&env);
+        assert_schema_version(&env, SCHEMA_VERSION);
         admin.require_auth();
         let current: Address = env
             .storage()
@@ -230,6 +241,7 @@ impl RepaymentContract {
     /// Transfers admin rights. Only current admin.
     pub fn transfer_admin(env: Env, admin: Address, new_admin: Address) {
         assert_not_paused(&env);
+        assert_schema_version(&env, SCHEMA_VERSION);
         admin.require_auth();
         let current: Address = env
             .storage()
@@ -296,6 +308,7 @@ impl RepaymentContract {
         amount: i128,
     ) -> Invoice {
         assert_not_paused(&env);
+        assert_schema_version(&env, SCHEMA_VERSION);
         repayer.require_auth();
 
         // Cross-contract: read invoice from registry
@@ -414,6 +427,7 @@ impl RepaymentContract {
     /// handles the status transition and event emission.
     pub fn mark_overdue(env: Env, invoice_id: Symbol) -> Invoice {
         assert_not_paused(&env);
+        assert_schema_version(&env, SCHEMA_VERSION);
 
         let registry_addr: Address = env
             .storage()
@@ -434,6 +448,7 @@ impl RepaymentContract {
         lender: Address,
     ) -> FinancingOffer {
         assert_not_paused(&env);
+        assert_schema_version(&env, SCHEMA_VERSION);
         lender.require_auth();
 
         // Cross-contract: read invoice from registry

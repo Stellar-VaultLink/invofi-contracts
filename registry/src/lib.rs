@@ -3,9 +3,18 @@
 use soroban_sdk::{contract, contractimpl, symbol_short, Address, Env, Map, Symbol, Vec};
 
 use invofi_common::{
-    assert_not_paused, ContractError, Invoice, InvoiceStatus, ProtocolStats, RiskTier,
-    MIN_INVOICE_AMOUNT,
+    assert_not_paused, assert_schema_version, write_schema_version, ContractError, Invoice,
+    InvoiceStatus, ProtocolStats, RiskTier, MIN_INVOICE_AMOUNT,
 };
+
+/// Current storage schema version for the registry contract.
+///
+/// Increment this constant when a new release changes the layout of any
+/// persistent or instance storage key (renamed key, added/removed field in a
+/// stored struct, changed value type). A matching `migrate()` entrypoint must
+/// be implemented and called before the new WASM is deployed to a live
+/// instance. See docs/adr/0009-storage-schema-versioning.md.
+pub const SCHEMA_VERSION: u32 = 1;
 
 // ─── Storage Helpers ─────────────────────────────────────────────────────────
 
@@ -107,6 +116,7 @@ impl RegistryContract {
         env.storage()
             .instance()
             .set(&symbol_short!("admin"), &admin);
+        write_schema_version(&env, SCHEMA_VERSION);
     }
 
     /// Returns the admin address. Panics if not yet initialized.
@@ -121,6 +131,7 @@ impl RegistryContract {
     /// call this.
     pub fn transfer_admin(env: Env, admin: Address, new_admin: Address) {
         assert_not_paused(&env);
+        assert_schema_version(&env, SCHEMA_VERSION);
         assert_admin(&env, &admin);
         env.storage()
             .instance()
@@ -132,6 +143,7 @@ impl RegistryContract {
     /// Financed via `transition_invoice_status`.
     pub fn set_financing_contract(env: Env, admin: Address, financing: Address) {
         assert_not_paused(&env);
+        assert_schema_version(&env, SCHEMA_VERSION);
         assert_admin(&env, &admin);
         env.storage()
             .instance()
@@ -143,6 +155,7 @@ impl RegistryContract {
     /// to Financed (partial) or Repaid (full) via `transition_invoice_status`.
     pub fn set_repayment_contract(env: Env, admin: Address, repayment: Address) {
         assert_not_paused(&env);
+        assert_schema_version(&env, SCHEMA_VERSION);
         assert_admin(&env, &admin);
         env.storage()
             .instance()
@@ -181,6 +194,7 @@ impl RegistryContract {
     /// Admin only.
     pub fn set_rate(env: Env, admin: Address, tier: RiskTier, rate_bps: u32) {
         assert_not_paused(&env);
+        assert_schema_version(&env, SCHEMA_VERSION);
         assert_admin(&env, &admin);
         if rate_bps > 10_000 {
             env.panic_with_error(ContractError::InvalidInput);
@@ -203,6 +217,7 @@ impl RegistryContract {
     /// Set the protocol fee in basis points (max 500 = 5%). Admin only.
     pub fn set_fee(env: Env, admin: Address, fee_bps: u32) {
         assert_not_paused(&env);
+        assert_schema_version(&env, SCHEMA_VERSION);
         assert_admin(&env, &admin);
         if fee_bps > 500 {
             env.panic_with_error(ContractError::InvalidInput);
@@ -232,6 +247,7 @@ impl RegistryContract {
         due_date: u64,
     ) -> Invoice {
         assert_not_paused(&env);
+        assert_schema_version(&env, SCHEMA_VERSION);
         originator.require_auth();
         assert_not_blacklisted(&env, &originator);
         if amount < MIN_INVOICE_AMOUNT {
@@ -284,6 +300,7 @@ impl RegistryContract {
         new_status: InvoiceStatus,
     ) -> Invoice {
         assert_not_paused(&env);
+        assert_schema_version(&env, SCHEMA_VERSION);
         originator.require_auth();
         let mut invoices = load_invoices(&env);
         let mut invoice = invoices
@@ -311,6 +328,7 @@ impl RegistryContract {
         new_amount: i128,
     ) -> Invoice {
         assert_not_paused(&env);
+        assert_schema_version(&env, SCHEMA_VERSION);
         originator.require_auth();
         let mut invoices = load_invoices(&env);
         let mut invoice = invoices
@@ -338,6 +356,7 @@ impl RegistryContract {
     /// Cancel a Pending invoice. Only the originator can call this.
     pub fn cancel_invoice(env: Env, invoice_id: Symbol, originator: Address) -> Invoice {
         assert_not_paused(&env);
+        assert_schema_version(&env, SCHEMA_VERSION);
         originator.require_auth();
         let mut invoices = load_invoices(&env);
         let mut invoice = invoices
@@ -370,6 +389,7 @@ impl RegistryContract {
         fully_repaid: bool,
     ) -> Invoice {
         assert_not_paused(&env);
+        assert_schema_version(&env, SCHEMA_VERSION);
         repayer.require_auth();
         let mut invoices = load_invoices(&env);
         let mut invoice = invoices
@@ -397,6 +417,7 @@ impl RegistryContract {
     /// contract-invoker auth (see Stellar docs — Authorization).
     pub fn financing_marks_invoice_financed(env: Env, id: Symbol) -> Invoice {
         assert_not_paused(&env);
+        assert_schema_version(&env, SCHEMA_VERSION);
         let financing: Address = env
             .storage()
             .instance()
@@ -426,6 +447,7 @@ impl RegistryContract {
     /// authorized via implicit contract-invoker auth.
     pub fn repayment_marks_invoice_repaid(env: Env, id: Symbol, fully_repaid: bool) -> Invoice {
         assert_not_paused(&env);
+        assert_schema_version(&env, SCHEMA_VERSION);
         let repayment: Address = env
             .storage()
             .instance()
@@ -461,6 +483,7 @@ impl RegistryContract {
     /// originator's reputation default record.
     pub fn repayment_marks_defaulted(env: Env, id: Symbol) -> Invoice {
         assert_not_paused(&env);
+        assert_schema_version(&env, SCHEMA_VERSION);
         let repayment: Address = env
             .storage()
             .instance()
@@ -490,6 +513,7 @@ impl RegistryContract {
     /// require originator auth — the time-based condition is sufficient.
     pub fn mark_invoice_overdue(env: Env, id: Symbol) -> Invoice {
         assert_not_paused(&env);
+        assert_schema_version(&env, SCHEMA_VERSION);
         let mut invoices = load_invoices(&env);
         let mut invoice = invoices
             .get(id.clone())
@@ -515,6 +539,7 @@ impl RegistryContract {
     /// Mark a Financed invoice as Disputed. Only the originator.
     pub fn raise_dispute(env: Env, invoice_id: Symbol, originator: Address) -> Invoice {
         assert_not_paused(&env);
+        assert_schema_version(&env, SCHEMA_VERSION);
         originator.require_auth();
         let mut invoices = load_invoices(&env);
         let mut invoice = invoices
@@ -544,6 +569,7 @@ impl RegistryContract {
         target_status: InvoiceStatus,
     ) -> Invoice {
         assert_not_paused(&env);
+        assert_schema_version(&env, SCHEMA_VERSION);
         assert_admin(&env, &admin);
         let mut invoices = load_invoices(&env);
         let mut invoice = invoices
@@ -661,6 +687,7 @@ impl RegistryContract {
 
     pub fn blacklist_address(env: Env, admin: Address, target: Address) {
         assert_not_paused(&env);
+        assert_schema_version(&env, SCHEMA_VERSION);
         assert_admin(&env, &admin);
         let mut list = load_blacklist(&env);
         for entry in list.iter() {
@@ -674,6 +701,7 @@ impl RegistryContract {
 
     pub fn unblacklist_address(env: Env, admin: Address, target: Address) {
         assert_not_paused(&env);
+        assert_schema_version(&env, SCHEMA_VERSION);
         assert_admin(&env, &admin);
         let list = load_blacklist(&env);
         let mut new_list: Vec<Address> = Vec::new(&env);

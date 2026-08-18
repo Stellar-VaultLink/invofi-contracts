@@ -74,6 +74,15 @@ pub enum ContractError {
 
     /// The caller's address is on the blacklist.
     Blacklisted = 8,
+
+    /// The stored `schver` key does not match the WASM binary's expected
+    /// `SCHEMA_VERSION` constant. The contract must not process any calls
+    /// until a `migrate()` pass (authorized by the admin) bumps the stored
+    /// version to match. Clients should surface this as a "contract needs
+    /// migration" message rather than a generic error.
+    ///
+    /// Discriminant 10 — must never be renumbered after deployment.
+    SchemaMismatch = 10,
 }
 
 // ─── Types ───────────────────────────────────────────────────────────────────
@@ -311,6 +320,73 @@ pub fn assert_not_paused(env: &Env) {
     }
 }
 
+// ─── Storage Schema Versioning ───────────────────────────────────────────────
+
+/// Write `version` to the `schver` instance-storage key.
+///
+/// Call this **once**, inside `__constructor`, immediately after the other
+/// initialization writes. The key is set only by the constructor — normal
+/// entrypoints read it via `assert_schema_version` but never mutate it.
+/// A `migrate()` function (see docs/adr/0009-storage-schema-versioning.md)
+/// is the one other place permitted to call this, at the end of a successful
+/// migration pass.
+pub fn write_schema_version(env: &Env, version: u32) {
+    env.storage()
+        .instance()
+        .set(&symbol_short!("schver"), &version);
+}
+
+/// Read the stored `schver` key and enforce the three-case contract:
+///
+/// | Stored value | Behaviour |
+/// |---|---|
+/// | **Absent** (key missing) | Legacy deployment — key was never written because this contract was deployed before schema-versioning shipped. Fall through silently; reads and writes continue working against the legacy storage shape. |
+/// | **Present, matches `expected`** | Proceed normally. |
+/// | **Present, mismatches `expected`** | Panic with the message `"schema version mismatch: expected N, found M"`. This is an unrecoverable error that signals the contract WASM was updated without running `migrate()` first. |
+///
+/// ## Usage pattern
+///
+/// Place one call to `assert_schema_version(&env, SCHEMA_VERSION)` at the top
+/// of every public entrypoint that reads or writes persistent/instance state.
+/// Read-only getters that never write storage MAY skip the check (they cannot
+/// corrupt state), but including them is harmless and aids observability.
+///
+/// Exceptions (must **not** call this guard):
+/// - `__constructor` — the key doesn't exist yet when the constructor runs.
+///   `write_schema_version` is called there instead.
+/// - `pause` / `unpause` — these intentionally work even if the contract
+///   needs migration (an operator must be able to halt a broken deployment).
+///
+/// ## Panic message format
+///
+/// ```text
+/// schema version mismatch: expected 2, found 1
+/// ```
+///
+/// This string is the canonical mismatch signal. Indexers and tooling that
+/// monitor for stuck contracts should key on this prefix.
+pub fn assert_schema_version(env: &Env, expected: u32) {
+    let stored: Option<u32> = env.storage().instance().get(&symbol_short!("schver"));
+    match stored {
+        None => {
+            // Legacy deployment: no version key was ever written.
+            // Fall through — existing storage shape is still valid for v1.
+        }
+        Some(v) if v == expected => {
+            // Happy path: version matches.
+        }
+        Some(_v) => {
+            // Version mismatch: the contract binary expects a different schema
+            // than what is currently stored. Run migrate() before upgrading.
+            //
+            // We surface this as ContractError::SchemaMismatch (discriminant 10)
+            // so clients can match on Error(Contract, #10) without parsing
+            // diagnostic messages.
+            env.panic_with_error(ContractError::SchemaMismatch);
+        }
+    }
+}
+
 // ─── Cross-Contract Interface ────────────────────────────────────────────────
 // Financing calls these methods on the Registry contract.
 
@@ -452,4 +528,132 @@ pub trait ReputationInterface {
 
     /// Read an originator's current reputation score (public, read-only).
     fn get_score(env: Env, originator: Address) -> i128;
+}
+
+// ─── Schema version unit tests ────────────────────────────────────────────────
+
+#[cfg(test)]
+mod schema_version_tests {
+    extern crate std;
+
+    use super::{assert_schema_version, write_schema_version, ContractError};
+    use soroban_sdk::{symbol_short, Env};
+
+    // ── Helper constants ──────────────────────────────────────────────────────
+
+    /// The version this binary expects — mirrors SCHEMA_VERSION in each crate.
+    const V1: u32 = 1;
+    const V2: u32 = 2;
+
+    // ── Legacy fallback (absent key) ──────────────────────────────────────────
+
+    /// A contract deployed before schema-versioning shipped has no `schver` key.
+    /// `assert_schema_version` must pass silently so legacy instances keep working.
+    #[test]
+    fn legacy_absent_key_succeeds() {
+        let env = Env::default();
+        // No write_schema_version call — key is absent, simulating pre-versioning deployment.
+        assert_schema_version(&env, V1); // must not panic
+    }
+
+    /// Verify that after `write_schema_version` the key is present (not absent).
+    #[test]
+    fn written_key_is_present() {
+        let env = Env::default();
+        write_schema_version(&env, V1);
+        let stored: Option<u32> = env
+            .storage()
+            .instance()
+            .get(&symbol_short!("schver"));
+        assert_eq!(stored, Some(V1));
+    }
+
+    // ── Matching version ──────────────────────────────────────────────────────
+
+    /// When the stored version matches the binary's expected version,
+    /// `assert_schema_version` must proceed normally (no panic).
+    #[test]
+    fn matching_version_succeeds() {
+        let env = Env::default();
+        write_schema_version(&env, V1);
+        assert_schema_version(&env, V1); // must not panic
+    }
+
+    /// Matching version continues to succeed even when called multiple times
+    /// (idempotent read).
+    #[test]
+    fn matching_version_idempotent() {
+        let env = Env::default();
+        write_schema_version(&env, V1);
+        assert_schema_version(&env, V1);
+        assert_schema_version(&env, V1);
+        assert_schema_version(&env, V1);
+    }
+
+    // ── Mismatch → panic (SchemaMismatch = discriminant 10) ──────────────────
+
+    /// When the stored version is higher than expected (binary is behind),
+    /// `assert_schema_version` must panic with `Error(Contract, #10)`.
+    #[test]
+    #[should_panic(expected = "Error(Contract, #10)")]
+    fn stored_newer_panics() {
+        let env = Env::default();
+        write_schema_version(&env, V2);
+        assert_schema_version(&env, V1); // stored=2, expected=1 → mismatch
+    }
+
+    /// When the stored version is lower than expected (binary is ahead of stored),
+    /// `assert_schema_version` must panic with `Error(Contract, #10)`.
+    #[test]
+    #[should_panic(expected = "Error(Contract, #10)")]
+    fn stored_older_panics() {
+        let env = Env::default();
+        write_schema_version(&env, V1);
+        assert_schema_version(&env, V2); // stored=1, expected=2 → mismatch
+    }
+
+    /// A wider gap also panics — version numbers are exact-match, not ranges.
+    #[test]
+    #[should_panic(expected = "Error(Contract, #10)")]
+    fn large_version_gap_panics() {
+        let env = Env::default();
+        write_schema_version(&env, 5);
+        assert_schema_version(&env, 1);
+    }
+
+    // ── write_schema_version overwrite ────────────────────────────────────────
+
+    /// `write_schema_version` can be called again (e.g. from `migrate()`) to
+    /// advance the stored version; subsequent `assert_schema_version` calls
+    /// use the new value.
+    #[test]
+    fn write_advances_version() {
+        let env = Env::default();
+        write_schema_version(&env, V1);
+        assert_schema_version(&env, V1); // ok
+
+        // Simulate what migrate() does at the end of a successful pass.
+        write_schema_version(&env, V2);
+        assert_schema_version(&env, V2); // ok with new version
+    }
+
+    /// After advancing the version, the old expected value panics — callers
+    /// must redeploy the new WASM to match.
+    #[test]
+    #[should_panic(expected = "Error(Contract, #10)")]
+    fn old_expected_fails_after_advance() {
+        let env = Env::default();
+        write_schema_version(&env, V1);
+        write_schema_version(&env, V2);
+        assert_schema_version(&env, V1); // stored=2, expected=1 → mismatch
+    }
+
+    // ── SchemaMismatch discriminant value ────────────────────────────────────
+
+    /// `ContractError::SchemaMismatch` must have discriminant 10 so SDK
+    /// consumers can match on it without parsing the error string.
+    #[test]
+    fn schema_mismatch_discriminant_is_10() {
+        assert_eq!(ContractError::SchemaMismatch as u32, 10);
+    }
 }

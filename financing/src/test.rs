@@ -1519,3 +1519,69 @@ fn test_daily_frequency_period() {
     env.ledger().set_timestamp(first_due + 86_400 + 1);
     assert_eq!(fin.get_installment_due(&symbol_short!("off_sc1")), 2);
 }
+
+// ─── Schema version tests (issue #66) ───────────────────────────────────────
+
+mod schema_version_tests {
+    use super::FinancingContract;
+    use invofi_registry::RegistryContract;
+    use soroban_sdk::{symbol_short, testutils::Address as _, Address, Env};
+
+    fn deploy(env: &Env) -> (Address, Address, super::FinancingContractClient) {
+        let admin = Address::generate(env);
+        let token = Address::generate(env);
+        let registry_id = env.register(RegistryContract, (admin.clone(),));
+        let financing_id =
+            env.register(FinancingContract, (admin.clone(), registry_id.clone(), token.clone()));
+        let client = super::FinancingContractClient::new(env, &financing_id);
+        invofi_registry::RegistryContractClient::new(env, &registry_id)
+            .set_financing_contract(&admin, &financing_id);
+        (admin, financing_id, client)
+    }
+
+    // ── Matching version ─────────────────────────────────────────────────────
+
+    #[test]
+    fn normal_deployment_register_currency_works() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (admin, _, client) = deploy(&env);
+        let token = Address::generate(&env);
+        client.register_currency(&admin, &symbol_short!("USDC"), &token); // must succeed
+    }
+
+    // ── Legacy fallback ──────────────────────────────────────────────────────
+
+    #[test]
+    fn legacy_absent_schver_register_currency_works() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (admin, contract_id, client) = deploy(&env);
+
+        env.as_contract(&contract_id, || {
+            env.storage().instance().remove(&symbol_short!("schver"));
+        });
+
+        let token = Address::generate(&env);
+        client.register_currency(&admin, &symbol_short!("USDC"), &token); // legacy fallback
+    }
+
+    // ── Mismatch panics ──────────────────────────────────────────────────────
+
+    #[test]
+    #[should_panic(expected = "Error(Contract, #10)")]
+    fn mismatched_schver_blocks_register_currency() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (admin, contract_id, client) = deploy(&env);
+
+        env.as_contract(&contract_id, || {
+            env.storage()
+                .instance()
+                .set(&symbol_short!("schver"), &2u32);
+        });
+
+        let token = Address::generate(&env);
+        client.register_currency(&admin, &symbol_short!("USDC"), &token); // must panic #10
+    }
+}

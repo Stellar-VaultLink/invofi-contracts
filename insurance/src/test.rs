@@ -602,3 +602,84 @@ fn test_payout_without_registry_panics() {
 
     client.pay_out(&invoice_id, &beneficiary, &500_000);
 }
+
+// ─── Schema version tests (issue #66) ───────────────────────────────────────
+
+mod schema_version_tests {
+    use super::InsuranceContract;
+    use crate::InsuranceContractClient;
+    use soroban_sdk::{symbol_short, testutils::Address as _, token, Address, Env};
+
+    fn deploy(env: &Env, admin: &Address) -> (Address, Address, InsuranceContractClient) {
+        let sac = env.register_stellar_asset_contract_v2(admin.clone());
+        let token_id = sac.address();
+        let contract_id = env.register(InsuranceContract, (admin.clone(), token_id.clone()));
+        let client = InsuranceContractClient::new(env, &contract_id);
+        (token_id, contract_id, client)
+    }
+
+    fn mint_and_approve(env: &Env, token_id: &Address, spender: &Address, who: &Address, amount: i128) {
+        token::StellarAssetClient::new(env, token_id).mint(who, &amount);
+        token::TokenClient::new(env, token_id).approve(
+            who,
+            spender,
+            &amount,
+            &(env.ledger().sequence() + 1000),
+        );
+    }
+
+    // ── Matching version ─────────────────────────────────────────────────────
+
+    #[test]
+    fn normal_deployment_stake_works() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let admin = Address::generate(&env);
+        let staker = Address::generate(&env);
+        let (token_id, contract_id, client) = deploy(&env, &admin);
+
+        mint_and_approve(&env, &token_id, &contract_id, &staker, 1_000_000);
+        client.stake(&staker, &1_000_000); // must succeed
+        assert_eq!(client.get_pool_total(), 1_000_000);
+    }
+
+    // ── Legacy fallback ──────────────────────────────────────────────────────
+
+    #[test]
+    fn legacy_absent_schver_stake_works() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let admin = Address::generate(&env);
+        let staker = Address::generate(&env);
+        let (token_id, contract_id, client) = deploy(&env, &admin);
+
+        env.as_contract(&contract_id, || {
+            env.storage().instance().remove(&symbol_short!("schver"));
+        });
+
+        mint_and_approve(&env, &token_id, &contract_id, &staker, 1_000_000);
+        client.stake(&staker, &1_000_000); // must succeed via legacy fallback
+        assert_eq!(client.get_pool_total(), 1_000_000);
+    }
+
+    // ── Mismatch panics ──────────────────────────────────────────────────────
+
+    #[test]
+    #[should_panic(expected = "Error(Contract, #10)")]
+    fn mismatched_schver_blocks_stake() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let admin = Address::generate(&env);
+        let staker = Address::generate(&env);
+        let (token_id, contract_id, client) = deploy(&env, &admin);
+
+        env.as_contract(&contract_id, || {
+            env.storage()
+                .instance()
+                .set(&symbol_short!("schver"), &2u32);
+        });
+
+        mint_and_approve(&env, &token_id, &contract_id, &staker, 1_000_000);
+        client.stake(&staker, &1_000_000); // must panic with #10
+    }
+}
