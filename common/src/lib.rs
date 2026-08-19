@@ -74,6 +74,9 @@ pub enum ContractError {
 
     /// The caller's address is on the blacklist.
     Blacklisted = 8,
+
+    /// The caller does not meet the minimum tier required for this operation.
+    InsufficientTier = 9,
 }
 
 // ─── Types ───────────────────────────────────────────────────────────────────
@@ -217,6 +220,27 @@ pub struct RepaymentSchedule {
     pub installment_amount: i128,
     /// Unix timestamp of the first installment due date.
     pub first_due: u64,
+}
+
+// ─── Reputation Governance ───────────────────────────────────────────────────
+
+/// Minimum score for Silver tier (governance proposal creation eligible).
+pub const SILVER_THRESHOLD: i128 = 100;
+/// Minimum score for Gold tier.
+pub const GOLD_THRESHOLD: i128 = 500;
+/// Minimum score for Platinum tier.
+pub const PLATINUM_THRESHOLD: i128 = 1_000;
+
+/// Reputation tier for governance gating. A higher tier grants greater
+/// governance privileges — Silver is the minimum for proposal creation.
+#[contracttype]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[repr(u32)]
+pub enum ReputationTier {
+    Bronze = 0,
+    Silver = 1,
+    Gold = 2,
+    Platinum = 3,
 }
 
 // ─── Currency Registry ───────────────────────────────────────────────────────
@@ -452,4 +476,28 @@ pub trait ReputationInterface {
 
     /// Read an originator's current reputation score (public, read-only).
     fn get_score(env: Env, originator: Address) -> i128;
+
+    /// Record a dispute outcome for an originator. Only callable by the
+    /// configured dispute recorder (the registry contract). `won` indicates
+    /// whether the dispute was resolved in the originator's favor.
+    fn record_dispute_outcome(env: Env, originator: Address, won: bool);
+
+    /// Record invoice volume for an originator. Only callable by the
+    /// configured volume recorder (the registry contract).
+    fn record_invoice_volume(env: Env, originator: Address, amount: i128);
+
+    /// Read an originator's unified reputation score aggregating repayment
+    /// history, dispute outcomes, and invoice volume. Public, read-only.
+    fn get_unified_score(env: Env, originator: Address) -> i128;
+
+    /// Read an originator's effective reputation score with time-decay
+    /// applied. Public, read-only.
+    fn get_effective_score(env: Env, originator: Address) -> i128;
+
+    /// Read an originator's reputation tier. Public, read-only.
+    fn get_tier(env: Env, originator: Address) -> ReputationTier;
+
+    /// Read an originator's governance voting weight (effective_score / 100).
+    /// Public, read-only.
+    fn get_governance_weight(env: Env, originator: Address) -> u32;
 }
