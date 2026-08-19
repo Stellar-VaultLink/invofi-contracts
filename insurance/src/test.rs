@@ -602,3 +602,170 @@ fn test_payout_without_registry_panics() {
 
     client.pay_out(&invoice_id, &beneficiary, &500_000);
 }
+
+// ─── Partial Claim Tests (Issue #137) ────────────────────────────────────────
+
+#[test]
+fn test_reserve_and_claim_payout_basic() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let admin = Address::generate(&env);
+    let (token_id, _insurance_id, client) = setup(&env, &admin);
+
+    let staker = Address::generate(&env);
+    mint_and_approve(&env, &token_id, &_insurance_id, &staker, 1_000_000);
+    client.stake(&staker, &1_000_000);
+
+    let payout_caller = Address::generate(&env);
+    client.set_payout_caller(&admin, &payout_caller);
+
+    let offer_id = symbol_short!("off_1");
+    let lender = Address::generate(&env);
+
+    // Reserve 500_000 for this offer
+    let reserved = client.reserve_payout(&offer_id, &500_000);
+    assert_eq!(reserved, 500_000);
+    assert_eq!(client.get_reserved(&offer_id), 500_000);
+
+    // Claim 300_000 from the reserved amount
+    let (paid, remaining) = client.claim_payout(&offer_id, &lender, &300_000);
+    assert_eq!(paid, 300_000);
+    assert_eq!(remaining, 200_000);
+    assert_eq!(client.get_paid(&offer_id), 300_000);
+    assert_eq!(client.get_pool_total(), 700_000);
+    assert_eq!(client.get_stake(&staker), 700_000);
+
+    // Claim remaining 200_000
+    let (paid2, remaining2) = client.claim_payout(&offer_id, &lender, &200_000);
+    assert_eq!(paid2, 200_000);
+    assert_eq!(remaining2, 0);
+    assert_eq!(client.get_pool_total(), 500_000);
+}
+
+#[test]
+fn test_claim_payout_cannot_exceed_reserved() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let admin = Address::generate(&env);
+    let (token_id, _insurance_id, client) = setup(&env, &admin);
+
+    let staker = Address::generate(&env);
+    mint_and_approve(&env, &token_id, &_insurance_id, &staker, 1_000_000);
+    client.stake(&staker, &1_000_000);
+
+    let payout_caller = Address::generate(&env);
+    client.set_payout_caller(&admin, &payout_caller);
+
+    let offer_id = symbol_short!("off_1");
+    let lender = Address::generate(&env);
+
+    // Reserve only 200_000
+    client.reserve_payout(&offer_id, &200_000);
+
+    // Try to claim 500_000 — should be capped at 200_000
+    let (paid, remaining) = client.claim_payout(&offer_id, &lender, &500_000);
+    assert_eq!(paid, 200_000);
+    assert_eq!(remaining, 0);
+}
+
+#[test]
+fn test_claim_payout_cannot_exceed_pool() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let admin = Address::generate(&env);
+    let (token_id, _insurance_id, client) = setup(&env, &admin);
+
+    let staker = Address::generate(&env);
+    mint_and_approve(&env, &token_id, &_insurance_id, &staker, 100_000);
+    client.stake(&staker, &100_000);
+
+    let payout_caller = Address::generate(&env);
+    client.set_payout_caller(&admin, &payout_caller);
+
+    let offer_id = symbol_short!("off_1");
+    let lender = Address::generate(&env);
+
+    // Reserve more than pool
+    client.reserve_payout(&offer_id, &500_000);
+
+    // Claim — should be capped at pool total (100_000)
+    let (paid, remaining) = client.claim_payout(&offer_id, &lender, &500_000);
+    assert_eq!(paid, 100_000);
+    assert_eq!(client.get_pool_total(), 0);
+}
+
+#[test]
+fn test_claim_payout_no_reservation_panics() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let admin = Address::generate(&env);
+    let (token_id, _insurance_id, client) = setup(&env, &admin);
+
+    let staker = Address::generate(&env);
+    mint_and_approve(&env, &token_id, &_insurance_id, &staker, 1_000_000);
+    client.stake(&staker, &1_000_000);
+
+    let payout_caller = Address::generate(&env);
+    client.set_payout_caller(&admin, &payout_caller);
+
+    let offer_id = symbol_short!("off_1");
+    let lender = Address::generate(&env);
+
+    // No reservation — should panic
+    let result = client.try_claim_payout(&offer_id, &lender, &100_000);
+    assert!(result.is_err());
+}
+
+#[test]
+fn test_reserve_zero_amount_panics() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let admin = Address::generate(&env);
+    let (_token_id, _insurance_id, client) = setup(&env, &admin);
+
+    let payout_caller = Address::generate(&env);
+    client.set_payout_caller(&admin, &payout_caller);
+
+    let offer_id = symbol_short!("off_1");
+    let result = client.try_reserve_payout(&offer_id, &0);
+    assert!(result.is_err());
+}
+
+#[test]
+fn test_multiple_offers_independent_reservations() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let admin = Address::generate(&env);
+    let (token_id, _insurance_id, client) = setup(&env, &admin);
+
+    let staker = Address::generate(&env);
+    mint_and_approve(&env, &token_id, &_insurance_id, &staker, 1_000_000);
+    client.stake(&staker, &1_000_000);
+
+    let payout_caller = Address::generate(&env);
+    client.set_payout_caller(&admin, &payout_caller);
+
+    let offer_a = symbol_short!("off_a");
+    let offer_b = symbol_short!("off_b");
+    let lender = Address::generate(&env);
+
+    // Reserve for both offers
+    client.reserve_payout(&offer_a, &400_000);
+    client.reserve_payout(&offer_b, &300_000);
+
+    // Claim from offer_a
+    let (paid_a, _) = client.claim_payout(&offer_a, &lender, &400_000);
+    assert_eq!(paid_a, 400_000);
+
+    // offer_b reservation is independent — still claimable
+    let (paid_b, _) = client.claim_payout(&offer_b, &lender, &300_000);
+    assert_eq!(paid_b, 300_000);
+
+    assert_eq!(client.get_pool_total(), 300_000);
+}

@@ -16,6 +16,66 @@ use soroban_sdk::{contract, contractimpl, symbol_short, token, Address, Env, Map
 
 use invofi_common::{assert_not_paused, ContractError, InvoiceStatus, RegistryClient};
 
+// ─── Storage Helpers for Partial Claims ──────────────────────────────────────
+
+/// Load the per-offer reservation map (offer_id -> reserved amount).
+fn load_reservations(env: &Env) -> Map<Symbol, i128> {
+    env.storage()
+        .persistent()
+        .get(&symbol_short!("resrvtn"))
+        .unwrap_or_else(|| Map::new(env))
+}
+
+/// Save the per-offer reservation map.
+fn save_reservations(env: &Env, map: &Map<Symbol, i128>) {
+    env.storage()
+        .persistent()
+        .set(&symbol_short!("resrvtn"), map);
+}
+
+/// Load the per-offer paid map (offer_id -> amount already paid).
+fn load_paid_map(env: &Env) -> Map<Symbol, i128> {
+    env.storage()
+        .persistent()
+        .get(&symbol_short!("paidamt"))
+        .unwrap_or_else(|| Map::new(env))
+}
+
+/// Save the per-offer paid map.
+fn save_paid_map(env: &Env, map: &Map<Symbol, i128>) {
+    env.storage()
+        .persistent()
+        .set(&symbol_short!("paidamt"), map);
+}
+
+/// Load the reserved amount for an offer (0 if never reserved).
+fn load_reserved(env: &Env, offer_id: &Symbol) -> i128 {
+    load_reservations(env).get(offer_id.clone()).unwrap_or(0)
+}
+
+/// Save the reserved amount for an offer.
+fn save_reserved(env: &Env, offer_id: &Symbol, amount: i128) {
+    let mut map = load_reservations(env);
+    if amount <= 0 {
+        map.remove(offer_id.clone());
+    } else {
+        map.set(offer_id.clone(), amount);
+    }
+    save_reservations(env, &map);
+}
+
+/// Load the amount already paid out for an offer (0 if nothing paid).
+fn load_paid(env: &Env, offer_id: &Symbol) -> i128 {
+    load_paid_map(env).get(offer_id.clone()).unwrap_or(0)
+}
+
+/// Save the amount already paid out for an offer.
+fn save_paid(env: &Env, offer_id: &Symbol, amount: i128) {
+    let mut map = load_paid_map(env);
+    map.set(offer_id.clone(), amount);
+    save_paid_map(env, &map);
+}
+
 // ─── Storage Helpers ─────────────────────────────────────────────────────────
 
 fn load_stakes(env: &Env) -> Map<Address, i128> {
@@ -380,6 +440,144 @@ impl InsuranceContract {
         env.events()
             .publish((symbol_short!("pool_pay"), beneficiary.clone()), payout);
         payout
+    }
+
+    // ── Reserve + partial claim (Issue #137) ──────────────────────────────
+
+    /// Reserve `amount` from the pool for a specific offer's insurance claim.
+    /// This locks funds so they cannot be claimed by other offers. The reserved
+    /// amount is tracked per-offer and reduces the effective pool balance for
+    /// other operations.
+    ///
+    /// `amount` must be <= pool available (pool_total - total_reserved).
+    /// Only callable by the configured payout caller (the repayment contract).
+    ///
+    /// Returns the amount actually reserved.
+    pub fn reserve_payout(env: Env, offer_id: Symbol, amount: i128) -> i128 {
+        assert_not_paused(&env);
+        let payout_caller: Address = env
+            .storage()
+            .instance()
+            .get(&symbol_short!("paycall"))
+            .unwrap_or_else(|| panic!("No payout caller configured"));
+        payout_caller.require_auth();
+        if amount <= 0 {
+            env.panic_with_error(ContractError::InvalidInput);
+        }
+
+        let pool_total = load_pool_total(&env);
+        let currently_reserved = load_reserved(&env, &offer_id);
+        let available = pool_total - currently_reserved;
+        let reserved = amount.min(available);
+        if reserved <= 0 {
+            return 0;
+        }
+
+        save_reserved(&env, &offer_id, currently_reserved + reserved);
+
+        env.events().publish(
+            (symbol_short!("ins_rsrv"), offer_id.clone()),
+            reserved,
+        );
+        reserved
+    }
+
+    /// Claim a partial payout from the insurance pool for a specific offer.
+    /// The caller must be the configured payout caller. The claim amount is
+    /// bounded by:
+    ///   - `amount` (requested)
+    ///   - pool available (pool_total - other reservations)
+    ///   - reserved for this offer
+    ///
+    /// Returns (paid, remaining_reserved) where paid is the amount actually
+    /// transferred and remaining_reserved is what's still locked for this offer.
+    pub fn claim_payout(
+        env: Env,
+        offer_id: Symbol,
+        lender: Address,
+        amount: i128,
+    ) -> (i128, i128) {
+        assert_not_paused(&env);
+        let payout_caller: Address = env
+            .storage()
+            .instance()
+            .get(&symbol_short!("paycall"))
+            .unwrap_or_else(|| panic!("No payout caller configured"));
+        payout_caller.require_auth();
+        if amount <= 0 {
+            env.panic_with_error(ContractError::InvalidInput);
+        }
+
+        // ── Bounded claim: amount <= reserved for this offer ────────────
+        let reserved = load_reserved(&env, &offer_id);
+        let already_paid = load_paid(&env, &offer_id);
+        let remaining_reserved = reserved - already_paid;
+        if remaining_reserved <= 0 {
+            env.panic_with_error(ContractError::InsufficientBalance);
+        }
+        let claim_amount = amount.min(remaining_reserved);
+
+        // ── Bounded claim: amount <= pool available ─────────────────────
+        let pool_total = load_pool_total(&env);
+        let paid = claim_amount.min(pool_total);
+        if paid <= 0 {
+            return (0, remaining_reserved);
+        }
+
+        // ── Update paid tracking ────────────────────────────────────────
+        save_paid(&env, &offer_id, already_paid + paid);
+
+        // ── Pro-rata reduction of staker balances ───────────────────────
+        let mut stakes = load_stakes(&env);
+        let keys: Vec<Address> = stakes.keys();
+        let n = keys.len() as usize;
+        if n > 0 {
+            let mut reductions: i128 = 0;
+            for (i, key) in keys.iter().enumerate() {
+                let balance = stakes.get(key.clone()).unwrap_or(0);
+                let reduction = if i == n - 1 {
+                    paid - reductions
+                } else {
+                    (balance * paid / pool_total).min(paid - reductions)
+                };
+                let new_balance = balance - reduction;
+                if new_balance == 0 {
+                    stakes.remove(key.clone());
+                } else {
+                    stakes.set(key.clone(), new_balance);
+                }
+                reductions += reduction;
+            }
+            save_stakes(&env, &stakes);
+        }
+        save_pool_total(&env, pool_total - paid);
+
+        // ── Transfer tokens ─────────────────────────────────────────────
+        let token_addr = load_token(&env);
+        token::TokenClient::new(&env, &token_addr).transfer(
+            &env.current_contract_address(),
+            &lender,
+            &paid,
+        );
+
+        // ── Emit event ──────────────────────────────────────────────────
+        let new_remaining = remaining_reserved - paid;
+        env.events().publish(
+            (symbol_short!("ins_payout"), offer_id.clone()),
+            (paid, new_remaining),
+        );
+
+        (paid, new_remaining)
+    }
+
+    /// Get the reserved amount for an offer.
+    pub fn get_reserved(env: Env, offer_id: Symbol) -> i128 {
+        load_reserved(&env, &offer_id)
+    }
+
+    /// Get the amount already paid out for an offer.
+    pub fn get_paid(env: Env, offer_id: Symbol) -> i128 {
+        load_paid(&env, &offer_id)
     }
 
     // ── Query helpers ───────────────────────────────────────────────────────
