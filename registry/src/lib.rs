@@ -7,9 +7,9 @@ use soroban_sdk::{
 };
 
 use invofi_common::{
-    assert_not_paused, Invoice, InvoiceStatus, ProtocolStats, RiskTier, StorageEvictionReason,
-    DEFAULT_INVOICE_STORAGE_BUDGET_BYTES, EVICTION_GRACE_PERIOD_SECS, MIN_INVOICE_AMOUNT,
-    TERMINAL_INVOICE_RETENTION_SECS,
+    assert_not_paused, ContractError, Invoice, InvoiceStatus, ProtocolStats, RiskTier,
+    StorageEvictionReason, DEFAULT_INVOICE_STORAGE_BUDGET_BYTES, EVICTION_GRACE_PERIOD_SECS,
+    MIN_INVOICE_AMOUNT, TERMINAL_INVOICE_RETENTION_SECS,
 };
 
 // ─── Storage Helpers ─────────────────────────────────────────────────────────
@@ -228,7 +228,8 @@ fn is_invoice_eviction_eligible(env: &Env, invoice: &Invoice) -> bool {
 }
 
 fn evict_invoice(env: &Env, id: &Symbol, reason: StorageEvictionReason) -> u32 {
-    let invoice = load_invoice(env, id).unwrap_or_else(|| panic!("Invoice not found"));
+    let invoice = load_invoice(env, id)
+        .unwrap_or_else(|| env.panic_with_error(ContractError::NotFound));
     assert_evictable(env, &invoice);
     let reclaimed_bytes = invoice_storage_bytes(env, &invoice);
     env.storage().persistent().remove(&invoice_key(id));
@@ -429,7 +430,7 @@ impl RegistryContract {
     /// Get an invoice by ID.
     pub fn get_invoice(env: Env, id: Symbol) -> Invoice {
         load_invoice(&env, &id)
-            .unwrap_or_else(|| panic!("Invoice not found"))
+            .unwrap_or_else(|| env.panic_with_error(ContractError::NotFound))
     }
 
     /// Manually update the status of a Pending invoice. Only the invoice
@@ -767,7 +768,8 @@ impl RegistryContract {
     /// Return the deterministic XDR key/value payload size attributed to an
     /// invoice. SDK 22 does not expose host storage-byte accounting.
     pub fn get_invoice_storage_bytes(env: Env, id: Symbol) -> u32 {
-        let invoice = load_invoice(&env, &id).unwrap_or_else(|| panic!("Invoice not found"));
+        let invoice = load_invoice(&env, &id)
+            .unwrap_or_else(|| env.panic_with_error(ContractError::NotFound));
         invoice_storage_bytes(&env, &invoice)
     }
 
@@ -787,7 +789,8 @@ impl RegistryContract {
     pub fn bump_invoice_ttl(env: Env, keeper: Address, id: Symbol) {
         assert_not_paused(&env);
         assert_keeper(&env, &keeper);
-        let invoice = load_invoice(&env, &id).unwrap_or_else(|| panic!("Invoice not found"));
+        let invoice = load_invoice(&env, &id)
+            .unwrap_or_else(|| env.panic_with_error(ContractError::NotFound));
         if is_terminal(&invoice.status) {
             panic!("Terminal invoices cannot have their active TTL bumped");
         }

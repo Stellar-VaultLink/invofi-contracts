@@ -7,7 +7,9 @@
 
 #![no_std]
 
-use soroban_sdk::{contractclient, contracterror, contracttype, symbol_short, Address, Env, Map, Symbol};
+use soroban_sdk::{
+    contractclient, contracterror, contracttype, symbol_short, Address, Env, Map, Symbol,
+};
 
 // ─── Constants ───────────────────────────────────────────────────────────────
 
@@ -24,6 +26,41 @@ pub const MAX_OFFER_DURATION_SECS: u64 = 31_536_000;
 /// Minimum invoice amount in stroops (1 XLM = 10_000_000 stroops).
 /// Prevents dust invoices that would cost more in fees than they're worth.
 pub const MIN_INVOICE_AMOUNT: i128 = 10_000_000;
+
+// ─── Shared Error Enum ────────────────────────────────────────────────────────
+
+/// Structured error type shared across all InvoFi contracts.
+///
+/// The discriminants are stable public API: never renumber existing variants;
+/// append new variants with a new code instead.
+#[contracterror]
+#[derive(Copy, Clone, Debug, Eq, PartialEq, PartialOrd, Ord)]
+#[repr(u32)]
+pub enum ContractError {
+    /// Caller is not authorized to perform this action.
+    Unauthorized = 1,
+
+    /// Requested resource does not exist.
+    NotFound = 2,
+
+    /// Operation is not permitted for the resource's current status.
+    InvalidTransition = 3,
+
+    /// Contract is paused.
+    Paused = 4,
+
+    /// Requested balance is insufficient.
+    InsufficientBalance = 5,
+
+    /// Parameter is outside the allowed range or violates a constraint.
+    InvalidInput = 6,
+
+    /// Entity with the provided ID already exists.
+    AlreadyExists = 7,
+
+    /// Caller is blacklisted.
+    Blacklisted = 8,
+}
 
 /// Default maximum serialized storage attributed to one invoice record.
 pub const DEFAULT_INVOICE_STORAGE_BUDGET_BYTES: u32 = 10 * 1024;
