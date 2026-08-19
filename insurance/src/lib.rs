@@ -563,7 +563,7 @@ impl InsuranceContract {
         // ── Emit event ──────────────────────────────────────────────────
         let new_remaining = remaining_reserved - paid;
         env.events().publish(
-            (symbol_short!("ins_payout"), offer_id.clone()),
+            (symbol_short!("ins_pay"), offer_id.clone()),
             (paid, new_remaining),
         );
 
