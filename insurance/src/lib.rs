@@ -247,8 +247,13 @@ impl InsuranceContract {
 
     /// Withdraw `amount` back to the staker. Reduces the staker's balance and
     /// the pool total; the pool pays the staker directly from its holdings.
+    ///
+    /// **Emergency withdrawal path (issue #67):** deliberately *not* guarded by
+    /// `assert_not_paused`. Withdrawing is a safety valve for stakers — it only
+    /// unwinds a staker's own position and cannot mutate the wider protocol —
+    /// so it stays available during an emergency pause. `stake` and `pay_out`
+    /// remain paused. See ADR-0008.
     pub fn unstake(env: Env, staker: Address, amount: i128) {
-        assert_not_paused(&env);
         staker.require_auth();
         if amount <= 0 {
             env.panic_with_error(ContractError::InvalidInput);

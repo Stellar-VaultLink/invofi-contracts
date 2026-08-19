@@ -106,7 +106,7 @@ register_invoice()  →  create_offer()  →  accept_offer()
 |---|---|---|
 | `__constructor(admin, token)` | Deployer (at deploy) | Set admin + staking token (ADR-0005) |
 | `stake(staker, amount)` | Staker | Deposit the staking token into the pool (approve + pull pattern) |
-| `unstake(staker, amount)` | Staker | Withdraw; the pool pays back directly |
+| `unstake(staker, amount)` | Staker | Withdraw; the pool pays back directly. Stays available while paused (emergency withdrawal — ADR-0008) |
 | `get_stake(staker)` | Anyone | Staker's balance |
 | `get_pool_total()` | Anyone | Accounting total of staked funds |
 | `get_stakers_count()` | Anyone | Number of active stakers |
@@ -117,6 +117,10 @@ register_invoice()  →  create_offer()  →  accept_offer()
 
 > Yield-rate calculation remains intentionally out of scope — the pool is flat accounting with
 > payout-on-default wired through `pay_out`. See ADR-0003 for the payout design.
+>
+> **Emergency withdrawal while paused:** `unstake` is deliberately *not* pause-guarded.
+> It only unwinds the caller's own position, so stakers can always recover their funds even
+> during a prolonged emergency pause. `stake` and `pay_out` remain paused. See ADR-0008.
 
 ---
 
