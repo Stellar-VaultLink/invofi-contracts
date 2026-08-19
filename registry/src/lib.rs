@@ -3,8 +3,8 @@
 use soroban_sdk::{contract, contractimpl, symbol_short, Address, Env, Map, Symbol, Vec};
 
 use invofi_common::{
-    assert_not_paused, ContractError, Invoice, InvoiceStatus, ProtocolStats, RiskTier,
-    MIN_INVOICE_AMOUNT,
+    assert_not_paused, assert_transition, get_transition_history, ContractError, Invoice,
+    InvoiceStatus, ProtocolStats, RiskTier, TransitionRecord, MIN_INVOICE_AMOUNT,
 };
 
 // ─── Storage Helpers ─────────────────────────────────────────────────────────
@@ -292,14 +292,13 @@ impl RegistryContract {
         if invoice.originator != originator {
             env.panic_with_error(ContractError::Unauthorized);
         }
-        if invoice.status != InvoiceStatus::Pending {
-            env.panic_with_error(ContractError::InvalidTransition);
-        }
-        invoice.status = new_status.clone();
+        
+        let old_status = invoice.status;
+        assert_transition(&env, id.clone(), old_status, new_status, originator.clone());
+        
+        invoice.status = new_status;
         invoices.set(id, invoice.clone());
         save_invoices(&env, &invoices);
-        env.events()
-            .publish((symbol_short!("inv_sts"), invoice.id.clone()), new_status);
         invoice
     }
 
@@ -346,14 +345,15 @@ impl RegistryContract {
         if invoice.originator != originator {
             env.panic_with_error(ContractError::Unauthorized);
         }
-        if invoice.status != InvoiceStatus::Pending {
-            env.panic_with_error(ContractError::InvalidTransition);
-        }
+        
+        let old_status = invoice.status;
+        assert_transition(&env, invoice_id.clone(), old_status, InvoiceStatus::Cancelled, originator.clone());
+        
         invoice.status = InvoiceStatus::Cancelled;
         invoices.set(invoice_id, invoice.clone());
         save_invoices(&env, &invoices);
         env.events().publish(
-            (symbol_short!("inv_cxl"), invoice.id.clone()),
+            (symbol_short!("inv_cxl"), invoice.originator.clone()),
             invoice.originator.clone(),
         );
         invoice
@@ -375,18 +375,21 @@ impl RegistryContract {
         let mut invoice = invoices
             .get(id.clone())
             .unwrap_or_else(|| env.panic_with_error(ContractError::NotFound));
-        if invoice.status != InvoiceStatus::Financed {
-            env.panic_with_error(ContractError::InvalidTransition);
-        }
-        invoice.status = if fully_repaid {
+        
+        let new_status = if fully_repaid {
             InvoiceStatus::Repaid
         } else {
             InvoiceStatus::Financed
         };
+        
+        let old_status = invoice.status;
+        assert_transition(&env, id.clone(), old_status, new_status, repayer.clone());
+        
+        invoice.status = new_status;
         invoices.set(id, invoice.clone());
         save_invoices(&env, &invoices);
         env.events()
-            .publish((symbol_short!("inv_sts"), invoice.id.clone()), invoice.status.clone());
+            .publish((symbol_short!("inv_sts"), invoice.id.clone()), invoice.status);
         invoice
     }
 
@@ -408,9 +411,10 @@ impl RegistryContract {
         let mut invoice = invoices
             .get(id.clone())
             .unwrap_or_else(|| env.panic_with_error(ContractError::NotFound));
-        if invoice.status != InvoiceStatus::Pending {
-            env.panic_with_error(ContractError::InvalidTransition);
-        }
+        
+        let old_status = invoice.status;
+        assert_transition(&env, id.clone(), old_status, InvoiceStatus::Financed, financing.clone());
+        
         invoice.status = InvoiceStatus::Financed;
         invoices.set(id, invoice.clone());
         save_invoices(&env, &invoices);
@@ -437,18 +441,21 @@ impl RegistryContract {
         let mut invoice = invoices
             .get(id.clone())
             .unwrap_or_else(|| env.panic_with_error(ContractError::NotFound));
-        if invoice.status != InvoiceStatus::Financed {
-            env.panic_with_error(ContractError::InvalidTransition);
-        }
-        invoice.status = if fully_repaid {
+        
+        let new_status = if fully_repaid {
             InvoiceStatus::Repaid
         } else {
             InvoiceStatus::Financed
         };
+        
+        let old_status = invoice.status;
+        assert_transition(&env, id.clone(), old_status, new_status, repayment.clone());
+        
+        invoice.status = new_status;
         invoices.set(id, invoice.clone());
         save_invoices(&env, &invoices);
         env.events()
-            .publish((symbol_short!("inv_sts"), invoice.id.clone()), invoice.status.clone());
+            .publish((symbol_short!("inv_sts"), invoice.id.clone()), invoice.status);
         invoice
     }
 
@@ -472,9 +479,10 @@ impl RegistryContract {
         let mut invoice = invoices
             .get(id.clone())
             .unwrap_or_else(|| env.panic_with_error(ContractError::NotFound));
-        if invoice.status != InvoiceStatus::Overdue {
-            env.panic_with_error(ContractError::InvalidTransition);
-        }
+        
+        let old_status = invoice.status;
+        assert_transition(&env, id.clone(), old_status, InvoiceStatus::Defaulted, repayment.clone());
+        
         invoice.status = InvoiceStatus::Defaulted;
         invoices.set(id, invoice.clone());
         save_invoices(&env, &invoices);
@@ -494,12 +502,17 @@ impl RegistryContract {
         let mut invoice = invoices
             .get(id.clone())
             .unwrap_or_else(|| env.panic_with_error(ContractError::NotFound));
-        if invoice.status != InvoiceStatus::Financed {
-            env.panic_with_error(ContractError::InvalidTransition);
-        }
+        
+        // Validate time-based precondition before state transition
         if env.ledger().timestamp() <= invoice.due_date {
             env.panic_with_error(ContractError::InvalidTransition);
         }
+        
+        let old_status = invoice.status;
+        // For overdue, we use a dummy actor since it's permissionless
+        let dummy_actor = env.current_contract_address();
+        assert_transition(&env, id.clone(), old_status, InvoiceStatus::Overdue, dummy_actor);
+        
         invoice.status = InvoiceStatus::Overdue;
         invoices.set(id, invoice.clone());
         save_invoices(&env, &invoices);
@@ -523,9 +536,10 @@ impl RegistryContract {
         if invoice.originator != originator {
             env.panic_with_error(ContractError::Unauthorized);
         }
-        if invoice.status != InvoiceStatus::Financed {
-            env.panic_with_error(ContractError::InvalidTransition);
-        }
+        
+        let old_status = invoice.status;
+        assert_transition(&env, invoice_id.clone(), old_status, InvoiceStatus::Disputed, originator.clone());
+        
         invoice.status = InvoiceStatus::Disputed;
         invoices.set(invoice_id, invoice.clone());
         save_invoices(&env, &invoices);
@@ -549,18 +563,19 @@ impl RegistryContract {
         let mut invoice = invoices
             .get(invoice_id.clone())
             .unwrap_or_else(|| env.panic_with_error(ContractError::NotFound));
-        if invoice.status != InvoiceStatus::Disputed {
-            env.panic_with_error(ContractError::InvalidTransition);
-        }
         if target_status == InvoiceStatus::Disputed {
             env.panic_with_error(ContractError::InvalidInput);
         }
+        
+        let old_status = invoice.status;
+        assert_transition(&env, invoice_id.clone(), old_status, target_status, admin.clone());
+        
         invoice.status = target_status;
         invoices.set(invoice_id, invoice.clone());
         save_invoices(&env, &invoices);
         env.events().publish(
             (symbol_short!("inv_rsl"), invoice.id.clone()),
-            invoice.status.clone(),
+            invoice.status,
         );
         invoice
     }
@@ -707,6 +722,13 @@ impl RegistryContract {
 
     pub fn get_min_invoice_amount(_env: Env) -> i128 {
         MIN_INVOICE_AMOUNT
+    }
+
+    // ── State Machine History ────────────────────────────────────────────────
+
+    /// Query the full transition history for an invoice.
+    pub fn get_transition_history(env: Env, invoice_id: Symbol) -> Vec<TransitionRecord> {
+        get_transition_history(&env, invoice_id)
     }
 }
 
