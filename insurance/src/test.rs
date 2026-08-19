@@ -195,7 +195,7 @@ fn test_paused_blocks_stake() {
 }
 
 #[test]
-fn test_pause_blocks_all_insurance_state_changes() {
+fn test_pause_blocks_state_changes_except_unstake() {
     let env = Env::default();
     env.mock_all_auths();
     let admin = Address::generate(&env);
@@ -216,9 +216,6 @@ fn test_pause_blocks_all_insurance_state_changes() {
         client.stake(&staker, &1_000i128);
     });
     assert_paused(|| {
-        client.unstake(&staker, &1_000i128);
-    });
-    assert_paused(|| {
         client.pay_out(&soroban_sdk::symbol_short!("inv_x"), &beneficiary, &1_000i128);
     });
     assert_paused(|| {
@@ -236,8 +233,7 @@ fn test_pause_blocks_all_insurance_state_changes() {
 }
 
 #[test]
-#[should_panic(expected = "Error(Contract, #4)")]
-fn test_paused_blocks_unstake() {
+fn test_paused_allows_unstake() {
     let env = Env::default();
     env.mock_all_auths();
 
@@ -249,7 +245,16 @@ fn test_paused_blocks_unstake() {
     client.stake(&staker, &1_000_000);
 
     client.pause(&admin);
+    assert!(client.contract_is_paused());
+
+    // Emergency withdrawal: unstake succeeds while paused (issue #67).
     client.unstake(&staker, &100_000);
+
+    assert_eq!(client.get_stake(&staker), 900_000);
+    assert_eq!(client.get_pool_total(), 900_000);
+    let token_client = token::TokenClient::new(&env, &token_id);
+    assert_eq!(token_client.balance(&staker), 100_000);
+    assert_eq!(client.get_contract_token_balance(), 900_000);
 }
 
 #[test]

@@ -294,9 +294,11 @@ pub fn resolve_token(env: &Env, currency: &Symbol) -> Address {
 ///     set_reputation, set_penalty, transfer_admin.
 ///   - exceptions: pause, unpause, contract_is_paused, getters.
 /// - Insurance:
-///   - state-changing: stake, unstake, pay_out, set_staking_token, set_payout_caller,
+///   - state-changing: stake, pay_out, set_staking_token, set_payout_caller,
 ///     transfer_admin.
-///   - exceptions: pause, unpause, contract_is_paused, getters.
+///   - exceptions: pause, unpause, contract_is_paused, getters, and `unstake`
+///     (an emergency withdrawal path that stays available while paused —
+///     see issue #67 and ADR-0008).
 /// - Reputation:
 ///   - state-changing: record_outcome, set_recorder.
 ///   - exceptions: pause, unpause, contract_is_paused, getters.
