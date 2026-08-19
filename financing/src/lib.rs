@@ -6,9 +6,9 @@
 use soroban_sdk::{contract, contractimpl, symbol_short, token, Address, Env, Map, Symbol, Vec};
 
 use invofi_common::{
-    assert_not_paused, resolve_token, ContractError, FinancingOffer, Invoice, InvoiceStatus,
-    LenderStats, OfferStatus, ProtocolStats, RegistryClient, RepaymentSchedule,
-    ScheduleFrequency, MAX_OFFER_DURATION_SECS, MIN_OFFER_DURATION_SECS,
+    assert_not_paused, check_invoice_version, resolve_token, ContractError, FinancingOffer,
+    Invoice, InvoiceStatus, LenderStats, OfferStatus, ProtocolStats, RegistryClient,
+    RepaymentSchedule, ScheduleFrequency, MAX_OFFER_DURATION_SECS, MIN_OFFER_DURATION_SECS,
 };
 
 // ─── Storage Helpers ─────────────────────────────────────────────────────────
@@ -382,7 +382,7 @@ impl FinancingContract {
 
     /// Accept a financing offer. Only the invoice originator.
     /// Cross-contract: reads + updates invoice status in the registry contract.
-    pub fn accept_offer(env: Env, offer_id: Symbol, invoice_originator: Address) -> FinancingOffer {
+    pub fn accept_offer(env: Env, offer_id: Symbol, invoice_originator: Address, expected_version: u64) -> FinancingOffer {
         assert_not_paused(&env);
         invoice_originator.require_auth();
 
@@ -410,6 +410,12 @@ impl FinancingContract {
         if invoice.status != InvoiceStatus::Pending {
             env.panic_with_error(ContractError::InvalidTransition);
         }
+
+        // Optimistic-concurrency guard (issue #110): reject if another
+        // transaction has already mutated the invoice since the caller read it.
+        // The version supplied by the caller must match the stored version;
+        // if not, the registry will have already bumped it and this fires.
+        check_invoice_version(&env, invoice.version, expected_version);
 
         // Pull the lender's principal and pay it straight to the business.
         let token_id = resolve_token(&env, &offer.currency);

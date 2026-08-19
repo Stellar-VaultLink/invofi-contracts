@@ -74,6 +74,12 @@ pub enum ContractError {
 
     /// The caller's address is on the blacklist.
     Blacklisted = 8,
+
+    /// The caller supplied an expected invoice version that no longer matches
+    /// the stored version — another transaction raced and mutated the invoice
+    /// between the caller's read and write. The caller should re-read the
+    /// invoice (to get the current version) and retry.
+    StaleVersion = 9,
 }
 
 // ─── Types ───────────────────────────────────────────────────────────────────
@@ -98,6 +104,16 @@ pub struct Invoice {
     pub currency: Symbol,
     pub due_date: u64,
     pub status: InvoiceStatus,
+    /// Optimistic-concurrency version counter. Starts at `0` when the invoice
+    /// is first registered and increments by exactly 1 on every state-
+    /// mutating write. Callers supply the version they read; the write is
+    /// rejected with `StaleVersion` if the stored counter has advanced
+    /// (meaning another transaction raced and mutated the invoice first).
+    ///
+    /// Initial value: 0 (set by `register_invoice`).
+    /// Increment rule: +1 on every persistent write that changes `status`,
+    ///   `amount`, or any other field — regardless of *which* field changed.
+    pub version: u64,
 }
 
 /// Lifecycle status of an invoice.
@@ -311,6 +327,105 @@ pub fn assert_not_paused(env: &Env) {
     }
 }
 
+// ─── Invoice State Machine ────────────────────────────────────────────────────
+
+/// Assert that the given invoice status transition is legal according to the
+/// InvoFi lifecycle graph, panicking with a consistent message if not.
+///
+/// ## Allowed transitions
+///
+/// | From      | To                                         | Triggered by                    |
+/// |-----------|--------------------------------------------|---------------------------------|
+/// | Pending   | Financed                                   | financing_marks_invoice_financed|
+/// | Pending   | Cancelled                                  | cancel_invoice,                 |
+/// |           |                                            | update_invoice_status           |
+/// | Financed  | Financed  *(self — partial repayment)*     | repayment_marks_invoice_repaid, |
+/// |           |                                            | set_invoice_repaid_status       |
+/// | Financed  | Repaid                                     | repayment_marks_invoice_repaid, |
+/// |           |                                            | set_invoice_repaid_status       |
+/// | Financed  | Overdue                                    | mark_invoice_overdue            |
+/// | Financed  | Disputed                                   | raise_dispute                   |
+/// | Overdue   | Defaulted                                  | repayment_marks_defaulted       |
+/// | Disputed  | Financed \| Repaid \| Cancelled \| Defaulted | resolve_dispute              |
+///
+/// Every other `(from, to)` pair panics with:
+/// `"illegal invoice status transition: {from:?} -> {to:?}"`
+///
+/// ## Usage pattern
+///
+/// Call `assert_transition(invoice.status.clone(), new_status.clone())` before
+/// writing the new status to storage, then remove the ad-hoc per-function
+/// `if invoice.status != InvoiceStatus::X` checks that it replaces.
+pub fn assert_transition(env: &Env, from: InvoiceStatus, to: InvoiceStatus) {
+    let allowed = match from {
+        InvoiceStatus::Pending => matches!(to, InvoiceStatus::Financed | InvoiceStatus::Cancelled),
+        InvoiceStatus::Financed => matches!(
+            to,
+            InvoiceStatus::Financed    // partial repayment — balance not cleared
+                | InvoiceStatus::Repaid
+                | InvoiceStatus::Overdue
+                | InvoiceStatus::Disputed
+        ),
+        InvoiceStatus::Overdue => matches!(to, InvoiceStatus::Defaulted),
+        InvoiceStatus::Disputed => matches!(
+            to,
+            InvoiceStatus::Financed
+                | InvoiceStatus::Repaid
+                | InvoiceStatus::Cancelled
+                | InvoiceStatus::Defaulted
+        ),
+        // Terminal states — no transitions out.
+        InvoiceStatus::Repaid
+        | InvoiceStatus::Cancelled
+        | InvoiceStatus::Defaulted => false,
+    };
+
+    if !allowed {
+        env.panic_with_error(ContractError::InvalidTransition);
+    }
+}
+
+// ─── Optimistic Concurrency ───────────────────────────────────────────────────
+
+/// Assert that the caller's expected invoice version matches the stored
+/// version, panicking with `StaleVersion` if not.
+///
+/// ## Protocol
+///
+/// Call this **before** any write that mutates an invoice, passing the version
+/// the caller read from storage. If another transaction has already written
+/// the invoice between this caller's read and write, the stored version will
+/// have advanced and this guard fires, aborting the transaction cleanly.
+///
+/// After a successful check, always increment `invoice.version` by 1 before
+/// writing back to storage so subsequent callers see the new counter.
+///
+/// ## Panic message
+///
+/// The host encodes `ContractError::StaleVersion` (discriminant 9) as a typed
+/// XDR error, so the SDK surface is `Error(Contract, #9)`. The string
+/// `"stale invoice version"` is not the panic payload here — it lives in the
+/// ADR and the client-facing docs.
+///
+/// ## Example
+///
+/// ```ignore
+/// // 1. Read
+/// let invoice = load_invoice(&env, &id);
+/// // 2. Check version supplied by caller
+/// check_invoice_version(&env, invoice.version, expected_version);
+/// // 3. Mutate
+/// invoice.status = new_status;
+/// invoice.version += 1;
+/// // 4. Write back
+/// save_invoice(&env, &invoice);
+/// ```
+pub fn check_invoice_version(env: &Env, stored: u64, expected: u64) {
+    if stored != expected {
+        env.panic_with_error(ContractError::StaleVersion);
+    }
+}
+
 // ─── Cross-Contract Interface ────────────────────────────────────────────────
 // Financing calls these methods on the Registry contract.
 
@@ -452,4 +567,116 @@ pub trait ReputationInterface {
 
     /// Read an originator's current reputation score (public, read-only).
     fn get_score(env: Env, originator: Address) -> i128;
+}
+
+// ─── assert_transition unit tests ────────────────────────────────────────────
+
+#[cfg(test)]
+mod transition_tests {
+    extern crate std;
+
+    use super::{assert_transition, InvoiceStatus};
+    use soroban_sdk::Env;
+
+    // ── Legal transitions ────────────────────────────────────────────────────
+    //
+    // Each row: (from, to) — must succeed without panic.
+    //
+    // Adding a new status to the state machine later means adding rows here;
+    // all illegal combinations are covered by the matrix below.
+
+    macro_rules! legal {
+        ($name:ident, $from:expr, $to:expr) => {
+            #[test]
+            fn $name() {
+                let env = Env::default();
+                assert_transition(&env, $from, $to); // must not panic
+            }
+        };
+    }
+
+    // Pending exits
+    legal!(pending_to_financed,  InvoiceStatus::Pending,  InvoiceStatus::Financed);
+    legal!(pending_to_cancelled, InvoiceStatus::Pending,  InvoiceStatus::Cancelled);
+
+    // Financed exits
+    legal!(financed_to_financed, InvoiceStatus::Financed, InvoiceStatus::Financed); // partial repayment
+    legal!(financed_to_repaid,   InvoiceStatus::Financed, InvoiceStatus::Repaid);
+    legal!(financed_to_overdue,  InvoiceStatus::Financed, InvoiceStatus::Overdue);
+    legal!(financed_to_disputed, InvoiceStatus::Financed, InvoiceStatus::Disputed);
+
+    // Overdue exits
+    legal!(overdue_to_defaulted, InvoiceStatus::Overdue,  InvoiceStatus::Defaulted);
+
+    // Disputed exits (resolve_dispute)
+    legal!(disputed_to_financed,  InvoiceStatus::Disputed, InvoiceStatus::Financed);
+    legal!(disputed_to_repaid,    InvoiceStatus::Disputed, InvoiceStatus::Repaid);
+    legal!(disputed_to_cancelled, InvoiceStatus::Disputed, InvoiceStatus::Cancelled);
+    legal!(disputed_to_defaulted, InvoiceStatus::Disputed, InvoiceStatus::Defaulted);
+
+    // ── Illegal transitions ───────────────────────────────────────────────────
+    //
+    // Every (from, to) pair NOT in the legal set must panic with InvalidTransition
+    // (ContractError discriminant 3 → "Error(Contract, #3)").
+
+    macro_rules! illegal {
+        ($name:ident, $from:expr, $to:expr) => {
+            #[test]
+            #[should_panic(expected = "Error(Contract, #3)")]
+            fn $name() {
+                let env = Env::default();
+                assert_transition(&env, $from, $to);
+            }
+        };
+    }
+
+    // Pending — illegal targets
+    illegal!(pending_to_pending,   InvoiceStatus::Pending, InvoiceStatus::Pending);
+    illegal!(pending_to_repaid,    InvoiceStatus::Pending, InvoiceStatus::Repaid);   // the motivating example
+    illegal!(pending_to_overdue,   InvoiceStatus::Pending, InvoiceStatus::Overdue);
+    illegal!(pending_to_disputed,  InvoiceStatus::Pending, InvoiceStatus::Disputed);
+    illegal!(pending_to_defaulted, InvoiceStatus::Pending, InvoiceStatus::Defaulted);
+
+    // Financed — illegal targets
+    illegal!(financed_to_pending,    InvoiceStatus::Financed, InvoiceStatus::Pending);
+    illegal!(financed_to_cancelled,  InvoiceStatus::Financed, InvoiceStatus::Cancelled);
+    illegal!(financed_to_defaulted,  InvoiceStatus::Financed, InvoiceStatus::Defaulted);
+
+    // Overdue — illegal targets
+    illegal!(overdue_to_pending,   InvoiceStatus::Overdue, InvoiceStatus::Pending);
+    illegal!(overdue_to_financed,  InvoiceStatus::Overdue, InvoiceStatus::Financed);
+    illegal!(overdue_to_repaid,    InvoiceStatus::Overdue, InvoiceStatus::Repaid);
+    illegal!(overdue_to_overdue,   InvoiceStatus::Overdue, InvoiceStatus::Overdue);
+    illegal!(overdue_to_cancelled, InvoiceStatus::Overdue, InvoiceStatus::Cancelled);
+    illegal!(overdue_to_disputed,  InvoiceStatus::Overdue, InvoiceStatus::Disputed);
+
+    // Disputed — illegal targets (anything not in the four allowed)
+    illegal!(disputed_to_pending,  InvoiceStatus::Disputed, InvoiceStatus::Pending);
+    illegal!(disputed_to_overdue,  InvoiceStatus::Disputed, InvoiceStatus::Overdue);
+    illegal!(disputed_to_disputed, InvoiceStatus::Disputed, InvoiceStatus::Disputed);
+
+    // Terminal states — nothing may leave them
+    illegal!(repaid_to_pending,    InvoiceStatus::Repaid,    InvoiceStatus::Pending);
+    illegal!(repaid_to_financed,   InvoiceStatus::Repaid,    InvoiceStatus::Financed);
+    illegal!(repaid_to_repaid,     InvoiceStatus::Repaid,    InvoiceStatus::Repaid);
+    illegal!(repaid_to_overdue,    InvoiceStatus::Repaid,    InvoiceStatus::Overdue);
+    illegal!(repaid_to_cancelled,  InvoiceStatus::Repaid,    InvoiceStatus::Cancelled);
+    illegal!(repaid_to_disputed,   InvoiceStatus::Repaid,    InvoiceStatus::Disputed);
+    illegal!(repaid_to_defaulted,  InvoiceStatus::Repaid,    InvoiceStatus::Defaulted);
+
+    illegal!(cancelled_to_pending,   InvoiceStatus::Cancelled, InvoiceStatus::Pending);
+    illegal!(cancelled_to_financed,  InvoiceStatus::Cancelled, InvoiceStatus::Financed);
+    illegal!(cancelled_to_repaid,    InvoiceStatus::Cancelled, InvoiceStatus::Repaid);
+    illegal!(cancelled_to_overdue,   InvoiceStatus::Cancelled, InvoiceStatus::Overdue);
+    illegal!(cancelled_to_cancelled, InvoiceStatus::Cancelled, InvoiceStatus::Cancelled);
+    illegal!(cancelled_to_disputed,  InvoiceStatus::Cancelled, InvoiceStatus::Disputed);
+    illegal!(cancelled_to_defaulted, InvoiceStatus::Cancelled, InvoiceStatus::Defaulted);
+
+    illegal!(defaulted_to_pending,   InvoiceStatus::Defaulted, InvoiceStatus::Pending);
+    illegal!(defaulted_to_financed,  InvoiceStatus::Defaulted, InvoiceStatus::Financed);
+    illegal!(defaulted_to_repaid,    InvoiceStatus::Defaulted, InvoiceStatus::Repaid);
+    illegal!(defaulted_to_overdue,   InvoiceStatus::Defaulted, InvoiceStatus::Overdue);
+    illegal!(defaulted_to_cancelled, InvoiceStatus::Defaulted, InvoiceStatus::Cancelled);
+    illegal!(defaulted_to_disputed,  InvoiceStatus::Defaulted, InvoiceStatus::Disputed);
+    illegal!(defaulted_to_defaulted, InvoiceStatus::Defaulted, InvoiceStatus::Defaulted);
 }

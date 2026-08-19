@@ -190,7 +190,7 @@ fn test_registry_financing_accept_offer_transitions_invoice() {
     assert_eq!(offer.status, OfferStatus::Pending);
 
     // Step 3: Originator accepts the offer.
-    let accepted = p.fin.accept_offer(&offer_id, &p.originator);
+    let accepted = p.fin.accept_offer(&offer_id, &p.originator, &0);
     assert_eq!(accepted.status, OfferStatus::Accepted);
 
     // Assertion: Invoice is now Financed in the registry (cross-crate status sync).
@@ -279,14 +279,14 @@ fn test_financing_repayment_full_repay_syncs_state() {
         &interest_rate,
         &2_592_000u64,
     );
-    p.fin.accept_offer(&offer_id, &p.originator);
+    p.fin.accept_offer(&offer_id, &p.originator, &0);
 
     // Fund originator for repayment.
     let asset = token::StellarAssetClient::new(&env, &p.token_id);
     asset.mint(&p.originator, &total_due);
 
-    // Repay in full via the Repayment contract.
-    let repaid = p.rep.repay_invoice(&invoice_id, &offer_id, &p.originator, &total_due);
+    // Repay in full via the Repayment contract. Version is 1 after accept_offer.
+    let repaid = p.rep.repay_invoice(&invoice_id, &offer_id, &p.originator, &total_due, &1);
     assert_eq!(repaid.status, InvoiceStatus::Repaid);
 
     // Offer must be Repaid in Financing (cross-crate state sync).
@@ -328,13 +328,13 @@ fn test_financing_repayment_partial_keeps_financed() {
         &500u32,
         &2_592_000u64,
     );
-    p.fin.accept_offer(&offer_id, &p.originator);
+    p.fin.accept_offer(&offer_id, &p.originator, &0);
 
     // Partial repayment (half).
     let partial = amount / 2;
     let asset = token::StellarAssetClient::new(&env, &p.token_id);
     asset.mint(&p.originator, &partial);
-    let repaid = p.rep.repay_invoice(&invoice_id, &offer_id, &p.originator, &partial);
+    let repaid = p.rep.repay_invoice(&invoice_id, &offer_id, &p.originator, &partial, &1);
     assert_eq!(repaid.status, InvoiceStatus::Financed);
 
     let offer_after = p.fin.get_offer(&offer_id);
@@ -374,6 +374,7 @@ fn test_financing_repayment_on_pending_panics() {
         &symbol_short!("off_np"),
         &p.originator,
         &1,
+        &0,
     );
 }
 
@@ -420,7 +421,7 @@ fn test_repayment_insurance_default_triggers_payout() {
         &500u32,
         &2_592_000u64,
     );
-    p.fin.accept_offer(&offer_id, &p.originator);
+    p.fin.accept_offer(&offer_id, &p.originator, &0);
 
     // Fund the insurance pool.
     let coverage: i128 = 300_000_000;
@@ -481,7 +482,7 @@ fn test_repayment_insurance_reclaim_before_grace_panics() {
         &500u32,
         &2_592_000u64,
     );
-    p.fin.accept_offer(&offer_id, &p.originator);
+    p.fin.accept_offer(&offer_id, &p.originator, &0);
 
     // Past due_date but NOT past the grace period.
     env.ledger().set_timestamp(due_date + 1);
@@ -532,12 +533,12 @@ fn test_repayment_reputation_success_on_full_repay() {
         &interest_rate,
         &2_592_000u64,
     );
-    p.fin.accept_offer(&offer_id, &p.originator);
+    p.fin.accept_offer(&offer_id, &p.originator, &0);
 
     // Fund originator + full repayment.
     let asset = token::StellarAssetClient::new(&env, &p.token_id);
     asset.mint(&p.originator, &total_due);
-    p.rep.repay_invoice(&invoice_id, &offer_id, &p.originator, &total_due);
+    p.rep.repay_invoice(&invoice_id, &offer_id, &p.originator, &total_due, &1);
 
     // Reputation: one success → score 1.
     assert_eq!(p.repu.get_score(&p.originator), 1);
@@ -576,12 +577,12 @@ fn test_repayment_reputation_default_on_reclaim() {
 
         p.reg.register_invoice(&inv_id, &p.originator, &amount, &symbol_short!("USDC"), &due);
         p.fin.create_offer(&off_id, &inv_id, &p.lender, &amount, &symbol_short!("USDC"), &500u32, &2_592_000u64);
-        p.fin.accept_offer(&off_id, &p.originator);
+        p.fin.accept_offer(&off_id, &p.originator, &0);
 
         let total = amount + amount * 500 / 10_000;
         let asset2 = token::StellarAssetClient::new(&env, &p.token_id);
         asset2.mint(&p.originator, &total);
-        p.rep.repay_invoice(&inv_id, &off_id, &p.originator, &total);
+        p.rep.repay_invoice(&inv_id, &off_id, &p.originator, &total, &1);
     }
     assert_eq!(p.repu.get_score(&p.originator), 2);
 
@@ -607,7 +608,7 @@ fn test_repayment_reputation_default_on_reclaim() {
         &500u32,
         &2_592_000u64,
     );
-    p.fin.accept_offer(&offer_id, &p.originator);
+    p.fin.accept_offer(&offer_id, &p.originator, &0);
 
     env.ledger()
         .set_timestamp(due_date + invofi_common::GRACE_PERIOD_SECS + 1);
@@ -657,7 +658,7 @@ fn test_registry_repayment_overdue_delegates_to_registry() {
         &500u32,
         &2_592_000u64,
     );
-    p.fin.accept_offer(&symbol_short!("off_ov"), &p.originator);
+    p.fin.accept_offer(&symbol_short!("off_ov"), &p.originator, &0);
 
     // After due_date, anyone can mark overdue through Repayment.
     env.ledger().set_timestamp(due_date + 1);
@@ -735,7 +736,7 @@ fn test_full_lifecycle_register_offer_accept_repay() {
 
     // ── Step 3: Accept offer (Financing → Registry) ────────────────────────
     mint_and_approve(&env, &p.token_id, &p.financing_id, &p.lender, amount);
-    let accepted = p.fin.accept_offer(&offer_id, &p.originator);
+    let accepted = p.fin.accept_offer(&offer_id, &p.originator, &0);
     assert_eq!(accepted.status, OfferStatus::Accepted);
 
     // Invoice is now Financed.
@@ -750,7 +751,8 @@ fn test_full_lifecycle_register_offer_accept_repay() {
     // ── Step 4: Repay in full (Repayment → Financing → Registry → Reputation)
     let asset = token::StellarAssetClient::new(&env, &p.token_id);
     asset.mint(&p.originator, &total_due);
-    let repaid = p.rep.repay_invoice(&invoice_id, &offer_id, &p.originator, &total_due);
+    // Version is 1 after accept_offer (financing_marks_invoice_financed bumps it).
+    let repaid = p.rep.repay_invoice(&invoice_id, &offer_id, &p.originator, &total_due, &1);
     assert_eq!(repaid.status, InvoiceStatus::Repaid);
 
     // Offer Repaid in Financing.

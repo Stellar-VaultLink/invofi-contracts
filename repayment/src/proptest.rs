@@ -97,7 +97,7 @@ proptest! {
         token_client.approve(&lender, &financing_id, &principal, &(env.ledger().sequence() + 1000));
         
         // Accept offer
-        fin.accept_offer(&offer_id, &originator);
+        fin.accept_offer(&offer_id, &originator, &0);
 
         // Now repayer (originator) prepares to repay
         let partial_repay_amount = total_due / partial_ratio;
@@ -114,8 +114,8 @@ proptest! {
         let initial_lender_bal = token_client.balance(&lender);
         let initial_orig_bal = token_client.balance(&originator);
 
-        // Perform partial repayment
-        rep.repay_invoice(&invoice_id, &offer_id, &originator, &partial_repay_amount);
+        // Perform partial repayment. Version is 1 after accept_offer.
+        rep.repay_invoice(&invoice_id, &offer_id, &originator, &partial_repay_amount, &1);
 
         // Verify partial repayment math
         let actual_fee_bps = fin.get_fee_bps();
@@ -142,7 +142,8 @@ proptest! {
 
         // Now perform the rest of the repayment
         if full_remaining > 0 {
-            rep.repay_invoice(&invoice_id, &offer_id, &originator, &full_remaining);
+            // First repay bumped version to 2.
+            rep.repay_invoice(&invoice_id, &offer_id, &originator, &full_remaining, &2);
             let fee_amount_2 = full_remaining * (actual_fee_bps as i128) / 10_000;
             let lender_amount_2 = full_remaining - fee_amount_2;
 
