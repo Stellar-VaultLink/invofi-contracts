@@ -219,6 +219,25 @@ pub struct RepaymentSchedule {
     pub first_due: u64,
 }
 
+/// A single payment record stored on-chain as part of the payment history
+/// for an invoice. Each partial or full repayment creates one record.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct PaymentRecord {
+    /// Sequential payment identifier (1-based).
+    pub payment_id: u32,
+    /// Total payment amount (principal + interest combined).
+    pub amount: i128,
+    /// Portion of the payment applied to accrued interest.
+    pub interest_paid: i128,
+    /// Portion of the payment applied to outstanding principal.
+    pub principal_paid: i128,
+    /// Unix timestamp of the payment.
+    pub timestamp: u64,
+    /// Address that made the payment.
+    pub payer: Address,
+}
+
 // ─── Currency Registry ───────────────────────────────────────────────────────
 
 /// Load the currency registry (an empty map if none has been configured).
