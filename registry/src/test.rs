@@ -2,11 +2,14 @@
 extern crate std;
 
 use super::RegistryContract;
-use invofi_common::{InvoiceStatus, RiskTier};
+use invofi_common::{
+    Invoice, InvoiceStatus, RiskTier, StorageEvictionReason, DEFAULT_INVOICE_STORAGE_BUDGET_BYTES,
+    EVICTION_GRACE_PERIOD_SECS, MIN_INVOICE_STORAGE_BUDGET_BYTES, TERMINAL_INVOICE_RETENTION_SECS,
+};
 use soroban_sdk::{
     symbol_short,
-    testutils::{Address as _, Events as _, Ledger as _},
-    Address, Env, IntoVal,
+    testutils::{storage::Persistent as _, Address as _, Events as _, Ledger as _},
+    Address, Env, IntoVal, TryFromVal,
 };
 
 // ─── Invoice CRUD tests ──────────────────────────────────────────────────────
@@ -357,6 +360,74 @@ fn test_get_invoices_by_status_matching() {
 }
 
 #[test]
+fn test_filtered_wrappers_are_first_page_only_and_paginated_helpers_reach_later_matches() {
+    let env = Env::default();
+    env.mock_all_auths();
+    env.ledger().set_timestamp(1_000_000);
+    let contract_id = env.register(RegistryContract, (Address::generate(&env),));
+    let client = super::RegistryContractClient::new(&env, &contract_id);
+    let originator = Address::generate(&env);
+    let currency = symbol_short!("USDC");
+
+    for index in 0u32..34 {
+        let id = soroban_sdk::Symbol::new(&env, &std::format!("page_{index:02}"));
+        client.register_invoice(
+            &id,
+            &originator,
+            &1_000_000_000_i128,
+            &currency,
+            &2_000_000_u64,
+        );
+        if index == 32 {
+            client.cancel_invoice(&id, &originator);
+        }
+    }
+
+    // The wrapper scans only slots 0..31. It therefore returns no Cancelled
+    // invoice even though one exists in slot 32; the short result is not an
+    // exhaustion signal.
+    assert_eq!(
+        client
+            .get_invoices_by_status(&InvoiceStatus::Cancelled)
+            .len(),
+        0
+    );
+    let later_status =
+        client.get_invoices_by_status_paginated(&InvoiceStatus::Cancelled, &32_u32, &1_u32);
+    assert_eq!(later_status.len(), 1);
+    assert_eq!(
+        later_status.get(0).unwrap().id,
+        soroban_sdk::Symbol::new(&env, "page_32")
+    );
+
+    // Unfiltered and filtered first-page wrappers are bounded at 32 slots;
+    // paginated helpers retrieve the matching invoice beyond that boundary.
+    assert_eq!(client.get_all_invoices().len(), 32);
+    assert_eq!(client.get_invoices_by_originator(&originator).len(), 32);
+    assert_eq!(client.get_invoices_by_currency(&currency).len(), 32);
+    assert_eq!(client.get_invoices_due_before(&3_000_000_u64).len(), 32);
+    assert_eq!(client.get_invoices_paginated(&32_u32, &2_u32).len(), 2);
+    assert_eq!(
+        client
+            .get_inv_by_originator_page(&originator, &32_u32, &2_u32)
+            .len(),
+        2
+    );
+    assert_eq!(
+        client
+            .get_inv_by_currency_page(&currency, &32_u32, &2_u32)
+            .len(),
+        2
+    );
+    assert_eq!(
+        client
+            .get_inv_due_before_page(&3_000_000_u64, &33_u32, &1_u32)
+            .len(),
+        1
+    );
+}
+
+#[test]
 fn test_get_invoices_by_originator() {
     let env = Env::default();
     env.mock_all_auths();
@@ -534,6 +605,16 @@ fn test_get_invoices_paginated() {
 
     let page2 = client.get_invoices_paginated(&3_u32, &3_u32);
     assert_eq!(page2.len(), 2);
+
+    let window = client.get_invoices_paginated(&1_u32, &3_u32);
+    assert_eq!(window.get(0).unwrap().id, symbol_short!("i1"));
+    assert_eq!(window.get(1).unwrap().id, symbol_short!("i2"));
+    assert_eq!(window.get(2).unwrap().id, symbol_short!("i3"));
+
+    let over_limit = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        client.get_invoices_paginated(&0_u32, &33_u32);
+    }));
+    assert!(over_limit.is_err());
 }
 
 #[test]
@@ -599,7 +680,10 @@ fn test_constructor_cannot_be_reinvoked() {
         &soroban_sdk::Symbol::new(&env, "__constructor"),
         args,
     );
-    assert!(result.is_err(), "constructor must not be re-invokable post-deploy");
+    assert!(
+        result.is_err(),
+        "constructor must not be re-invokable post-deploy"
+    );
 }
 
 #[test]
@@ -713,7 +797,10 @@ fn test_pause_blocks_all_registry_state_changes() {
 
     fn assert_paused<F: FnOnce()>(f: F) {
         let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(f));
-        assert!(result.is_err(), "state-changing function should panic while paused");
+        assert!(
+            result.is_err(),
+            "state-changing function should panic while paused"
+        );
     }
 
     assert_paused(|| {
@@ -757,7 +844,11 @@ fn test_pause_blocks_all_registry_state_changes() {
         client.raise_dispute(&invoice_id, &originator);
     });
     assert_paused(|| {
-        client.resolve_dispute(&admin, &invoice_id, &invofi_common::InvoiceStatus::Cancelled);
+        client.resolve_dispute(
+            &admin,
+            &invoice_id,
+            &invofi_common::InvoiceStatus::Cancelled,
+        );
     });
     assert_paused(|| {
         client.blacklist_address(&admin, &other);
@@ -779,6 +870,24 @@ fn test_pause_blocks_all_registry_state_changes() {
     });
     assert_paused(|| {
         client.set_fee(&admin, &50u32);
+    });
+    assert_paused(|| {
+        client.set_storage_keeper(&admin, &other);
+    });
+    assert_paused(|| {
+        client.set_invoice_storage_budget(&admin, &MIN_INVOICE_STORAGE_BUDGET_BYTES);
+    });
+    assert_paused(|| {
+        client.bump_invoice_ttl(&other, &invoice_id);
+    });
+    assert_paused(|| {
+        client.renew_terminal_invoice_ttl(&other, &invoice_id);
+    });
+    assert_paused(|| {
+        client.keeper_evict_invoice(&other, &invoice_id);
+    });
+    assert_paused(|| {
+        client.evict_invoice(&admin, &invoice_id);
     });
 
     assert_eq!(client.get_fee(), 0);
@@ -1184,4 +1293,354 @@ fn test_repayment_marks_defaulted_requires_overdue() {
     // Still Financed (never marked overdue) — default must panic.
     client.update_invoice_status(&invoice_id, &originator, &InvoiceStatus::Financed);
     client.repayment_marks_defaulted(&invoice_id);
+}
+
+// ─── Storage lifecycle management ──────────────────────────────────────────
+
+#[test]
+fn test_min_invoice_storage_budget_matches_maximal_invoice_serialization() {
+    let env = Env::default();
+    let invoice = Invoice {
+        id: soroban_sdk::Symbol::new(&env, "abcdefghijklmnopqrstuvwxyzABCDEF"),
+        originator: Address::generate(&env),
+        amount: i128::MAX,
+        currency: soroban_sdk::Symbol::new(&env, "zyxwvutsrqponmlkjihgfedcbaFEDCBA"),
+        due_date: u64::MAX,
+        status: InvoiceStatus::Defaulted,
+    };
+    let measured = super::invoice_storage_bytes(&env, &invoice);
+    assert_eq!(measured, MIN_INVOICE_STORAGE_BUDGET_BYTES);
+}
+
+#[test]
+fn test_storage_budget_default_and_custom_limit_are_enforced() {
+    let env = Env::default();
+    env.mock_all_auths();
+    env.ledger().set_timestamp(1_000);
+    let admin = Address::generate(&env);
+    let contract_id = env.register(RegistryContract, (admin.clone(),));
+    let client = super::RegistryContractClient::new(&env, &contract_id);
+    let originator = Address::generate(&env);
+    let id = symbol_short!("stor_bud");
+
+    assert_eq!(
+        client.get_invoice_storage_budget(),
+        DEFAULT_INVOICE_STORAGE_BUDGET_BYTES
+    );
+    client.register_invoice(
+        &id,
+        &originator,
+        &10_000_000i128,
+        &symbol_short!("XLM"),
+        &2_000u64,
+    );
+
+    let exact_size = client.get_invoice_storage_bytes(&id);
+    client.set_invoice_storage_budget(&admin, &MIN_INVOICE_STORAGE_BUDGET_BYTES);
+    client.update_invoice_amount(&id, &originator, &11_000_000i128);
+    assert_eq!(client.get_invoice(&id).amount, 11_000_000);
+
+    client.set_invoice_storage_budget(&admin, &(MIN_INVOICE_STORAGE_BUDGET_BYTES + 1));
+    assert_eq!(
+        client.get_invoice_storage_budget(),
+        MIN_INVOICE_STORAGE_BUDGET_BYTES + 1
+    );
+    let below_minimum = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        client.set_invoice_storage_budget(&admin, &(MIN_INVOICE_STORAGE_BUDGET_BYTES - 1));
+    }));
+    assert!(below_minimum.is_err());
+    // A budget which is valid configuration but below the actual record size
+    // cannot be represented by the public setter, so rejection is covered by
+    // the minimum-sized maximal-record configuration above.
+    assert!(exact_size <= MIN_INVOICE_STORAGE_BUDGET_BYTES);
+
+    let unauthorized = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        client.set_invoice_storage_budget(
+            &Address::generate(&env),
+            &MIN_INVOICE_STORAGE_BUDGET_BYTES,
+        );
+    }));
+    assert!(unauthorized.is_err());
+    client.pause(&admin);
+    let paused = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        client.set_invoice_storage_budget(&admin, &MIN_INVOICE_STORAGE_BUDGET_BYTES);
+    }));
+    assert!(paused.is_err());
+}
+
+#[test]
+fn test_active_invoice_ttl_bump_requires_keeper_and_emits_event() {
+    let env = Env::default();
+    env.mock_all_auths();
+    env.ledger().set_timestamp(1_000);
+    let admin = Address::generate(&env);
+    let keeper = Address::generate(&env);
+    let other = Address::generate(&env);
+    let contract_id = env.register(RegistryContract, (admin.clone(),));
+    let client = super::RegistryContractClient::new(&env, &contract_id);
+    let id = symbol_short!("ttl_act");
+    client.register_invoice(
+        &id,
+        &Address::generate(&env),
+        &10_000_000i128,
+        &symbol_short!("XLM"),
+        &2_000u64,
+    );
+    client.set_storage_keeper(&admin, &keeper);
+
+    let unauthorized = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        client.bump_invoice_ttl(&other, &id);
+    }));
+    assert!(unauthorized.is_err());
+
+    client.bump_invoice_ttl(&keeper, &id);
+    let events = env.events().all();
+    let (_, topics, data) = events.get(events.len() - 1).unwrap();
+    assert_eq!(
+        soroban_sdk::Symbol::try_from_val(&env, &topics.get(0).unwrap()).unwrap(),
+        soroban_sdk::Symbol::new(&env, "ttl_bumped")
+    );
+    assert_eq!(
+        <(Address, u32)>::try_from_val(&env, &data).unwrap(),
+        (keeper, env.storage().max_ttl())
+    );
+}
+
+#[test]
+fn test_terminal_invoice_evicts_only_after_retention_and_grace() {
+    let env = Env::default();
+    env.mock_all_auths();
+    env.ledger().set_max_entry_ttl(100_000_000);
+    let terminal_at = 1_000 + TERMINAL_INVOICE_RETENTION_SECS + EVICTION_GRACE_PERIOD_SECS - 1;
+    env.ledger().set_timestamp(terminal_at);
+    let admin = Address::generate(&env);
+    let keeper = Address::generate(&env);
+    let originator = Address::generate(&env);
+    let contract_id = env.register(RegistryContract, (admin.clone(),));
+    let client = super::RegistryContractClient::new(&env, &contract_id);
+    let id = symbol_short!("evict_ok");
+    client.register_invoice(
+        &id,
+        &originator,
+        &10_000_000i128,
+        &symbol_short!("XLM"),
+        &(terminal_at + 1),
+    );
+    client.cancel_invoice(&id, &originator);
+    // Keep the host ledger TTL independent from this timestamp-boundary test;
+    // the contract's persisted terminal timestamp is the value under test.
+    env.as_contract(&contract_id, || {
+        env.storage()
+            .persistent()
+            .set(&super::terminal_at_key(&id), &1_000u64);
+    });
+    client.set_storage_keeper(&admin, &keeper);
+
+    assert!(!client.is_invoice_eviction_eligible(&id));
+    assert_eq!(client.get_invoice(&id).status, InvoiceStatus::Cancelled);
+
+    env.ledger().set_timestamp(terminal_at + 1);
+    assert!(client.is_invoice_eviction_eligible(&id));
+    let expected_bytes = client.get_invoice_storage_bytes(&id);
+    assert_eq!(client.keeper_evict_invoice(&keeper, &id), expected_bytes);
+
+    let events = env.events().all();
+    let (_, topics, data) = events.get(events.len() - 1).unwrap();
+    assert_eq!(
+        soroban_sdk::Symbol::try_from_val(&env, &topics.get(0).unwrap()).unwrap(),
+        soroban_sdk::Symbol::new(&env, "storage_evicted")
+    );
+    assert_eq!(
+        <(StorageEvictionReason, u32)>::try_from_val(&env, &data).unwrap(),
+        (StorageEvictionReason::RetentionExpired, expected_bytes)
+    );
+}
+
+#[test]
+fn test_terminal_invoice_cannot_receive_active_ttl_bump() {
+    let env = Env::default();
+    env.mock_all_auths();
+    env.ledger().set_timestamp(1_000);
+    let admin = Address::generate(&env);
+    let keeper = Address::generate(&env);
+    let originator = Address::generate(&env);
+    let contract_id = env.register(RegistryContract, (admin.clone(),));
+    let client = super::RegistryContractClient::new(&env, &contract_id);
+    let id = symbol_short!("ttl_term");
+    client.register_invoice(
+        &id,
+        &originator,
+        &10_000_000i128,
+        &symbol_short!("XLM"),
+        &2_000u64,
+    );
+    client.cancel_invoice(&id, &originator);
+    client.set_storage_keeper(&admin, &keeper);
+
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        client.bump_invoice_ttl(&keeper, &id);
+    }));
+    assert!(result.is_err());
+}
+
+#[test]
+fn test_terminal_ttl_renewal_survives_short_network_ttl_and_still_evicts() {
+    let env = Env::default();
+    env.mock_all_auths();
+    env.ledger().set_min_persistent_entry_ttl(1);
+    env.ledger().set_max_entry_ttl(100);
+    env.ledger().set_timestamp(1_000);
+    let admin = Address::generate(&env);
+    let keeper = Address::generate(&env);
+    let originator = Address::generate(&env);
+    let contract_id = env.register(RegistryContract, (admin.clone(),));
+    let client = super::RegistryContractClient::new(&env, &contract_id);
+    let id = symbol_short!("ttl_renew");
+    client.register_invoice(
+        &id,
+        &originator,
+        &10_000_000i128,
+        &symbol_short!("XLM"),
+        &2_000u64,
+    );
+    client.cancel_invoice(&id, &originator);
+    client.set_storage_keeper(&admin, &keeper);
+    // The test deliberately advances beyond a short entry TTL; keep the
+    // contract instance alive so it does not mask the per-invoice renewal.
+    env.as_contract(&contract_id, || {
+        env.storage().instance().extend_ttl(100, 100);
+    });
+
+    let (page, _slot): (u32, u32) = env.as_contract(&contract_id, || {
+        env.storage()
+            .persistent()
+            .get(&super::invoice_location_key(&id))
+            .unwrap()
+    });
+    let mut ledger = env.ledger().get();
+    // Renew once the remaining TTL is below the half-life low-water mark
+    // (100 / 2); advancing 51 ledgers makes the renewal eligible without
+    // relying on the old unconditional threshold==extend_to behavior.
+    ledger.sequence_number += 51;
+    env.ledger().set(ledger);
+    client.renew_terminal_invoice_ttl(&keeper, &id);
+    env.as_contract(&contract_id, || {
+        assert_eq!(
+            env.storage().persistent().get_ttl(&super::invoice_key(&id)),
+            env.storage().max_ttl()
+        );
+        assert_eq!(
+            env.storage()
+                .persistent()
+                .get_ttl(&super::terminal_at_key(&id)),
+            env.storage().max_ttl()
+        );
+        assert_eq!(
+            env.storage()
+                .persistent()
+                .get_ttl(&super::invoice_page_key(page)),
+            env.storage().max_ttl()
+        );
+        assert_eq!(
+            env.storage()
+                .persistent()
+                .get_ttl(&super::invoice_location_key(&id)),
+            env.storage().max_ttl()
+        );
+        assert_eq!(
+            env.storage()
+                .persistent()
+                .get_ttl(&symbol_short!("invmeta")),
+            env.storage().max_ttl()
+        );
+    });
+
+    env.ledger()
+        .set_timestamp(1_000 + TERMINAL_INVOICE_RETENTION_SECS + EVICTION_GRACE_PERIOD_SECS);
+    assert!(client.is_invoice_eviction_eligible(&id));
+    assert!(client.keeper_evict_invoice(&keeper, &id) > 0);
+    let (_, topics, _) = env
+        .events()
+        .all()
+        .get(env.events().all().len() - 1)
+        .unwrap();
+    assert_eq!(
+        soroban_sdk::Symbol::try_from_val(&env, &topics.get(0).unwrap()).unwrap(),
+        soroban_sdk::Symbol::new(&env, "storage_evicted")
+    );
+}
+
+#[test]
+fn test_paged_invoice_index_crosses_boundaries_and_keeps_eviction_gaps_stable() {
+    let env = Env::default();
+    env.mock_all_auths();
+    env.ledger().set_timestamp(1_000);
+    let admin = Address::generate(&env);
+    let originator = Address::generate(&env);
+    let contract_id = env.register(RegistryContract, (admin.clone(),));
+    let client = super::RegistryContractClient::new(&env, &contract_id);
+    for index in 0..33 {
+        let id = soroban_sdk::Symbol::new(&env, &std::format!("page{index:02}"));
+        client.register_invoice(
+            &id,
+            &originator,
+            &10_000_000i128,
+            &symbol_short!("XLM"),
+            &2_000u64,
+        );
+    }
+    let second_page = client.get_invoices_paginated(&32, &1);
+    assert_eq!(second_page.len(), 1);
+    assert_eq!(
+        second_page.get(0).unwrap().id,
+        soroban_sdk::Symbol::new(&env, "page32")
+    );
+
+    let evicted = soroban_sdk::Symbol::new(&env, "page05");
+    client.cancel_invoice(&evicted, &originator);
+    env.as_contract(&contract_id, || {
+        env.storage()
+            .persistent()
+            .set(&super::terminal_at_key(&evicted), &0u64);
+    });
+    env.ledger()
+        .set_timestamp(TERMINAL_INVOICE_RETENTION_SECS + EVICTION_GRACE_PERIOD_SECS);
+    client.evict_invoice(&admin, &evicted);
+
+    assert_eq!(client.get_invoices_count(), 32);
+    assert_eq!(client.get_stats().total_invoices, 33);
+    let first_page = client.get_invoices_paginated(&0, &32);
+    assert_eq!(first_page.len(), 31);
+    assert_eq!(
+        client.get_invoices_paginated(&32, &1).get(0).unwrap().id,
+        soroban_sdk::Symbol::new(&env, "page32")
+    );
+}
+
+#[test]
+fn test_admin_can_manually_evict_eligible_invoice() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let now = 1_000 + TERMINAL_INVOICE_RETENTION_SECS + EVICTION_GRACE_PERIOD_SECS;
+    env.ledger().set_timestamp(now);
+    let admin = Address::generate(&env);
+    let originator = Address::generate(&env);
+    let contract_id = env.register(RegistryContract, (admin.clone(),));
+    let client = super::RegistryContractClient::new(&env, &contract_id);
+    let id = symbol_short!("adm_evict");
+    client.register_invoice(
+        &id,
+        &originator,
+        &10_000_000i128,
+        &symbol_short!("XLM"),
+        &(now + 1),
+    );
+    client.cancel_invoice(&id, &originator);
+    env.as_contract(&contract_id, || {
+        env.storage()
+            .persistent()
+            .set(&super::terminal_at_key(&id), &1_000u64);
+    });
+
+    assert!(client.evict_invoice(&admin, &id) > 0);
 }
