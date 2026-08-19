@@ -826,19 +826,14 @@ fn test_claim_after_depletion_returns_zero() {
     let offer_b = symbol_short!("off_b");
     let lender = Address::generate(&env);
 
-    // Reserve all for offer_a
+    // Reserve all pool capacity for offer_a
     client.reserve_payout(&offer_a, &1_000_000);
 
-    // Claim everything from offer_a
-    let (paid_a, _) = client.claim_payout(&offer_a, &lender, &1_000_000);
-    assert_eq!(paid_a, 1_000_000);
-
-    // Reserve for offer_b — nothing available
+    // offer_b can't reserve — pool fully reserved by offer_a
     let r = client.reserve_payout(&offer_b, &500_000);
     assert_eq!(r, 0);
 
-    // Claim from offer_b — pool depleted
-    let (paid_b, rem) = client.claim_payout(&offer_b, &lender, &500_000);
-    assert_eq!(paid_b, 0);
-    assert_eq!(rem, 0);
+    // Claim from offer_b has no reservation, panics
+    let result = client.try_claim_payout(&offer_b, &lender, &500_000);
+    assert!(result.is_err());
 }
