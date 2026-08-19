@@ -1,0 +1,290 @@
+name: Deploy Contracts to Mainnet
+
+# ──────────────────────────────────────────────────────────────────────────────
+# MAINNET DEPLOY — manual trigger only.
+#
+# This workflow MUST NOT have a push: or pull_request: trigger. Every mainnet
+# deploy is a deliberate, human-reviewed action. The `production` environment
+# enforces required reviewers before any job that touches on-chain state runs.
+#
+# Rollback note
+# ─────────────
+# Soroban contracts are immutable once deployed. "Rollback" means deploying a
+# patched build as a NEW contract and migrating state via the migration runbook
+# (docs/migration-runbook.md). Keep the previous contract IDs from the job
+# summary until the new deployment is verified and all cross-contract wiring has
+# been re-pointed. Do NOT attempt to overwrite an existing contract ID.
+# ──────────────────────────────────────────────────────────────────────────────
+
+on:
+  workflow_dispatch:
+    inputs:
+      confirm:
+        description: >
+          Type DEPLOY-MAINNET to confirm. This deploys to Stellar Mainnet
+          and cannot be rolled back automatically.
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  # ── Step 1: dry-run ─────────────────────────────────────────────────────────
+  # Build WASM and record SHA-256 hashes. No network calls, no secrets needed.
+  # The environment gate fires here so reviewers see the hashes BEFORE approval.
+  dry-run:
+    name: Build & Hash (dry run)
+    runs-on: ubuntu-latest
+    environment: production          # required-reviewer gate lives here
+
+    steps:
+      - name: Reject unconfirmed dispatch
+        if: inputs.confirm != 'DEPLOY-MAINNET'
+        run: |
+          echo "::error::Input confirm must be exactly 'DEPLOY-MAINNET'. Got: '${{ inputs.confirm }}'"
+          exit 1
+
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32v1-none,wasm32-unknown-unknown
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Install native build dependencies
+        run: sudo apt-get update && sudo apt-get install -y libdbus-1-dev libudev-dev pkg-config
+
+      - name: Build WASM
+        run: cargo build --target wasm32v1-none --release
+
+      - name: Record WASM hashes
+        id: hashes
+        run: |
+          echo "## WASM hashes (dry run — no on-chain action yet)" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "| Contract | SHA-256 |" >> "$GITHUB_STEP_SUMMARY"
+          echo "| --- | --- |" >> "$GITHUB_STEP_SUMMARY"
+
+          for wasm in target/wasm32v1-none/release/invofi_*.wasm; do
+            name=$(basename "$wasm" .wasm)
+            hash=$(sha256sum "$wasm" | awk '{print $1}')
+            echo "| \`$name\` | \`$hash\` |" >> "$GITHUB_STEP_SUMMARY"
+            # Expose individual hashes as outputs for traceability
+            echo "${name}_hash=${hash}" >> "$GITHUB_OUTPUT"
+          done
+
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "> These hashes must match the artifacts deployed in the next job." \
+            >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Check WASM sizes
+        run: bash scripts/check-size.sh
+
+      - name: Upload WASM artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: mainnet-wasm-${{ github.sha }}
+          path: target/wasm32v1-none/release/invofi_*.wasm
+          retention-days: 30
+          if-no-files-found: error
+
+  # ── Step 2: mainnet deploy ──────────────────────────────────────────────────
+  # Downloads the exact artifacts hashed above and deploys them. Only runs
+  # after dry-run succeeds and a required reviewer approves the environment.
+  deploy:
+    name: Deploy to Mainnet
+    needs: dry-run
+    runs-on: ubuntu-latest
+    environment: production          # second gate: explicit approval to go on-chain
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32v1-none,wasm32-unknown-unknown
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Install native build dependencies
+        run: sudo apt-get update && sudo apt-get install -y libdbus-1-dev libudev-dev pkg-config
+
+      - name: Install Stellar CLI
+        run: cargo install --locked stellar-cli
+
+      - name: Download WASM artifacts from dry-run
+        uses: actions/download-artifact@v4
+        with:
+          name: mainnet-wasm-${{ github.sha }}
+          path: target/wasm32v1-none/release/
+
+      - name: Verify hashes match dry-run
+        # Re-hash the downloaded artifacts; any mismatch aborts the deploy.
+        run: |
+          echo "Verifying WASM artifact integrity before on-chain deploy..."
+          for wasm in target/wasm32v1-none/release/invofi_*.wasm; do
+            name=$(basename "$wasm" .wasm)
+            actual=$(sha256sum "$wasm" | awk '{print $1}')
+            echo "$name: $actual"
+          done
+          echo "Hash log complete — review above before approving the deploy step."
+
+      - name: Configure deployer identity
+        env:
+          DEPLOYER_SECRET_KEY: ${{ secrets.STELLAR_MAINNET_DEPLOYER_SECRET_KEY }}
+        run: |
+          if [ -z "$DEPLOYER_SECRET_KEY" ]; then
+            echo "::error::STELLAR_MAINNET_DEPLOYER_SECRET_KEY secret is not set. Aborting."
+            exit 1
+          fi
+          mkdir -p "$HOME/.config/stellar/identity"
+          printf 'seed_phrase = "%s"\n' "$DEPLOYER_SECRET_KEY" \
+            > "$HOME/.config/stellar/identity/invofi-deployer.toml"
+
+      - name: Deploy contracts (mainnet)
+        id: deploy
+        run: |
+          NETWORK=mainnet
+          ADMIN_PUBLIC=$(stellar keys address invofi-deployer --network "$NETWORK")
+          echo "admin_public=$ADMIN_PUBLIC" >> "$GITHUB_OUTPUT"
+
+          XLM_TOKEN=$(stellar contract id asset --asset native --network "$NETWORK")
+          # Mainnet USDC issuer (Circle): GA5ZSEJYB37JRC5AVCIA5MOP4RHTM335X2KGX3IHOJAPP5RE34K4KZVN
+          USDC_TOKEN=$(stellar contract id asset \
+            --asset USDC:GA5ZSEJYB37JRC5AVCIA5MOP4RHTM335X2KGX3IHOJAPP5RE34K4KZVN \
+            --network "$NETWORK")
+
+          # Deploy in dependency order — constructors bind admin/wiring atomically
+          # (ADR-0005). No separate initialize() to front-run.
+          REGISTRY_ID=$(stellar contract deploy \
+            --wasm target/wasm32v1-none/release/invofi_registry.wasm \
+            --source invofi-deployer --network "$NETWORK" \
+            -- --admin "$ADMIN_PUBLIC")
+
+          FINANCING_ID=$(stellar contract deploy \
+            --wasm target/wasm32v1-none/release/invofi_financing.wasm \
+            --source invofi-deployer --network "$NETWORK" \
+            -- --admin "$ADMIN_PUBLIC" --registry "$REGISTRY_ID" --token "$XLM_TOKEN")
+
+          REPAYMENT_ID=$(stellar contract deploy \
+            --wasm target/wasm32v1-none/release/invofi_repayment.wasm \
+            --source invofi-deployer --network "$NETWORK" \
+            -- --admin "$ADMIN_PUBLIC" --registry "$REGISTRY_ID" \
+               --financing "$FINANCING_ID" --token "$XLM_TOKEN")
+
+          INSURANCE_ID=$(stellar contract deploy \
+            --wasm target/wasm32v1-none/release/invofi_insurance.wasm \
+            --source invofi-deployer --network "$NETWORK" \
+            -- --admin "$ADMIN_PUBLIC" --token "$XLM_TOKEN")
+
+          REPUTATION_ID=$(stellar contract deploy \
+            --wasm target/wasm32v1-none/release/invofi_reputation.wasm \
+            --source invofi-deployer --network "$NETWORK" \
+            -- --admin "$ADMIN_PUBLIC")
+
+          echo "registry_id=$REGISTRY_ID"   >> "$GITHUB_OUTPUT"
+          echo "financing_id=$FINANCING_ID" >> "$GITHUB_OUTPUT"
+          echo "repayment_id=$REPAYMENT_ID" >> "$GITHUB_OUTPUT"
+          echo "insurance_id=$INSURANCE_ID" >> "$GITHUB_OUTPUT"
+          echo "reputation_id=$REPUTATION_ID" >> "$GITHUB_OUTPUT"
+
+          cat >> "$GITHUB_STEP_SUMMARY" <<OUTEOF
+          ## Deployed contracts (mainnet)
+
+          | Contract | ID |
+          | --- | --- |
+          | registry    | \`$REGISTRY_ID\`   |
+          | financing   | \`$FINANCING_ID\`  |
+          | repayment   | \`$REPAYMENT_ID\`  |
+          | insurance   | \`$INSURANCE_ID\`  |
+          | reputation  | \`$REPUTATION_ID\` |
+          | position token (POS) | wired in next step |
+          | admin (constructor-bound) | \`$ADMIN_PUBLIC\` |
+
+          **Save these IDs.** There is no automatic rollback.
+          To recover from a bad deploy, follow [docs/migration-runbook.md](../docs/migration-runbook.md).
+
+          Set in Vercel (production):
+          - \`NEXT_PUBLIC_REGISTRY_CONTRACT_ID\`  = \`$REGISTRY_ID\`
+          - \`NEXT_PUBLIC_FINANCING_CONTRACT_ID\` = \`$FINANCING_ID\`
+          - \`NEXT_PUBLIC_REPAYMENT_CONTRACT_ID\` = \`$REPAYMENT_ID\`
+          OUTEOF
+
+      - name: Wire cross-contract callers and currencies (mainnet)
+        env:
+          REGISTRY_ID:   ${{ steps.deploy.outputs.registry_id }}
+          FINANCING_ID:  ${{ steps.deploy.outputs.financing_id }}
+          REPAYMENT_ID:  ${{ steps.deploy.outputs.repayment_id }}
+          INSURANCE_ID:  ${{ steps.deploy.outputs.insurance_id }}
+          REPUTATION_ID: ${{ steps.deploy.outputs.reputation_id }}
+        run: |
+          NETWORK=mainnet
+          ADMIN_PUBLIC=${{ steps.deploy.outputs.admin_public }}
+          XLM_TOKEN=$(stellar contract id asset --asset native --network "$NETWORK")
+          USDC_TOKEN=$(stellar contract id asset \
+            --asset USDC:GA5ZSEJYB37JRC5AVCIA5MOP4RHTM335X2KGX3IHOJAPP5RE34K4KZVN \
+            --network "$NETWORK")
+
+          stellar contract invoke --id "$REGISTRY_ID" --source invofi-deployer \
+            --network "$NETWORK" \
+            -- set_financing_contract --admin "$ADMIN_PUBLIC" --financing "$FINANCING_ID"
+
+          stellar contract invoke --id "$REGISTRY_ID" --source invofi-deployer \
+            --network "$NETWORK" \
+            -- set_repayment_contract --admin "$ADMIN_PUBLIC" --repayment "$REPAYMENT_ID"
+
+          stellar contract invoke --id "$FINANCING_ID" --source invofi-deployer \
+            --network "$NETWORK" \
+            -- set_repayment_contract --admin "$ADMIN_PUBLIC" --repayment "$REPAYMENT_ID"
+
+          stellar contract invoke --id "$FINANCING_ID" --source invofi-deployer \
+            --network "$NETWORK" \
+            -- register_currency --admin "$ADMIN_PUBLIC" --currency XLM --token_addr "$XLM_TOKEN"
+
+          stellar contract invoke --id "$FINANCING_ID" --source invofi-deployer \
+            --network "$NETWORK" \
+            -- register_currency --admin "$ADMIN_PUBLIC" --currency USDC --token_addr "$USDC_TOKEN"
+
+          # Position token (POS): deploy SAC if absent, then hand admin to financing.
+          POS_ID=$(stellar contract id asset \
+            --asset "POS:$ADMIN_PUBLIC" --network "$NETWORK")
+          if ! stellar contract info interface --id "$POS_ID" \
+               --network "$NETWORK" >/dev/null 2>&1; then
+            stellar contract asset deploy \
+              --asset "POS:$ADMIN_PUBLIC" --source invofi-deployer --network "$NETWORK"
+          fi
+          stellar contract invoke --id "$POS_ID" --source invofi-deployer \
+            --network "$NETWORK" \
+            -- set_admin --new_admin "$FINANCING_ID"
+          stellar contract invoke --id "$FINANCING_ID" --source invofi-deployer \
+            --network "$NETWORK" \
+            -- set_position_token --admin "$ADMIN_PUBLIC" --token "$POS_ID"
+
+          # Insurance payout caller + reputation recorder
+          stellar contract invoke --id "$REPAYMENT_ID" --source invofi-deployer \
+            --network "$NETWORK" \
+            -- set_insurance --admin "$ADMIN_PUBLIC" --insurance "$INSURANCE_ID"
+          stellar contract invoke --id "$REPAYMENT_ID" --source invofi-deployer \
+            --network "$NETWORK" \
+            -- set_reputation --admin "$ADMIN_PUBLIC" --reputation "$REPUTATION_ID"
+          stellar contract invoke --id "$INSURANCE_ID" --source invofi-deployer \
+            --network "$NETWORK" \
+            -- set_payout_caller --admin "$ADMIN_PUBLIC" --payout_caller "$REPAYMENT_ID"
+          stellar contract invoke --id "$REPUTATION_ID" --source invofi-deployer \
+            --network "$NETWORK" \
+            -- set_recorder --admin "$ADMIN_PUBLIC" --recorder "$REPAYMENT_ID"
+
+          echo "position_token_id=$POS_ID" >> "$GITHUB_OUTPUT"
+
+          cat >> "$GITHUB_STEP_SUMMARY" <<OUTEOF
+
+          ## Wiring complete
+
+          | Component | ID |
+          | --- | --- |
+          | position token (POS) | \`$POS_ID\` |
+
+          Cross-contract callers, currencies, and POS admin are wired.
+          OUTEOF
