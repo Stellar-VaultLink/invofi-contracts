@@ -27,6 +27,14 @@ use invofi_common::{
 //   but does not alter `terminal_at`; real-time retention still ends at 395 days.
 const INVOICE_IDS_PER_PAGE: u32 = 32;
 const MAX_INVOICE_QUERY_LIMIT: u32 = 32;
+const TTL_RENEWAL_THRESHOLD_DIVISOR: u32 = 2;
+
+/// Renew a persistent entry once its remaining TTL falls below roughly half
+/// of the requested extension window. This leaves a meaningful keeper window
+/// before expiry instead of refreshing entries on every call.
+fn ttl_renewal_threshold(extend_to: u32) -> u32 {
+    (extend_to / TTL_RENEWAL_THRESHOLD_DIVISOR).min(extend_to.saturating_sub(1))
+}
 
 fn invoice_key(id: &Symbol) -> (Symbol, Symbol) {
     (symbol_short!("inv"), id.clone())
@@ -121,10 +129,12 @@ fn save_terminal_timestamp(env: &Env, invoice: &Invoice) {
         let max_ttl = env.storage().max_ttl();
         env.storage()
             .persistent()
-            .extend_ttl(&key, max_ttl, max_ttl);
-        env.storage()
-            .persistent()
-            .extend_ttl(&invoice_key(&invoice.id), max_ttl, max_ttl);
+            .extend_ttl(&key, ttl_renewal_threshold(max_ttl), max_ttl);
+        env.storage().persistent().extend_ttl(
+            &invoice_key(&invoice.id),
+            ttl_renewal_threshold(max_ttl),
+            max_ttl,
+        );
         extend_invoice_index_ttl(env, &invoice.id, max_ttl);
     } else {
         env.storage().persistent().remove(&key);
@@ -160,13 +170,17 @@ fn extend_invoice_index_ttl(env: &Env, id: &Symbol, ttl: u32) {
         .unwrap_or_else(|| panic!("Invoice index location not found"));
     env.storage()
         .persistent()
-        .extend_ttl(&invoice_page_key(page), ttl, ttl);
-    env.storage()
-        .persistent()
-        .extend_ttl(&invoice_location_key(id), ttl, ttl);
-    env.storage()
-        .persistent()
-        .extend_ttl(&symbol_short!("invmeta"), ttl, ttl);
+        .extend_ttl(&invoice_page_key(page), ttl_renewal_threshold(ttl), ttl);
+    env.storage().persistent().extend_ttl(
+        &invoice_location_key(id),
+        ttl_renewal_threshold(ttl),
+        ttl,
+    );
+    env.storage().persistent().extend_ttl(
+        &symbol_short!("invmeta"),
+        ttl_renewal_threshold(ttl),
+        ttl,
+    );
 }
 
 fn remove_invoice_id(env: &Env, id: &Symbol) {
@@ -301,18 +315,15 @@ fn evict_invoice(env: &Env, id: &Symbol, reason: StorageEvictionReason) -> u32 {
     reclaimed_bytes
 }
 
-fn checked_query_limit(env: &Env, limit: u32) -> u32 {
-    if limit > MAX_INVOICE_QUERY_LIMIT {
-        env.panic_with_error(ContractError::InvalidInput);
-    }
-    limit
-}
-
 fn query_invoices<F>(env: &Env, offset: u32, limit: u32, matches: F) -> Vec<Invoice>
 where
     F: Fn(&Invoice) -> bool,
 {
-    let limit = checked_query_limit(env, limit);
+    // Enforce the bound at the loop's own boundary so future callers cannot
+    // accidentally turn this read into unbounded work.
+    if limit > MAX_INVOICE_QUERY_LIMIT {
+        env.panic_with_error(ContractError::InvalidInput);
+    }
     let mut result = Vec::new(env);
     for index in offset..offset.saturating_add(limit) {
         let page = index / INVOICE_IDS_PER_PAGE;
@@ -843,9 +854,11 @@ impl RegistryContract {
             panic!("Terminal invoices cannot have their active TTL bumped");
         }
         let max_ttl = env.storage().max_ttl();
-        env.storage()
-            .persistent()
-            .extend_ttl(&invoice_key(&id), max_ttl, max_ttl);
+        env.storage().persistent().extend_ttl(
+            &invoice_key(&id),
+            ttl_renewal_threshold(max_ttl),
+            max_ttl,
+        );
         extend_invoice_index_ttl(&env, &id, max_ttl);
         env.events()
             .publish((Symbol::new(&env, "ttl_bumped"), id), (keeper, max_ttl));
@@ -866,12 +879,16 @@ impl RegistryContract {
             env.panic_with_error(ContractError::InvalidTransition);
         }
         let max_ttl = env.storage().max_ttl();
-        env.storage()
-            .persistent()
-            .extend_ttl(&invoice_key(&id), max_ttl, max_ttl);
-        env.storage()
-            .persistent()
-            .extend_ttl(&terminal_at_key(&id), max_ttl, max_ttl);
+        env.storage().persistent().extend_ttl(
+            &invoice_key(&id),
+            ttl_renewal_threshold(max_ttl),
+            max_ttl,
+        );
+        env.storage().persistent().extend_ttl(
+            &terminal_at_key(&id),
+            ttl_renewal_threshold(max_ttl),
+            max_ttl,
+        );
         extend_invoice_index_ttl(&env, &id, max_ttl);
     }
 
@@ -893,6 +910,10 @@ impl RegistryContract {
         evict_invoice(&env, &id, StorageEvictionReason::Admin)
     }
 
+    /// Return matches from only the first bounded page: the first 32 index
+    /// slots, after applying the status filter. This is not guaranteed to
+    /// include every matching invoice; use `get_invoices_by_status_paginated`
+    /// with later stable index-slot offsets for complete traversal.
     pub fn get_invoices_by_status(env: Env, status: InvoiceStatus) -> Vec<Invoice> {
         Self::get_invoices_by_status_paginated(env, status, 0, MAX_INVOICE_QUERY_LIMIT)
     }
@@ -908,6 +929,10 @@ impl RegistryContract {
         query_invoices(&env, offset, limit, |invoice| invoice.status == status)
     }
 
+    /// Return matches from only the first bounded page: the first 32 index
+    /// slots, after applying the originator filter. This is not guaranteed to
+    /// include every matching invoice; use `get_inv_by_originator_page` with
+    /// later stable index-slot offsets for complete traversal.
     pub fn get_invoices_by_originator(env: Env, originator: Address) -> Vec<Invoice> {
         Self::get_inv_by_originator_page(env, originator, 0, MAX_INVOICE_QUERY_LIMIT)
     }
@@ -923,12 +948,18 @@ impl RegistryContract {
         })
     }
 
-    /// Return the first bounded invoice page. Use `get_invoices_paginated` for
-    /// later pages.
+    /// Return only the first bounded invoice page (the first 32 index slots).
+    /// This is not guaranteed to include every invoice; use
+    /// `get_invoices_paginated` with later stable index-slot offsets for a
+    /// complete traversal.
     pub fn get_all_invoices(env: Env) -> Vec<Invoice> {
         Self::get_invoices_paginated(env, 0, MAX_INVOICE_QUERY_LIMIT)
     }
 
+    /// Return matches from only the first bounded page: the first 32 index
+    /// slots, after applying the currency filter. This is not guaranteed to
+    /// include every matching invoice; use `get_inv_by_currency_page` with
+    /// later stable index-slot offsets for complete traversal.
     pub fn get_invoices_by_currency(env: Env, currency: Symbol) -> Vec<Invoice> {
         Self::get_inv_by_currency_page(env, currency, 0, MAX_INVOICE_QUERY_LIMIT)
     }
@@ -942,6 +973,10 @@ impl RegistryContract {
         query_invoices(&env, offset, limit, |invoice| invoice.currency == currency)
     }
 
+    /// Return matches from only the first bounded page: the first 32 index
+    /// slots, after applying the due-date filter. This is not guaranteed to
+    /// include every matching invoice; use `get_inv_due_before_page` with
+    /// later stable index-slot offsets for complete traversal.
     pub fn get_invoices_due_before(env: Env, timestamp: u64) -> Vec<Invoice> {
         Self::get_inv_due_before_page(env, timestamp, 0, MAX_INVOICE_QUERY_LIMIT)
     }

@@ -360,6 +360,74 @@ fn test_get_invoices_by_status_matching() {
 }
 
 #[test]
+fn test_filtered_wrappers_are_first_page_only_and_paginated_helpers_reach_later_matches() {
+    let env = Env::default();
+    env.mock_all_auths();
+    env.ledger().set_timestamp(1_000_000);
+    let contract_id = env.register(RegistryContract, (Address::generate(&env),));
+    let client = super::RegistryContractClient::new(&env, &contract_id);
+    let originator = Address::generate(&env);
+    let currency = symbol_short!("USDC");
+
+    for index in 0u32..34 {
+        let id = soroban_sdk::Symbol::new(&env, &std::format!("page_{index:02}"));
+        client.register_invoice(
+            &id,
+            &originator,
+            &1_000_000_000_i128,
+            &currency,
+            &2_000_000_u64,
+        );
+        if index == 32 {
+            client.cancel_invoice(&id, &originator);
+        }
+    }
+
+    // The wrapper scans only slots 0..31. It therefore returns no Cancelled
+    // invoice even though one exists in slot 32; the short result is not an
+    // exhaustion signal.
+    assert_eq!(
+        client
+            .get_invoices_by_status(&InvoiceStatus::Cancelled)
+            .len(),
+        0
+    );
+    let later_status =
+        client.get_invoices_by_status_paginated(&InvoiceStatus::Cancelled, &32_u32, &1_u32);
+    assert_eq!(later_status.len(), 1);
+    assert_eq!(
+        later_status.get(0).unwrap().id,
+        soroban_sdk::Symbol::new(&env, "page_32")
+    );
+
+    // Unfiltered and filtered first-page wrappers are bounded at 32 slots;
+    // paginated helpers retrieve the matching invoice beyond that boundary.
+    assert_eq!(client.get_all_invoices().len(), 32);
+    assert_eq!(client.get_invoices_by_originator(&originator).len(), 32);
+    assert_eq!(client.get_invoices_by_currency(&currency).len(), 32);
+    assert_eq!(client.get_invoices_due_before(&3_000_000_u64).len(), 32);
+    assert_eq!(client.get_invoices_paginated(&32_u32, &2_u32).len(), 2);
+    assert_eq!(
+        client
+            .get_inv_by_originator_page(&originator, &32_u32, &2_u32)
+            .len(),
+        2
+    );
+    assert_eq!(
+        client
+            .get_inv_by_currency_page(&currency, &32_u32, &2_u32)
+            .len(),
+        2
+    );
+    assert_eq!(
+        client
+            .get_inv_due_before_page(&3_000_000_u64, &33_u32, &1_u32)
+            .len(),
+        1
+    );
+}
+
+#[test]
 fn test_get_invoices_by_originator() {
     let env = Env::default();
     env.mock_all_auths();
@@ -537,6 +605,11 @@ fn test_get_invoices_paginated() {
 
     let page2 = client.get_invoices_paginated(&3_u32, &3_u32);
     assert_eq!(page2.len(), 2);
+
+    let over_limit = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        client.get_invoices_paginated(&0_u32, &33_u32);
+    }));
+    assert!(over_limit.is_err());
 }
 
 #[test]
@@ -1440,7 +1513,10 @@ fn test_terminal_ttl_renewal_survives_short_network_ttl_and_still_evicts() {
             .unwrap()
     });
     let mut ledger = env.ledger().get();
-    ledger.sequence_number += 50;
+    // Renew once the remaining TTL is below the half-life low-water mark
+    // (100 / 2); advancing 51 ledgers makes the renewal eligible without
+    // relying on the old unconditional threshold==extend_to behavior.
+    ledger.sequence_number += 51;
     env.ledger().set(ledger);
     client.renew_terminal_invoice_ttl(&keeper, &id);
     env.as_contract(&contract_id, || {

@@ -67,7 +67,7 @@ register_invoice()  →  create_offer()  →  accept_offer()
 | `__constructor(admin)` | Deployer (at deploy) | Sets admin atomically in the deploy operation — no `initialize()` to front-run (ADR-0005) |
 | `register_invoice(id, originator, amount, currency, due_date)` | Originator | Register invoice; rejects dust (< 10 XLM) and past-due dates |
 | `get_invoice(id)` | Anyone | Read invoice state |
-| `get_invoices_by_status(status)` | Anyone | Keeper-friendly lifecycle query |
+| `get_invoices_by_status(status)` | Anyone | First bounded page (first 32 index slots) matching status; use `get_invoices_by_status_paginated` for complete traversal |
 | `set_storage_keeper(admin, keeper)` | Admin | Authorize storage maintenance automation |
 | `bump_invoice_ttl(keeper, id)` | Storage keeper | Extend an active invoice's persistent TTL |
 | `renew_terminal_invoice_ttl(keeper, id)` | Storage keeper | Renew a non-eligible terminal invoice when network TTL is shorter than retention |
@@ -82,6 +82,17 @@ register_invoice()  →  create_offer()  →  accept_offer()
 | `raise_dispute / resolve_dispute` | Originator / Admin | Dispute lifecycle |
 | `blacklist_address / unblacklist_address / is_blacklisted` | Admin | Address blocking |
 | `set_rate / set_fee / transfer_admin / pause / unpause` | Admin | Admin controls |
+
+The legacy aggregate helpers (`get_invoices_by_status`,
+`get_invoices_by_originator`, `get_all_invoices`,
+`get_invoices_by_currency`, and `get_invoices_due_before`) deliberately return
+only the first bounded page: the first 32 stable invoice-index slots, with the
+filter applied afterward. A short result does not prove that no later match
+exists. Callers that need complete results must use the corresponding
+paginated helper (`get_invoices_by_status_paginated`,
+`get_inv_by_originator_page`, `get_invoices_paginated`,
+`get_inv_by_currency_page`, or `get_inv_due_before_page`) and advance the
+stable index-slot offset by page.
 
 ### Financing — `financing/`
 
