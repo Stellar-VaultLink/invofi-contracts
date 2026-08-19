@@ -131,22 +131,25 @@ fn save_yield_acc(env: &Env, map: &Map<Address, i128>) {
 /// Formula: `principal * rate_bps * elapsed_secs / (10_000 * SECONDS_PER_YEAR)`
 ///
 /// Integer truncation means yield rounds **down** (in the protocol's favour).
-/// Overflow: `principal` fits in i128 (≤ 2^127 − 1); `rate_bps` ≤ 65 535;
-/// `elapsed_secs` ≤ 31 536 000.  The intermediate product can reach
-/// ~2^127 × 65 535 × 3.15×10^7 which overflows plain i128.  We therefore
-/// split the multiplication into two steps, dividing by SECONDS_PER_YEAR
-/// first to keep the intermediate value inside i128.
+///
+/// **Overflow analysis** (all multiplications happen before any division):
+/// - `principal` for any realistic token supply ≤ ~10^18 stroops
+/// - `elapsed_secs` ≤ 31_536_000 (~3.15 × 10^7)
+/// - `rate_bps` ≤ 10_000 (100 %)
+/// - Worst-case intermediate: 10^18 × 3.15×10^7 × 10^4 = 3.15 × 10^29
+/// - i128 max ≈ 1.7 × 10^38  →  comfortable headroom, no overflow
+///
+/// Multiplying before dividing avoids the precision loss that "divide before
+/// multiply" introduces on sub-year or sub-full-principal stakes.
 fn compute_yield(principal: i128, rate_bps: u32, elapsed_secs: u64) -> i128 {
     if principal == 0 || rate_bps == 0 || elapsed_secs == 0 {
         return 0;
     }
-    // Step 1: principal * elapsed_secs  (always positive and fits in i128 for
-    //         realistic values: 2^127 / SECONDS_PER_YEAR ~ 5.4×10^31, which
-    //         exceeds any realistic token supply)
-    let numerator = principal * elapsed_secs as i128;
-    // Step 2: divide by SECONDS_PER_YEAR first to tame the value, then
-    //         multiply by rate_bps, then divide by 10_000.
-    numerator / SECONDS_PER_YEAR as i128 * rate_bps as i128 / 10_000
+    // All multiplications first, single division at the end.
+    // This preserves maximum precision and avoids the divide-before-multiply
+    // precision loss that Scout's detector flags.
+    let denominator = SECONDS_PER_YEAR as i128 * 10_000;
+    principal * elapsed_secs as i128 * rate_bps as i128 / denominator
 }
 
 /// Bank the yield accrued since the staker's last timestamp, then reset the
