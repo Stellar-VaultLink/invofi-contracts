@@ -319,6 +319,13 @@ Thanks to everyone who has contributed to InvoFi — the list below is generated
 		</tr>
 		<tr>
             <td align="center">
+                <a href="https://github.com/Just-Bamford">
+                    <img src="https://avatars.githubusercontent.com/u/233368823?v=4" width="100;" alt="Just-Bamford"/>
+                    <br />
+                    <sub><b>Bamford</b></sub>
+                </a>
+            </td>
+            <td align="center">
                 <a href="https://github.com/DevSolex">
                     <img src="https://avatars.githubusercontent.com/u/220715997?v=4" width="100;" alt="DevSolex"/>
                     <br />
@@ -344,6 +351,13 @@ Thanks to everyone who has contributed to InvoFi — the list below is generated
                     <img src="https://avatars.githubusercontent.com/u/67506722?v=4" width="100;" alt="RawNuke"/>
                     <br />
                     <sub><b>Raw_Nuke</b></sub>
+                </a>
+            </td>
+            <td align="center">
+                <a href="https://github.com/Wetshakat">
+                    <img src="https://avatars.githubusercontent.com/u/182114004?v=4" width="100;" alt="Wetshakat"/>
+                    <br />
+                    <sub><b>Ishaku Dyelshak </b></sub>
                 </a>
             </td>
 		</tr>
