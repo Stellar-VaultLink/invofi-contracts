@@ -324,8 +324,16 @@ where
     if limit > MAX_INVOICE_QUERY_LIMIT {
         env.panic_with_error(ContractError::InvalidInput);
     }
+    let end = offset.saturating_add(limit);
     let mut result = Vec::new(env);
-    for index in offset..offset.saturating_add(limit) {
+    // Keep the loop's trip count syntactically constant for Scout. The end
+    // check preserves the original offset/limit and saturating arithmetic
+    // semantics, including offsets near u32::MAX.
+    for step in 0..MAX_INVOICE_QUERY_LIMIT {
+        let index = offset.saturating_add(step);
+        if index >= end {
+            break;
+        }
         let page = index / INVOICE_IDS_PER_PAGE;
         let slot = index % INVOICE_IDS_PER_PAGE;
         let ids = load_invoice_page(env, page);

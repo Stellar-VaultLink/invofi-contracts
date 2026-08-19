@@ -606,6 +606,11 @@ fn test_get_invoices_paginated() {
     let page2 = client.get_invoices_paginated(&3_u32, &3_u32);
     assert_eq!(page2.len(), 2);
 
+    let window = client.get_invoices_paginated(&1_u32, &3_u32);
+    assert_eq!(window.get(0).unwrap().id, symbol_short!("i1"));
+    assert_eq!(window.get(1).unwrap().id, symbol_short!("i2"));
+    assert_eq!(window.get(2).unwrap().id, symbol_short!("i3"));
+
     let over_limit = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         client.get_invoices_paginated(&0_u32, &33_u32);
     }));
