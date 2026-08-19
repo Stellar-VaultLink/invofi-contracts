@@ -70,6 +70,7 @@ register_invoice()  →  create_offer()  →  accept_offer()
 | `get_invoices_by_status(status)` | Anyone | Keeper-friendly lifecycle query |
 | `set_storage_keeper(admin, keeper)` | Admin | Authorize storage maintenance automation |
 | `bump_invoice_ttl(keeper, id)` | Storage keeper | Extend an active invoice's persistent TTL |
+| `renew_terminal_invoice_ttl(keeper, id)` | Storage keeper | Renew a non-eligible terminal invoice when network TTL is shorter than retention |
 | `keeper_evict_invoice(keeper, id)` | Storage keeper | Evict an eligible terminal invoice |
 | `evict_invoice(admin, id)` | Admin | Manually evict an eligible terminal invoice |
 | `set_invoice_storage_budget(admin, bytes)` | Admin | Set the per-invoice serialized storage cap |
@@ -194,6 +195,13 @@ Every state-mutating function publishes a Soroban contract event. Topics are
 | `DEFAULT_INVOICE_STORAGE_BUDGET_BYTES` | 10,240 | Default serialized per-invoice storage budget (10 KiB) |
 | `TERMINAL_INVOICE_RETENTION_SECS` | 31,536,000 | One-year retention after terminal transition |
 | `EVICTION_GRACE_PERIOD_SECS` | 2,592,000 | 30-day eviction notice after retention |
+
+`ProtocolStats.total_invoices` is a lifetime registration counter. It is
+incremented when an invoice is registered and intentionally is not decremented
+when a terminal record is evicted; use `get_invoices_count()` for the current
+number of stored invoices. Invoice listings are page-bounded (32 index slots
+per call); pagination offsets are stable index-slot offsets, so an eviction
+creates a skipped slot rather than shifting later results.
 
 ---
 

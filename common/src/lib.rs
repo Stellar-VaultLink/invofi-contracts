@@ -65,6 +65,12 @@ pub enum ContractError {
 /// Default maximum serialized storage attributed to one invoice record.
 pub const DEFAULT_INVOICE_STORAGE_BUDGET_BYTES: u32 = 10 * 1024;
 
+/// Minimum XDR key/value payload for the maximally sized `Invoice` shape.
+/// 332 is measured using the SDK's XDR path with 32-byte invoice/currency
+/// symbols, a populated address, maximum integers, and `Defaulted` status;
+/// the registry test mechanically verifies this value.
+pub const MIN_INVOICE_STORAGE_BUDGET_BYTES: u32 = 332;
+
 /// Retain a terminal invoice for one calendar year before its eviction notice.
 pub const TERMINAL_INVOICE_RETENTION_SECS: u64 = 31_536_000;
 

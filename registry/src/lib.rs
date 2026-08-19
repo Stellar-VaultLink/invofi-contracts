@@ -1,9 +1,7 @@
 #![no_std]
 
 use soroban_sdk::{
-    contract, contractimpl, symbol_short,
-    xdr::ToXdr,
-    Address, Env, Map, Symbol, Vec,
+    contract, contractimpl, symbol_short, xdr::ToXdr, Address, Env, Map, Symbol, Vec,
 };
 
 use invofi_common::{
@@ -14,6 +12,22 @@ use invofi_common::{
 
 // ─── Storage Helpers ─────────────────────────────────────────────────────────
 
+// Storage design:
+// - Invoices, terminal timestamps, and ID pages are independent persistent
+//   entries, so changing one invoice never rewrites another invoice.
+// - `invmeta` stores `(active_count, current_page, next_slot)`; each `invpage`
+//   holds at most `INVOICE_IDS_PER_PAGE` `Option<Symbol>` slots.
+// - Registration appends to the current page. Eviction clears its slot and
+//   never compacts pages, preserving stable offset ordering across gaps.
+// - Aggregate reads are page-bounded; callers use `get_invoices_paginated` or
+//   a filtered paginated helper for pages beyond the legacy first-page views.
+// - Active TTL bumps are keeper-gated. Terminal entries are renewed only by
+//   `renew_terminal_invoice_ttl`, also keeper-gated, before eligibility.
+// - Renewal extends the invoice, terminal timestamp, and its page/meta index,
+//   but does not alter `terminal_at`; real-time retention still ends at 395 days.
+const INVOICE_IDS_PER_PAGE: u32 = 32;
+const MAX_INVOICE_QUERY_LIMIT: u32 = 32;
+
 fn invoice_key(id: &Symbol) -> (Symbol, Symbol) {
     (symbol_short!("inv"), id.clone())
 }
@@ -22,19 +36,44 @@ fn terminal_at_key(id: &Symbol) -> (Symbol, Symbol) {
     (symbol_short!("term_at"), id.clone())
 }
 
-fn load_invoice_ids(env: &Env) -> Vec<Symbol> {
+fn invoice_page_key(page: u32) -> (Symbol, u32) {
+    (symbol_short!("invpage"), page)
+}
+
+fn invoice_location_key(id: &Symbol) -> (Symbol, Symbol) {
+    (symbol_short!("invloc"), id.clone())
+}
+
+fn load_invoice_index_meta(env: &Env) -> (u32, u32, u32) {
     env.storage()
         .persistent()
-        .get(&symbol_short!("inv_ids"))
+        .get(&symbol_short!("invmeta"))
+        .unwrap_or((0, 0, 0))
+}
+
+fn save_invoice_index_meta(env: &Env, meta: &(u32, u32, u32)) {
+    env.storage()
+        .persistent()
+        .set(&symbol_short!("invmeta"), meta);
+}
+
+fn load_invoice_page(env: &Env, page: u32) -> Vec<Option<Symbol>> {
+    env.storage()
+        .persistent()
+        .get(&invoice_page_key(page))
         .unwrap_or(Vec::new(env))
 }
 
-fn save_invoice_ids(env: &Env, ids: &Vec<Symbol>) {
-    env.storage().persistent().set(&symbol_short!("inv_ids"), ids);
+fn save_invoice_page(env: &Env, page: u32, ids: &Vec<Option<Symbol>>) {
+    env.storage().persistent().set(&invoice_page_key(page), ids);
 }
 
 fn load_invoice(env: &Env, id: &Symbol) -> Option<Invoice> {
     env.storage().persistent().get(&invoice_key(id))
+}
+
+fn load_invoice_or_panic(env: &Env, id: &Symbol) -> Invoice {
+    load_invoice(env, id).unwrap_or_else(|| env.panic_with_error(ContractError::NotFound))
 }
 
 fn invoice_storage_bytes(env: &Env, invoice: &Invoice) -> u32 {
@@ -56,13 +95,15 @@ fn invoice_storage_budget(env: &Env) -> u32 {
 
 fn assert_invoice_within_budget(env: &Env, invoice: &Invoice) {
     if invoice_storage_bytes(env, invoice) > invoice_storage_budget(env) {
-        panic!("Invoice storage budget exceeded");
+        env.panic_with_error(ContractError::InvalidInput);
     }
 }
 
 fn save_invoice(env: &Env, invoice: &Invoice) {
     assert_invoice_within_budget(env, invoice);
-    env.storage().persistent().set(&invoice_key(&invoice.id), invoice);
+    env.storage()
+        .persistent()
+        .set(&invoice_key(&invoice.id), invoice);
 }
 
 fn is_terminal(status: &InvoiceStatus) -> bool {
@@ -74,54 +115,75 @@ fn is_terminal(status: &InvoiceStatus) -> bool {
 fn save_terminal_timestamp(env: &Env, invoice: &Invoice) {
     let key = terminal_at_key(&invoice.id);
     if is_terminal(&invoice.status) {
-        env.storage().persistent().set(&key, &env.ledger().timestamp());
+        env.storage()
+            .persistent()
+            .set(&key, &env.ledger().timestamp());
         let max_ttl = env.storage().max_ttl();
-        env.storage().persistent().extend_ttl(&key, max_ttl, max_ttl);
+        env.storage()
+            .persistent()
+            .extend_ttl(&key, max_ttl, max_ttl);
         env.storage()
             .persistent()
             .extend_ttl(&invoice_key(&invoice.id), max_ttl, max_ttl);
-        env.storage()
-            .persistent()
-            .extend_ttl(&symbol_short!("inv_ids"), max_ttl, max_ttl);
+        extend_invoice_index_ttl(env, &invoice.id, max_ttl);
     } else {
         env.storage().persistent().remove(&key);
     }
 }
 
-fn load_invoices(env: &Env) -> Map<Symbol, Invoice> {
-    let mut invoices = Map::new(env);
-    for id in load_invoice_ids(env).iter() {
-        if let Some(invoice) = load_invoice(env, &id) {
-            invoices.set(id, invoice);
-        }
-    }
-    invoices
-}
-
-fn save_invoices(env: &Env, invoices: &Map<Symbol, Invoice>) {
-    for (_id, invoice) in invoices.iter() {
-        save_invoice(env, &invoice);
-    }
-}
-
 fn add_invoice_id(env: &Env, id: &Symbol) {
-    let mut ids = load_invoice_ids(env);
-    ids.push_back(id.clone());
-    save_invoice_ids(env, &ids);
-    let max_ttl = env.storage().max_ttl();
+    let (mut active_count, mut page, mut slot) = load_invoice_index_meta(env);
+    let mut ids = load_invoice_page(env, page);
+    if slot == INVOICE_IDS_PER_PAGE {
+        page = page
+            .checked_add(1)
+            .unwrap_or_else(|| panic!("Invoice index overflow"));
+        slot = 0;
+        ids = Vec::new(env);
+    }
+    ids.push_back(Some(id.clone()));
+    save_invoice_page(env, page, &ids);
     env.storage()
         .persistent()
-        .extend_ttl(&symbol_short!("inv_ids"), max_ttl, max_ttl);
+        .set(&invoice_location_key(id), &(page, slot));
+    active_count = active_count
+        .checked_add(1)
+        .unwrap_or_else(|| panic!("Invoice count overflow"));
+    save_invoice_index_meta(env, &(active_count, page, slot + 1));
+}
+
+fn extend_invoice_index_ttl(env: &Env, id: &Symbol, ttl: u32) {
+    let (page, _slot): (u32, u32) = env
+        .storage()
+        .persistent()
+        .get(&invoice_location_key(id))
+        .unwrap_or_else(|| panic!("Invoice index location not found"));
+    env.storage()
+        .persistent()
+        .extend_ttl(&invoice_page_key(page), ttl, ttl);
+    env.storage()
+        .persistent()
+        .extend_ttl(&invoice_location_key(id), ttl, ttl);
+    env.storage()
+        .persistent()
+        .extend_ttl(&symbol_short!("invmeta"), ttl, ttl);
 }
 
 fn remove_invoice_id(env: &Env, id: &Symbol) {
-    let mut retained = Vec::new(env);
-    for existing_id in load_invoice_ids(env).iter() {
-        if existing_id != *id {
-            retained.push_back(existing_id);
-        }
-    }
-    save_invoice_ids(env, &retained);
+    let (mut active_count, current_page, next_slot) = load_invoice_index_meta(env);
+    let (page, slot): (u32, u32) = env
+        .storage()
+        .persistent()
+        .get(&invoice_location_key(id))
+        .unwrap_or_else(|| panic!("Invoice index location not found"));
+    let mut ids = load_invoice_page(env, page);
+    ids.set(slot, None);
+    save_invoice_page(env, page, &ids);
+    env.storage().persistent().remove(&invoice_location_key(id));
+    active_count = active_count
+        .checked_sub(1)
+        .unwrap_or_else(|| panic!("Invoice index underflow"));
+    save_invoice_index_meta(env, &(active_count, current_page, next_slot));
 }
 
 fn load_rates(env: &Env) -> Map<RiskTier, u32> {
@@ -194,16 +256,13 @@ fn assert_keeper(env: &Env, caller: &Address) {
         .get(&symbol_short!("strgkeep"))
         .unwrap_or_else(|| panic!("Storage keeper not configured"));
     if keeper != *caller {
-        panic!("Only the storage keeper can perform this action");
+        env.panic_with_error(ContractError::Unauthorized);
     }
 }
 
 fn assert_evictable(env: &Env, invoice: &Invoice) {
     if !is_invoice_eviction_eligible(env, invoice) {
-        if !is_terminal(&invoice.status) {
-            panic!("Only terminal invoices can be evicted");
-        }
-        panic!("Invoice retention and eviction grace periods have not elapsed");
+        env.panic_with_error(ContractError::InvalidTransition);
     }
 }
 
@@ -228,8 +287,8 @@ fn is_invoice_eviction_eligible(env: &Env, invoice: &Invoice) -> bool {
 }
 
 fn evict_invoice(env: &Env, id: &Symbol, reason: StorageEvictionReason) -> u32 {
-    let invoice = load_invoice(env, id)
-        .unwrap_or_else(|| env.panic_with_error(ContractError::NotFound));
+    let invoice =
+        load_invoice(env, id).unwrap_or_else(|| env.panic_with_error(ContractError::NotFound));
     assert_evictable(env, &invoice);
     let reclaimed_bytes = invoice_storage_bytes(env, &invoice);
     env.storage().persistent().remove(&invoice_key(id));
@@ -240,6 +299,34 @@ fn evict_invoice(env: &Env, id: &Symbol, reason: StorageEvictionReason) -> u32 {
         (reason, reclaimed_bytes),
     );
     reclaimed_bytes
+}
+
+fn checked_query_limit(env: &Env, limit: u32) -> u32 {
+    if limit > MAX_INVOICE_QUERY_LIMIT {
+        env.panic_with_error(ContractError::InvalidInput);
+    }
+    limit
+}
+
+fn query_invoices<F>(env: &Env, offset: u32, limit: u32, matches: F) -> Vec<Invoice>
+where
+    F: Fn(&Invoice) -> bool,
+{
+    let limit = checked_query_limit(env, limit);
+    let mut result = Vec::new(env);
+    for index in offset..offset.saturating_add(limit) {
+        let page = index / INVOICE_IDS_PER_PAGE;
+        let slot = index % INVOICE_IDS_PER_PAGE;
+        let ids = load_invoice_page(env, page);
+        if let Some(Some(id)) = ids.get(slot) {
+            if let Some(invoice) = load_invoice(env, &id) {
+                if matches(&invoice) {
+                    result.push_back(invoice);
+                }
+            }
+        }
+    }
+    result
 }
 
 // ─── Contract ────────────────────────────────────────────────────────────────
@@ -399,8 +486,7 @@ impl RegistryContract {
             env.panic_with_error(ContractError::InvalidInput);
         }
 
-        let mut invoices = load_invoices(&env);
-        if invoices.contains_key(id.clone()) {
+        if load_invoice(&env, &id).is_some() {
             env.panic_with_error(ContractError::AlreadyExists);
         }
 
@@ -412,8 +498,7 @@ impl RegistryContract {
             due_date,
             status: InvoiceStatus::Pending,
         };
-        invoices.set(id, invoice.clone());
-        save_invoices(&env, &invoices);
+        save_invoice(&env, &invoice);
         add_invoice_id(&env, &invoice.id);
 
         let mut s = load_stats(&env);
@@ -429,8 +514,7 @@ impl RegistryContract {
 
     /// Get an invoice by ID.
     pub fn get_invoice(env: Env, id: Symbol) -> Invoice {
-        load_invoice(&env, &id)
-            .unwrap_or_else(|| env.panic_with_error(ContractError::NotFound))
+        load_invoice(&env, &id).unwrap_or_else(|| env.panic_with_error(ContractError::NotFound))
     }
 
     /// Manually update the status of a Pending invoice. Only the invoice
@@ -443,10 +527,7 @@ impl RegistryContract {
     ) -> Invoice {
         assert_not_paused(&env);
         originator.require_auth();
-        let mut invoices = load_invoices(&env);
-        let mut invoice = invoices
-            .get(id.clone())
-            .unwrap_or_else(|| env.panic_with_error(ContractError::NotFound));
+        let mut invoice = load_invoice_or_panic(&env, &id);
         if invoice.originator != originator {
             env.panic_with_error(ContractError::Unauthorized);
         }
@@ -454,8 +535,7 @@ impl RegistryContract {
             env.panic_with_error(ContractError::InvalidTransition);
         }
         invoice.status = new_status.clone();
-        invoices.set(id, invoice.clone());
-        save_invoices(&env, &invoices);
+        save_invoice(&env, &invoice);
         save_terminal_timestamp(&env, &invoice);
         env.events()
             .publish((symbol_short!("inv_sts"), invoice.id.clone()), new_status);
@@ -471,10 +551,7 @@ impl RegistryContract {
     ) -> Invoice {
         assert_not_paused(&env);
         originator.require_auth();
-        let mut invoices = load_invoices(&env);
-        let mut invoice = invoices
-            .get(invoice_id.clone())
-            .unwrap_or_else(|| env.panic_with_error(ContractError::NotFound));
+        let mut invoice = load_invoice_or_panic(&env, &invoice_id);
         if invoice.originator != originator {
             env.panic_with_error(ContractError::Unauthorized);
         }
@@ -485,13 +562,10 @@ impl RegistryContract {
             env.panic_with_error(ContractError::InvalidInput);
         }
         invoice.amount = new_amount;
-        invoices.set(invoice_id, invoice.clone());
-        save_invoices(&env, &invoices);
+        save_invoice(&env, &invoice);
         save_terminal_timestamp(&env, &invoice);
-        env.events().publish(
-            (symbol_short!("inv_amt"), invoice.id.clone()),
-            new_amount,
-        );
+        env.events()
+            .publish((symbol_short!("inv_amt"), invoice.id.clone()), new_amount);
         invoice
     }
 
@@ -499,10 +573,7 @@ impl RegistryContract {
     pub fn cancel_invoice(env: Env, invoice_id: Symbol, originator: Address) -> Invoice {
         assert_not_paused(&env);
         originator.require_auth();
-        let mut invoices = load_invoices(&env);
-        let mut invoice = invoices
-            .get(invoice_id.clone())
-            .unwrap_or_else(|| env.panic_with_error(ContractError::NotFound));
+        let mut invoice = load_invoice_or_panic(&env, &invoice_id);
         if invoice.originator != originator {
             env.panic_with_error(ContractError::Unauthorized);
         }
@@ -510,8 +581,7 @@ impl RegistryContract {
             env.panic_with_error(ContractError::InvalidTransition);
         }
         invoice.status = InvoiceStatus::Cancelled;
-        invoices.set(invoice_id, invoice.clone());
-        save_invoices(&env, &invoices);
+        save_invoice(&env, &invoice);
         save_terminal_timestamp(&env, &invoice);
         env.events().publish(
             (symbol_short!("inv_cxl"), invoice.id.clone()),
@@ -532,10 +602,7 @@ impl RegistryContract {
     ) -> Invoice {
         assert_not_paused(&env);
         repayer.require_auth();
-        let mut invoices = load_invoices(&env);
-        let mut invoice = invoices
-            .get(id.clone())
-            .unwrap_or_else(|| env.panic_with_error(ContractError::NotFound));
+        let mut invoice = load_invoice_or_panic(&env, &id);
         if invoice.status != InvoiceStatus::Financed {
             env.panic_with_error(ContractError::InvalidTransition);
         }
@@ -544,11 +611,12 @@ impl RegistryContract {
         } else {
             InvoiceStatus::Financed
         };
-        invoices.set(id, invoice.clone());
-        save_invoices(&env, &invoices);
+        save_invoice(&env, &invoice);
         save_terminal_timestamp(&env, &invoice);
-        env.events()
-            .publish((symbol_short!("inv_sts"), invoice.id.clone()), invoice.status.clone());
+        env.events().publish(
+            (symbol_short!("inv_sts"), invoice.id.clone()),
+            invoice.status.clone(),
+        );
         invoice
     }
 
@@ -566,16 +634,12 @@ impl RegistryContract {
             .unwrap_or_else(|| panic!("Financing contract not configured"));
         financing.require_auth();
 
-        let mut invoices = load_invoices(&env);
-        let mut invoice = invoices
-            .get(id.clone())
-            .unwrap_or_else(|| env.panic_with_error(ContractError::NotFound));
+        let mut invoice = load_invoice_or_panic(&env, &id);
         if invoice.status != InvoiceStatus::Pending {
             env.panic_with_error(ContractError::InvalidTransition);
         }
         invoice.status = InvoiceStatus::Financed;
-        invoices.set(id, invoice.clone());
-        save_invoices(&env, &invoices);
+        save_invoice(&env, &invoice);
         save_terminal_timestamp(&env, &invoice);
         env.events().publish(
             (symbol_short!("inv_sts"), invoice.id.clone()),
@@ -596,10 +660,7 @@ impl RegistryContract {
             .unwrap_or_else(|| panic!("Repayment contract not configured"));
         repayment.require_auth();
 
-        let mut invoices = load_invoices(&env);
-        let mut invoice = invoices
-            .get(id.clone())
-            .unwrap_or_else(|| env.panic_with_error(ContractError::NotFound));
+        let mut invoice = load_invoice_or_panic(&env, &id);
         if invoice.status != InvoiceStatus::Financed {
             env.panic_with_error(ContractError::InvalidTransition);
         }
@@ -608,11 +669,12 @@ impl RegistryContract {
         } else {
             InvoiceStatus::Financed
         };
-        invoices.set(id, invoice.clone());
-        save_invoices(&env, &invoices);
+        save_invoice(&env, &invoice);
         save_terminal_timestamp(&env, &invoice);
-        env.events()
-            .publish((symbol_short!("inv_sts"), invoice.id.clone()), invoice.status.clone());
+        env.events().publish(
+            (symbol_short!("inv_sts"), invoice.id.clone()),
+            invoice.status.clone(),
+        );
         invoice
     }
 
@@ -632,16 +694,12 @@ impl RegistryContract {
             .unwrap_or_else(|| panic!("Repayment contract not configured"));
         repayment.require_auth();
 
-        let mut invoices = load_invoices(&env);
-        let mut invoice = invoices
-            .get(id.clone())
-            .unwrap_or_else(|| env.panic_with_error(ContractError::NotFound));
+        let mut invoice = load_invoice_or_panic(&env, &id);
         if invoice.status != InvoiceStatus::Overdue {
             env.panic_with_error(ContractError::InvalidTransition);
         }
         invoice.status = InvoiceStatus::Defaulted;
-        invoices.set(id, invoice.clone());
-        save_invoices(&env, &invoices);
+        save_invoice(&env, &invoice);
         save_terminal_timestamp(&env, &invoice);
         env.events().publish(
             (symbol_short!("inv_def"), invoice.id.clone()),
@@ -655,10 +713,7 @@ impl RegistryContract {
     /// require originator auth — the time-based condition is sufficient.
     pub fn mark_invoice_overdue(env: Env, id: Symbol) -> Invoice {
         assert_not_paused(&env);
-        let mut invoices = load_invoices(&env);
-        let mut invoice = invoices
-            .get(id.clone())
-            .unwrap_or_else(|| env.panic_with_error(ContractError::NotFound));
+        let mut invoice = load_invoice_or_panic(&env, &id);
         if invoice.status != InvoiceStatus::Financed {
             env.panic_with_error(ContractError::InvalidTransition);
         }
@@ -666,8 +721,7 @@ impl RegistryContract {
             env.panic_with_error(ContractError::InvalidTransition);
         }
         invoice.status = InvoiceStatus::Overdue;
-        invoices.set(id, invoice.clone());
-        save_invoices(&env, &invoices);
+        save_invoice(&env, &invoice);
         env.events().publish(
             (symbol_short!("inv_ovd"), invoice.id.clone()),
             invoice.due_date,
@@ -681,10 +735,7 @@ impl RegistryContract {
     pub fn raise_dispute(env: Env, invoice_id: Symbol, originator: Address) -> Invoice {
         assert_not_paused(&env);
         originator.require_auth();
-        let mut invoices = load_invoices(&env);
-        let mut invoice = invoices
-            .get(invoice_id.clone())
-            .unwrap_or_else(|| env.panic_with_error(ContractError::NotFound));
+        let mut invoice = load_invoice_or_panic(&env, &invoice_id);
         if invoice.originator != originator {
             env.panic_with_error(ContractError::Unauthorized);
         }
@@ -692,8 +743,7 @@ impl RegistryContract {
             env.panic_with_error(ContractError::InvalidTransition);
         }
         invoice.status = InvoiceStatus::Disputed;
-        invoices.set(invoice_id, invoice.clone());
-        save_invoices(&env, &invoices);
+        save_invoice(&env, &invoice);
         save_terminal_timestamp(&env, &invoice);
         env.events().publish(
             (symbol_short!("inv_dsp"), invoice.id.clone()),
@@ -711,10 +761,7 @@ impl RegistryContract {
     ) -> Invoice {
         assert_not_paused(&env);
         assert_admin(&env, &admin);
-        let mut invoices = load_invoices(&env);
-        let mut invoice = invoices
-            .get(invoice_id.clone())
-            .unwrap_or_else(|| env.panic_with_error(ContractError::NotFound));
+        let mut invoice = load_invoice_or_panic(&env, &invoice_id);
         if invoice.status != InvoiceStatus::Disputed {
             env.panic_with_error(ContractError::InvalidTransition);
         }
@@ -722,8 +769,7 @@ impl RegistryContract {
             env.panic_with_error(ContractError::InvalidInput);
         }
         invoice.status = target_status;
-        invoices.set(invoice_id, invoice.clone());
-        save_invoices(&env, &invoices);
+        save_invoice(&env, &invoice);
         save_terminal_timestamp(&env, &invoice);
         env.events().publish(
             (symbol_short!("inv_rsl"), invoice.id.clone()),
@@ -754,10 +800,12 @@ impl RegistryContract {
     pub fn set_invoice_storage_budget(env: Env, admin: Address, bytes: u32) {
         assert_not_paused(&env);
         assert_admin(&env, &admin);
-        if bytes == 0 {
-            panic!("Invoice storage budget must be greater than zero");
+        if bytes < invofi_common::MIN_INVOICE_STORAGE_BUDGET_BYTES {
+            env.panic_with_error(ContractError::InvalidInput);
         }
-        env.storage().instance().set(&symbol_short!("inv_budg"), &bytes);
+        env.storage()
+            .instance()
+            .set(&symbol_short!("inv_budg"), &bytes);
     }
 
     /// Return the invoice storage budget. Defaults to 10 KiB.
@@ -782,10 +830,10 @@ impl RegistryContract {
         is_invoice_eviction_eligible(&env, &invoice)
     }
 
-    /// Extend an active invoice's persistent-entry TTL to the network maximum.
-    /// Panics unless `keeper` is configured and authorized, or the invoice is
-    /// terminal. The ID index is bumped at the same time so keeper queries
-    /// remain available.
+    /// Extend a non-terminal invoice's persistent-entry TTL to the network
+    /// maximum. Panics when the invoice is terminal; non-terminal invoices
+    /// require a configured and authorized `keeper`. The invoice ID index TTL
+    /// is bumped at the same time so keeper queries remain available.
     pub fn bump_invoice_ttl(env: Env, keeper: Address, id: Symbol) {
         assert_not_paused(&env);
         assert_keeper(&env, &keeper);
@@ -798,13 +846,33 @@ impl RegistryContract {
         env.storage()
             .persistent()
             .extend_ttl(&invoice_key(&id), max_ttl, max_ttl);
+        extend_invoice_index_ttl(&env, &id, max_ttl);
+        env.events()
+            .publish((Symbol::new(&env, "ttl_bumped"), id), (keeper, max_ttl));
+    }
+
+    /// Renew a terminal invoice before eviction eligibility when network TTL
+    /// limits are shorter than the 395-day retention window. Only the
+    /// configured keeper may call this. The terminal timestamp is never
+    /// changed, so renewal cannot extend the retention deadline.
+    pub fn renew_terminal_invoice_ttl(env: Env, keeper: Address, id: Symbol) {
+        assert_not_paused(&env);
+        assert_keeper(&env, &keeper);
+        let invoice = load_invoice_or_panic(&env, &id);
+        if !is_terminal(&invoice.status) {
+            env.panic_with_error(ContractError::InvalidTransition);
+        }
+        if is_invoice_eviction_eligible(&env, &invoice) {
+            env.panic_with_error(ContractError::InvalidTransition);
+        }
+        let max_ttl = env.storage().max_ttl();
         env.storage()
             .persistent()
-            .extend_ttl(&symbol_short!("inv_ids"), max_ttl, max_ttl);
-        env.events().publish(
-            (Symbol::new(&env, "ttl_bumped"), id),
-            (keeper, max_ttl),
-        );
+            .extend_ttl(&invoice_key(&id), max_ttl, max_ttl);
+        env.storage()
+            .persistent()
+            .extend_ttl(&terminal_at_key(&id), max_ttl, max_ttl);
+        extend_invoice_index_ttl(&env, &id, max_ttl);
     }
 
     /// Evict an eligible terminal invoice during keeper automation. Panics
@@ -826,81 +894,82 @@ impl RegistryContract {
     }
 
     pub fn get_invoices_by_status(env: Env, status: InvoiceStatus) -> Vec<Invoice> {
-        let invoices = load_invoices(&env);
-        let mut result: Vec<Invoice> = Vec::new(&env);
-        for (_id, inv) in invoices.iter() {
-            if inv.status == status {
-                result.push_back(inv);
-            }
-        }
-        result
+        Self::get_invoices_by_status_paginated(env, status, 0, MAX_INVOICE_QUERY_LIMIT)
+    }
+
+    /// Page through invoices matching a lifecycle status. `offset` is a stable
+    /// index-slot offset; eviction gaps are skipped without shifting later IDs.
+    pub fn get_invoices_by_status_paginated(
+        env: Env,
+        status: InvoiceStatus,
+        offset: u32,
+        limit: u32,
+    ) -> Vec<Invoice> {
+        query_invoices(&env, offset, limit, |invoice| invoice.status == status)
     }
 
     pub fn get_invoices_by_originator(env: Env, originator: Address) -> Vec<Invoice> {
-        let invoices = load_invoices(&env);
-        let mut result: Vec<Invoice> = Vec::new(&env);
-        for (_id, inv) in invoices.iter() {
-            if inv.originator == originator {
-                result.push_back(inv);
-            }
-        }
-        result
+        Self::get_inv_by_originator_page(env, originator, 0, MAX_INVOICE_QUERY_LIMIT)
     }
 
-    /// Return all registered invoices. Admin-only analytics function.
-    /// At scale, prefer paginated queries — this returns an unbounded Vec.
+    pub fn get_inv_by_originator_page(
+        env: Env,
+        originator: Address,
+        offset: u32,
+        limit: u32,
+    ) -> Vec<Invoice> {
+        query_invoices(&env, offset, limit, |invoice| {
+            invoice.originator == originator
+        })
+    }
+
+    /// Return the first bounded invoice page. Use `get_invoices_paginated` for
+    /// later pages.
     pub fn get_all_invoices(env: Env) -> Vec<Invoice> {
-        let invoices = load_invoices(&env);
-        let mut result: Vec<Invoice> = Vec::new(&env);
-        for (_id, inv) in invoices.iter() {
-            result.push_back(inv);
-        }
-        result
+        Self::get_invoices_paginated(env, 0, MAX_INVOICE_QUERY_LIMIT)
     }
 
     pub fn get_invoices_by_currency(env: Env, currency: Symbol) -> Vec<Invoice> {
-        let invoices = load_invoices(&env);
-        let mut result: Vec<Invoice> = Vec::new(&env);
-        for (_id, inv) in invoices.iter() {
-            if inv.currency == currency {
-                result.push_back(inv);
-            }
-        }
-        result
+        Self::get_inv_by_currency_page(env, currency, 0, MAX_INVOICE_QUERY_LIMIT)
+    }
+
+    pub fn get_inv_by_currency_page(
+        env: Env,
+        currency: Symbol,
+        offset: u32,
+        limit: u32,
+    ) -> Vec<Invoice> {
+        query_invoices(&env, offset, limit, |invoice| invoice.currency == currency)
     }
 
     pub fn get_invoices_due_before(env: Env, timestamp: u64) -> Vec<Invoice> {
-        let invoices = load_invoices(&env);
-        let mut result: Vec<Invoice> = Vec::new(&env);
-        for (_id, inv) in invoices.iter() {
+        Self::get_inv_due_before_page(env, timestamp, 0, MAX_INVOICE_QUERY_LIMIT)
+    }
+
+    pub fn get_inv_due_before_page(
+        env: Env,
+        timestamp: u64,
+        offset: u32,
+        limit: u32,
+    ) -> Vec<Invoice> {
+        query_invoices(&env, offset, limit, |inv| {
             let is_open =
                 inv.status == InvoiceStatus::Pending || inv.status == InvoiceStatus::Financed;
-            if is_open && inv.due_date < timestamp {
-                result.push_back(inv);
-            }
-        }
-        result
+            is_open && inv.due_date < timestamp
+        })
     }
 
     pub fn get_invoices_paginated(env: Env, offset: u32, limit: u32) -> Vec<Invoice> {
-        let invoices = load_invoices(&env);
-        let mut result: Vec<Invoice> = Vec::new(&env);
-        for (idx, (_id, inv)) in invoices.iter().enumerate() {
-            if idx as u32 >= offset && result.len() < limit {
-                result.push_back(inv);
-            }
-            if result.len() >= limit {
-                break;
-            }
-        }
-        result
+        query_invoices(&env, offset, limit, |_| true)
     }
 
     pub fn batch_get_invoices(env: Env, ids: Vec<Symbol>) -> Vec<Invoice> {
-        let invoices = load_invoices(&env);
+        if ids.len() > MAX_INVOICE_QUERY_LIMIT {
+            env.panic_with_error(ContractError::InvalidInput);
+        }
         let mut result: Vec<Invoice> = Vec::new(&env);
         for id in ids.iter() {
-            if let Some(inv) = invoices.get(id) {
+            if let Some(inv) = load_invoice(&env, &id) {
                 result.push_back(inv);
             }
         }
@@ -908,7 +977,7 @@ impl RegistryContract {
     }
 
     pub fn get_invoices_count(env: Env) -> u32 {
-        load_invoices(&env).len()
+        load_invoice_index_meta(&env).0
     }
 
     pub fn get_stats(env: Env) -> ProtocolStats {
