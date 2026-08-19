@@ -48,6 +48,21 @@ fn save_paid_map(env: &Env, map: &Map<Symbol, i128>) {
         .set(&symbol_short!("paidamt"), map);
 }
 
+/// Load the total outstanding (reserved - paid) across all offers.
+fn load_total_outstanding(env: &Env) -> i128 {
+    env.storage()
+        .persistent()
+        .get(&symbol_short!("outstnd"))
+        .unwrap_or(0)
+}
+
+/// Save the total outstanding across all offers.
+fn save_total_outstanding(env: &Env, amount: i128) {
+    env.storage()
+        .persistent()
+        .set(&symbol_short!("outstnd"), &amount);
+}
+
 /// Load the reserved amount for an offer (0 if never reserved).
 fn load_reserved(env: &Env, offer_id: &Symbol) -> i128 {
     load_reservations(env).get(offer_id.clone()).unwrap_or(0)
@@ -466,14 +481,15 @@ impl InsuranceContract {
         }
 
         let pool_total = load_pool_total(&env);
-        let currently_reserved = load_reserved(&env, &offer_id);
-        let available = pool_total - currently_reserved;
+        let total_outstanding = load_total_outstanding(&env);
+        let available = pool_total - total_outstanding;
         let reserved = amount.min(available);
         if reserved <= 0 {
             return 0;
         }
 
-        save_reserved(&env, &offer_id, currently_reserved + reserved);
+        save_reserved(&env, &offer_id, load_reserved(&env, &offer_id) + reserved);
+        save_total_outstanding(&env, total_outstanding + reserved);
 
         env.events().publish(
             (symbol_short!("ins_rsrv"), offer_id.clone()),
@@ -518,14 +534,17 @@ impl InsuranceContract {
         let claim_amount = amount.min(remaining_reserved);
 
         // ── Bounded claim: amount <= pool available ─────────────────────
+        let total_outstanding = load_total_outstanding(&env);
         let pool_total = load_pool_total(&env);
-        let paid = claim_amount.min(pool_total);
+        let pool_available = pool_total - (total_outstanding - remaining_reserved);
+        let paid = claim_amount.min(pool_available);
         if paid <= 0 {
             return (0, remaining_reserved);
         }
 
         // ── Update paid tracking ────────────────────────────────────────
         save_paid(&env, &offer_id, already_paid + paid);
+        save_total_outstanding(&env, total_outstanding - paid);
 
         // ── Pro-rata reduction of staker balances ───────────────────────
         let mut stakes = load_stakes(&env);

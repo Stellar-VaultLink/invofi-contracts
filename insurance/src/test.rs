@@ -769,3 +769,76 @@ fn test_multiple_offers_independent_reservations() {
 
     assert_eq!(client.get_pool_total(), 300_000);
 }
+
+#[test]
+fn test_aggregate_reservations_capped_by_pool() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let admin = Address::generate(&env);
+    let (token_id, _insurance_id, client) = setup(&env, &admin);
+
+    let staker = Address::generate(&env);
+    mint_and_approve(&env, &token_id, &_insurance_id, &staker, 1_000_000);
+    client.stake(&staker, &1_000_000);
+
+    let payout_caller = Address::generate(&env);
+    client.set_payout_caller(&admin, &payout_caller);
+
+    let offer_a = symbol_short!("off_a");
+    let offer_b = symbol_short!("off_b");
+    let offer_c = symbol_short!("off_c");
+
+    // Reserve 800k for offer_a
+    let r1 = client.reserve_payout(&offer_a, &800_000);
+    assert_eq!(r1, 800_000);
+
+    // Try to reserve 500k for offer_b — only 200k available
+    let r2 = client.reserve_payout(&offer_b, &500_000);
+    assert_eq!(r2, 200_000);
+
+    // Pool is fully reserved — nothing left for offer_c
+    let r3 = client.reserve_payout(&offer_c, &100_000);
+    assert_eq!(r3, 0);
+
+    // Claim from offer_a uses available pool
+    let lender = Address::generate(&env);
+    let (paid_a, _) = client.claim_payout(&offer_a, &lender, &800_000);
+    assert_eq!(paid_a, 800_000);
+}
+
+#[test]
+fn test_claim_after_depletion_returns_zero() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let admin = Address::generate(&env);
+    let (token_id, _insurance_id, client) = setup(&env, &admin);
+
+    let staker = Address::generate(&env);
+    mint_and_approve(&env, &token_id, &_insurance_id, &staker, 1_000_000);
+    client.stake(&staker, &1_000_000);
+
+    let payout_caller = Address::generate(&env);
+    client.set_payout_caller(&admin, &payout_caller);
+
+    let offer_a = symbol_short!("off_a");
+    let offer_b = symbol_short!("off_b");
+    let lender = Address::generate(&env);
+
+    // Reserve all for offer_a
+    client.reserve_payout(&offer_a, &1_000_000);
+
+    // Claim everything from offer_a
+    let (paid_a, _) = client.claim_payout(&offer_a, &lender, &1_000_000);
+    assert_eq!(paid_a, 1_000_000);
+
+    // Reserve for offer_b — nothing available
+    let r = client.reserve_payout(&offer_b, &500_000);
+    assert_eq!(r, 0);
+
+    // Claim from offer_b — pool depleted
+    let (paid_b, rem) = client.claim_payout(&offer_b, &lender, &500_000);
+    assert_eq!(paid_b, 0);
+    assert_eq!(rem, 0);
+}
