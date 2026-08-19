@@ -113,10 +113,10 @@ register_invoice()  →  create_offer()  →  accept_offer()
 | `get_contract_token_balance()` | Anyone | Actual on-chain balance — audit check that accounting matches |
 | `pay_out(beneficiary, amount)` | Payout caller only (repayment) | Pay up to `amount`, capped at pool balance; returns amount actually paid |
 | `get_payout_caller()` | Anyone | Read the configured payout caller |
+| `set_yield_rate(admin, rate_bps)` | Admin | Set the annual flat yield rate in basis points (e.g. 500 = 5 %). Banks existing yield prospectively before applying the new rate |
+| `get_yield_rate()` | Anyone | Read the current annual yield rate in basis points |
+| `accrued_yield(staker)` | Anyone | Preview the total accrued yield for a staker (banked + since last checkpoint) |
 | `set_staking_token / pause / unpause / transfer_admin` | Admin | Admin controls |
-
-> Yield-rate calculation remains intentionally out of scope — the pool is flat accounting with
-> payout-on-default wired through `pay_out`. See ADR-0003 for the payout design.
 
 ---
 
@@ -171,6 +171,7 @@ Every state-mutating function publishes a Soroban contract event. Topics are
 | `pool_stk` | `stake` (insurance) | `amount` |
 | `pool_un` | `unstake` (insurance) | `amount` |
 | `pool_pay` | `pay_out` (insurance) | `amount paid` |
+| `pool_yld` | `unstake` (insurance) | `yield paid` — emitted only when yield > 0 |
 | `reputn` | `record_outcome` (reputation) | `outcome` |
 
 ---

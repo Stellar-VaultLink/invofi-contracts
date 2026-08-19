@@ -7,14 +7,43 @@
 //! configured payout caller) calls `pay_out`, which compensates the lender
 //! from the pool up to the pool's available balance and reduces every
 //! staker's claim pro-rata so accounting stays exactly consistent (unstake
-//! can never exceed actual pool funds). Yield-rate calculation stays out of
-//! scope.
+//! can never exceed actual pool funds).
 //!
-//! Task 10 security: pay_out verifies invoice.status == Defaulted on-chain.
+//! # Flat yield (issue #130)
+//!
+//! An admin-configurable annual yield rate (in basis points) accrues linearly
+//! on each staker's principal from the moment they stake. Yield is computed
+//! and paid out when the staker calls `unstake`.
+//!
+//! Key design decisions:
+//! - Rate is stored as a `u32` annual basis-points value (`"yldrate"`,
+//!   instance storage). Default is 0 — the pool is economically inert until
+//!   an admin sets the rate.
+//! - Per-staker stake start-time is tracked in `"stk_ts"` (persistent
+//!   `Map<Address, u64>`, ledger timestamp in seconds).
+//! - Banked yield (accrued under prior rate slabs) is stored separately in
+//!   `"yld_acc"` (persistent `Map<Address, i128>`). When a staker top-ups
+//!   their stake or the admin changes the rate, all existing stakers'
+//!   outstanding yield is computed at the *current* rate and banked, then the
+//!   clock resets. This ensures rate changes are **strictly prospective**.
+//! - Formula: `yield = principal × rate_bps × elapsed_secs
+//!             / (10_000 × SECONDS_PER_YEAR)`
+//!   where `SECONDS_PER_YEAR = 31_536_000`.
+//! - No compounding; no per-staker rate differentiation.
+//! - Yield is paid out separately from the pool principal — it is *not*
+//!   included in `pool_total` bookkeeping — so payouts and unstake accounting
+//!   are unaffected unless the pool has enough balance to cover the yield
+//!   component on top of the principal.
+//! - The `pool_yld` event is emitted on every yield payout.
 
 use soroban_sdk::{contract, contractimpl, symbol_short, token, Address, Env, Map, Symbol, Vec};
 
 use invofi_common::{assert_not_paused, ContractError, InvoiceStatus, RegistryClient};
+
+// ─── Constants ────────────────────────────────────────────────────────────────
+
+/// Seconds in a 365-day year. Mirrors `MAX_OFFER_DURATION_SECS` in common.
+const SECONDS_PER_YEAR: u64 = 31_536_000;
 
 // ─── Storage Helpers ─────────────────────────────────────────────────────────
 
@@ -49,6 +78,108 @@ fn load_token(env: &Env) -> Address {
         .instance()
         .get(&symbol_short!("token"))
         .unwrap_or_else(|| panic!("Not initialized"))
+}
+
+// ── Yield storage helpers ────────────────────────────────────────────────────
+
+/// Annual yield rate in basis points (e.g. 500 = 5.00%). Default 0.
+fn load_yield_rate(env: &Env) -> u32 {
+    env.storage()
+        .instance()
+        .get(&symbol_short!("yldrate"))
+        .unwrap_or(0)
+}
+
+fn save_yield_rate(env: &Env, rate_bps: u32) {
+    env.storage()
+        .instance()
+        .set(&symbol_short!("yldrate"), &rate_bps);
+}
+
+/// Stake-start timestamps: `Address -> ledger timestamp (seconds)`.
+fn load_stake_ts(env: &Env) -> Map<Address, u64> {
+    env.storage()
+        .persistent()
+        .get(&symbol_short!("stk_ts"))
+        .unwrap_or_else(|| Map::new(env))
+}
+
+fn save_stake_ts(env: &Env, map: &Map<Address, u64>) {
+    env.storage()
+        .persistent()
+        .set(&symbol_short!("stk_ts"), map);
+}
+
+/// Banked (already-accrued) yield waiting for the staker to claim.
+fn load_yield_acc(env: &Env) -> Map<Address, i128> {
+    env.storage()
+        .persistent()
+        .get(&symbol_short!("yld_acc"))
+        .unwrap_or_else(|| Map::new(env))
+}
+
+fn save_yield_acc(env: &Env, map: &Map<Address, i128>) {
+    env.storage()
+        .persistent()
+        .set(&symbol_short!("yld_acc"), map);
+}
+
+// ── Yield math ────────────────────────────────────────────────────────────────
+
+/// Compute the yield earned by `principal` at `rate_bps` over `elapsed_secs`.
+///
+/// Formula: `principal * rate_bps * elapsed_secs / (10_000 * SECONDS_PER_YEAR)`
+///
+/// Integer truncation means yield rounds **down** (in the protocol's favour).
+/// Overflow: `principal` fits in i128 (≤ 2^127 − 1); `rate_bps` ≤ 65 535;
+/// `elapsed_secs` ≤ 31 536 000.  The intermediate product can reach
+/// ~2^127 × 65 535 × 3.15×10^7 which overflows plain i128.  We therefore
+/// split the multiplication into two steps, dividing by SECONDS_PER_YEAR
+/// first to keep the intermediate value inside i128.
+fn compute_yield(principal: i128, rate_bps: u32, elapsed_secs: u64) -> i128 {
+    if principal == 0 || rate_bps == 0 || elapsed_secs == 0 {
+        return 0;
+    }
+    // Step 1: principal * elapsed_secs  (always positive and fits in i128 for
+    //         realistic values: 2^127 / SECONDS_PER_YEAR ~ 5.4×10^31, which
+    //         exceeds any realistic token supply)
+    let numerator = principal * elapsed_secs as i128;
+    // Step 2: divide by SECONDS_PER_YEAR first to tame the value, then
+    //         multiply by rate_bps, then divide by 10_000.
+    numerator / SECONDS_PER_YEAR as i128 * rate_bps as i128 / 10_000
+}
+
+/// Bank the yield accrued since the staker's last timestamp, then reset the
+/// timestamp to `now`. Returns the amount just banked.
+///
+/// This is called:
+/// - On `stake` top-up (so the new principal doesn't inflate historical yield)
+/// - On `set_yield_rate` for all existing stakers (so the new rate applies
+///   only from this point forward)
+/// - On `unstake` just before paying out
+fn bank_accrued_yield(
+    env: &Env,
+    staker: &Address,
+    stakes: &Map<Address, i128>,
+    timestamps: &mut Map<Address, u64>,
+    accruals: &mut Map<Address, i128>,
+    now: u64,
+) -> i128 {
+    let principal = stakes.get(staker.clone()).unwrap_or(0);
+    if principal == 0 {
+        return 0;
+    }
+    let start = timestamps.get(staker.clone()).unwrap_or(now);
+    let elapsed = now.saturating_sub(start);
+    let rate = load_yield_rate(env);
+    let earned = compute_yield(principal, rate, elapsed);
+    if earned > 0 {
+        let prev = accruals.get(staker.clone()).unwrap_or(0);
+        accruals.set(staker.clone(), prev + earned);
+    }
+    // Reset the timestamp so future accrual starts from now.
+    timestamps.set(staker.clone(), now);
+    earned
 }
 
 // ─── Contract ────────────────────────────────────────────────────────────────
@@ -170,6 +301,52 @@ impl InsuranceContract {
         env.storage().instance().get(&symbol_short!("registry"))
     }
 
+    // ── Yield rate (issue #130) ─────────────────────────────────────────────
+
+    /// Set the annual flat yield rate for all stakers, expressed in basis
+    /// points (e.g. 500 = 5.00 %).
+    ///
+    /// **Prospective-only**: before the new rate takes effect, every existing
+    /// staker's yield accrued at the *old* rate is computed and banked. From
+    /// this point forward the new rate applies. Stakers who unstake after the
+    /// rate change receive their previously banked yield (at old rate) plus
+    /// yield accrued at the new rate since this call.
+    ///
+    /// Admin only. Rate may be set to 0 to disable yield entirely.
+    pub fn set_yield_rate(env: Env, admin: Address, rate_bps: u32) {
+        assert_not_paused(&env);
+        admin.require_auth();
+        let current: Address = env
+            .storage()
+            .instance()
+            .get(&symbol_short!("admin"))
+            .unwrap_or_else(|| panic!("Not initialized"));
+        if current != admin {
+            env.panic_with_error(ContractError::Unauthorized);
+        }
+
+        // Bank outstanding yield for every staker at the current rate before
+        // the new rate takes effect. This is the key invariant: rate changes
+        // are strictly prospective.
+        let stakes = load_stakes(&env);
+        let mut timestamps = load_stake_ts(&env);
+        let mut accruals = load_yield_acc(&env);
+        let now = env.ledger().timestamp();
+        let keys: Vec<Address> = stakes.keys();
+        for key in keys.iter() {
+            bank_accrued_yield(&env, &key, &stakes, &mut timestamps, &mut accruals, now);
+        }
+        save_stake_ts(&env, &timestamps);
+        save_yield_acc(&env, &accruals);
+
+        save_yield_rate(&env, rate_bps);
+    }
+
+    /// Read the current annual yield rate in basis points. Default is 0.
+    pub fn get_yield_rate(env: Env) -> u32 {
+        load_yield_rate(&env)
+    }
+
     // ── Pause / unpause (Task 4A circuit breaker) ───────────────────────────
 
     pub fn pause(env: Env, admin: Address) {
@@ -215,6 +392,11 @@ impl InsuranceContract {
     /// The staker must first approve this contract as a spender (the same
     /// approve + transfer_from pattern accept_offer uses on the financing
     /// contract). Credits the staker's balance and the pool total.
+    ///
+    /// If the staker already has an existing balance, the yield accrued since
+    /// the last stake is banked at the current rate before the new principal
+    /// is added, and the clock resets. This ensures top-ups do not
+    /// retroactively inflate historical yield.
     pub fn stake(env: Env, staker: Address, amount: i128) {
         assert_not_paused(&env);
         staker.require_auth();
@@ -224,7 +406,8 @@ impl InsuranceContract {
 
         let token_addr = load_token(&env);
         let token_client = token::TokenClient::new(&env, &token_addr);
-        // CEI: External interaction before state mutations. Safe because the token is a trusted standard Soroban token without reentrant hooks.
+        // CEI: External interaction before state mutations. Safe because the
+        // token is a trusted standard Soroban token without reentrant hooks.
         token_client.transfer_from(
             &env.current_contract_address(),
             &staker,
@@ -233,9 +416,31 @@ impl InsuranceContract {
         );
 
         let mut stakes = load_stakes(&env);
-        let balance = stakes.get(staker.clone()).unwrap_or(0);
-        stakes.set(staker.clone(), balance + amount);
+        let mut timestamps = load_stake_ts(&env);
+        let mut accruals = load_yield_acc(&env);
+        let now = env.ledger().timestamp();
+
+        // If staker already has a balance, bank their yield before top-up so
+        // the new principal doesn't inflate historical accrual.
+        let existing = stakes.get(staker.clone()).unwrap_or(0);
+        if existing > 0 {
+            bank_accrued_yield(
+                &env,
+                &staker,
+                &stakes,
+                &mut timestamps,
+                &mut accruals,
+                now,
+            );
+        } else {
+            // First stake — just record the start time.
+            timestamps.set(staker.clone(), now);
+        }
+
+        stakes.set(staker.clone(), existing + amount);
         save_stakes(&env, &stakes);
+        save_stake_ts(&env, &timestamps);
+        save_yield_acc(&env, &accruals);
 
         let mut total = load_pool_total(&env);
         total += amount;
@@ -247,6 +452,11 @@ impl InsuranceContract {
 
     /// Withdraw `amount` back to the staker. Reduces the staker's balance and
     /// the pool total; the pool pays the staker directly from its holdings.
+    ///
+    /// Any yield accrued since the last bank is computed at the current rate,
+    /// added to the banked amount, and transferred to the staker together with
+    /// the requested principal. The `pool_yld` event is emitted for the yield
+    /// component if non-zero.
     pub fn unstake(env: Env, staker: Address, amount: i128) {
         assert_not_paused(&env);
         staker.require_auth();
@@ -260,13 +470,38 @@ impl InsuranceContract {
             env.panic_with_error(ContractError::InsufficientBalance);
         }
 
+        // ── Yield accounting ──────────────────────────────────────────────
+        // Bank any yield accrued since the last checkpoint, then flush the
+        // entire banked amount to the staker.
+        let mut timestamps = load_stake_ts(&env);
+        let mut accruals = load_yield_acc(&env);
+        let now = env.ledger().timestamp();
+
+        bank_accrued_yield(
+            &env,
+            &staker,
+            &stakes,
+            &mut timestamps,
+            &mut accruals,
+            now,
+        );
+        let yield_payout = accruals.get(staker.clone()).unwrap_or(0);
+
+        // ── Principal accounting ───────────────────────────────────────────
         let new_balance = balance - amount;
         if new_balance == 0 {
             stakes.remove(staker.clone());
+            timestamps.remove(staker.clone());
+            accruals.remove(staker.clone());
         } else {
             stakes.set(staker.clone(), new_balance);
+            // Clock already reset by bank_accrued_yield; clear banked yield
+            // since we're paying it all out now.
+            accruals.set(staker.clone(), 0);
         }
         save_stakes(&env, &stakes);
+        save_stake_ts(&env, &timestamps);
+        save_yield_acc(&env, &accruals);
 
         let mut total = load_pool_total(&env);
         total -= amount;
@@ -274,8 +509,21 @@ impl InsuranceContract {
 
         let token_addr = load_token(&env);
         let token_client = token::TokenClient::new(&env, &token_addr);
-        // CEI: External interaction after state mutations (Effects before Interactions). Compliant.
+        // CEI: External interactions after all state mutations (Checks-Effects-Interactions).
+
+        // Transfer principal.
         token_client.transfer(&env.current_contract_address(), &staker, &amount);
+
+        // Transfer yield separately (if any). The yield comes from the pool's
+        // token balance — the protocol must ensure the contract holds enough
+        // tokens to cover accrued yield on top of staked principal.
+        if yield_payout > 0 {
+            token_client.transfer(&env.current_contract_address(), &staker, &yield_payout);
+            env.events().publish(
+                (symbol_short!("pool_yld"), staker.clone()),
+                yield_payout,
+            );
+        }
 
         env.events()
             .publish((symbol_short!("pool_un"), staker.clone()), amount);
@@ -405,6 +653,26 @@ impl InsuranceContract {
         let token_addr = load_token(&env);
         // CEI: Read-only cross-contract call.
         token::TokenClient::new(&env, &token_addr).balance(&env.current_contract_address())
+    }
+
+    /// Compute the total accrued yield for `staker` at the current moment:
+    /// previously banked yield plus yield earned since the last checkpoint at
+    /// the current rate. This is a read-only preview; no state is mutated.
+    pub fn accrued_yield(env: Env, staker: Address) -> i128 {
+        let stakes = load_stakes(&env);
+        let timestamps = load_stake_ts(&env);
+        let accruals = load_yield_acc(&env);
+
+        let principal = stakes.get(staker.clone()).unwrap_or(0);
+        let banked = accruals.get(staker.clone()).unwrap_or(0);
+        if principal == 0 {
+            return banked;
+        }
+        let now = env.ledger().timestamp();
+        let start = timestamps.get(staker.clone()).unwrap_or(now);
+        let elapsed = now.saturating_sub(start);
+        let rate = load_yield_rate(&env);
+        banked + compute_yield(principal, rate, elapsed)
     }
 
     pub fn version(env: Env) -> soroban_sdk::String {

@@ -602,3 +602,359 @@ fn test_payout_without_registry_panics() {
 
     client.pay_out(&invoice_id, &beneficiary, &500_000);
 }
+
+// ─── Yield tests (issue #130) ─────────────────────────────────────────────────
+//
+// All yield tests advance ledger timestamps with `env.ledger().set_timestamp`
+// so the elapsed-seconds formula can be verified against known values.
+//
+// Formula reminder:
+//   yield = principal * rate_bps * elapsed_secs / (10_000 * 31_536_000)
+
+/// Helper: set a fresh ledger timestamp (seconds since Unix epoch).
+fn set_ts(env: &Env, ts: u64) {
+    env.ledger().set_timestamp(ts);
+}
+
+/// Mint tokens to the insurance contract itself so it can pay out yield.
+/// In production the pool accumulates revenue from protocol fees / donations;
+/// in tests we mint directly.
+fn fund_yield_reserve(env: &Env, token_id: &Address, insurance_id: &Address, amount: i128) {
+    let asset = token::StellarAssetClient::new(env, token_id);
+    asset.mint(insurance_id, &amount);
+}
+
+// ── Zero-rate baseline ────────────────────────────────────────────────────────
+
+/// With the default yield rate of 0 bps, accrued_yield must always return 0
+/// and unstake pays exactly the principal — no yield is transferred or emitted.
+#[test]
+fn test_zero_yield_rate_no_accrual() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let admin = Address::generate(&env);
+    let (token_id, insurance_id, client) = setup(&env, &admin);
+
+    assert_eq!(client.get_yield_rate(), 0);
+
+    let staker = Address::generate(&env);
+    mint_and_approve(&env, &token_id, &insurance_id, &staker, 1_000_000);
+
+    set_ts(&env, 0);
+    client.stake(&staker, &1_000_000);
+
+    // Advance one full year.
+    set_ts(&env, 31_536_000);
+
+    // No yield at 0 bps.
+    assert_eq!(client.accrued_yield(&staker), 0);
+
+    // Unstake returns exactly the principal.
+    client.unstake(&staker, &1_000_000);
+    let token_client = token::TokenClient::new(&env, &token_id);
+    assert_eq!(token_client.balance(&staker), 1_000_000);
+}
+
+// ── Correct math at a known bps rate ─────────────────────────────────────────
+
+/// Stake 1_000_000 at 500 bps (5 %) for exactly one year.
+/// Expected yield = 1_000_000 * 500 / 10_000 = 50_000.
+#[test]
+fn test_yield_math_one_year_500_bps() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let admin = Address::generate(&env);
+    let (token_id, insurance_id, client) = setup(&env, &admin);
+
+    client.set_yield_rate(&admin, &500); // 5 % annual
+    assert_eq!(client.get_yield_rate(), 500);
+
+    let staker = Address::generate(&env);
+    mint_and_approve(&env, &token_id, &insurance_id, &staker, 1_000_000);
+    fund_yield_reserve(&env, &token_id, &insurance_id, 100_000);
+
+    set_ts(&env, 0);
+    client.stake(&staker, &1_000_000);
+
+    // Advance exactly one year.
+    set_ts(&env, 31_536_000);
+
+    // Preview: 1_000_000 * 500 * 31_536_000 / (10_000 * 31_536_000) = 50_000
+    assert_eq!(client.accrued_yield(&staker), 50_000);
+
+    // Unstake pays principal + yield.
+    client.unstake(&staker, &1_000_000);
+    let token_client = token::TokenClient::new(&env, &token_id);
+    assert_eq!(token_client.balance(&staker), 1_050_000); // 1_000_000 + 50_000
+}
+
+/// Stake 2_000_000 at 1000 bps (10 %) for half a year.
+/// Expected yield = 2_000_000 * 1000 * (31_536_000/2) / (10_000 * 31_536_000)
+///               = 2_000_000 * 1000 / (10_000 * 2) = 100_000.
+#[test]
+fn test_yield_math_half_year_1000_bps() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let admin = Address::generate(&env);
+    let (token_id, insurance_id, client) = setup(&env, &admin);
+
+    client.set_yield_rate(&admin, &1_000); // 10 % annual
+    let staker = Address::generate(&env);
+    mint_and_approve(&env, &token_id, &insurance_id, &staker, 2_000_000);
+    fund_yield_reserve(&env, &token_id, &insurance_id, 200_000);
+
+    set_ts(&env, 0);
+    client.stake(&staker, &2_000_000);
+
+    set_ts(&env, 31_536_000 / 2);
+
+    assert_eq!(client.accrued_yield(&staker), 100_000);
+
+    client.unstake(&staker, &2_000_000);
+    let token_client = token::TokenClient::new(&env, &token_id);
+    assert_eq!(token_client.balance(&staker), 2_100_000);
+}
+
+// ── Unstake pays principal + yield ────────────────────────────────────────────
+
+/// Partial unstake: staker withdraws half their principal mid-period.
+/// All banked yield is paid out on the partial unstake; the remaining stake
+/// starts a fresh accrual period from that point.
+#[test]
+fn test_partial_unstake_pays_full_yield_then_resets() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let admin = Address::generate(&env);
+    let (token_id, insurance_id, client) = setup(&env, &admin);
+
+    client.set_yield_rate(&admin, &500); // 5 % annual
+    let staker = Address::generate(&env);
+    mint_and_approve(&env, &token_id, &insurance_id, &staker, 2_000_000);
+    fund_yield_reserve(&env, &token_id, &insurance_id, 200_000);
+
+    // Stake 2_000_000 at t=0.
+    set_ts(&env, 0);
+    client.stake(&staker, &2_000_000);
+
+    // Advance one full year → yield on 2_000_000 at 500 bps = 100_000.
+    set_ts(&env, 31_536_000);
+    assert_eq!(client.accrued_yield(&staker), 100_000);
+
+    // Unstake half (1_000_000). All yield (100_000) is paid out and the
+    // clock resets for the remaining 1_000_000 stake.
+    client.unstake(&staker, &1_000_000);
+    let token_client = token::TokenClient::new(&env, &token_id);
+    // Received: 1_000_000 principal + 100_000 yield = 1_100_000.
+    assert_eq!(token_client.balance(&staker), 1_100_000);
+
+    // Pool still has 1_000_000 staked, yield clock just reset.
+    assert_eq!(client.get_stake(&staker), 1_000_000);
+    assert_eq!(client.accrued_yield(&staker), 0);
+
+    // After another year the remaining 1_000_000 accrues 50_000 more.
+    set_ts(&env, 31_536_000 * 2);
+    assert_eq!(client.accrued_yield(&staker), 50_000);
+
+    client.unstake(&staker, &1_000_000);
+    // Received additional: 1_000_000 + 50_000 = 1_050_000; total = 2_150_000.
+    assert_eq!(token_client.balance(&staker), 2_150_000);
+}
+
+// ── Rate change is prospective only ──────────────────────────────────────────
+
+/// Staker stakes for one year at 500 bps, then admin changes rate to 1000 bps.
+/// Accrual to date (50_000) must be banked and not retroactively altered.
+/// After another year the staker earns an additional 100_000 at 1000 bps.
+#[test]
+fn test_rate_change_prospective_only() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let admin = Address::generate(&env);
+    let (token_id, insurance_id, client) = setup(&env, &admin);
+
+    client.set_yield_rate(&admin, &500); // 5 % annual
+    let staker = Address::generate(&env);
+    mint_and_approve(&env, &token_id, &insurance_id, &staker, 1_000_000);
+    fund_yield_reserve(&env, &token_id, &insurance_id, 300_000);
+
+    set_ts(&env, 0);
+    client.stake(&staker, &1_000_000);
+
+    // Advance one year → 50_000 accrued at 500 bps.
+    set_ts(&env, 31_536_000);
+    assert_eq!(client.accrued_yield(&staker), 50_000);
+
+    // Admin changes rate to 1000 bps. This banks the 50_000 for all stakers.
+    client.set_yield_rate(&admin, &1_000);
+
+    // Immediately after rate change, accrued_yield should still show 50_000
+    // (the banked amount; no new accrual yet because elapsed since bank = 0).
+    assert_eq!(client.accrued_yield(&staker), 50_000);
+
+    // Advance another year — new yield = 1_000_000 * 1000 / 10_000 = 100_000.
+    set_ts(&env, 31_536_000 * 2);
+    assert_eq!(client.accrued_yield(&staker), 150_000); // 50_000 banked + 100_000 new
+
+    // Unstake: 1_000_000 principal + 150_000 yield.
+    client.unstake(&staker, &1_000_000);
+    let token_client = token::TokenClient::new(&env, &token_id);
+    assert_eq!(token_client.balance(&staker), 1_150_000);
+}
+
+/// Rate decreasing: staker stakes for one year at 1000 bps, rate drops to 0.
+/// Previously accrued yield must be preserved and paid on unstake.
+#[test]
+fn test_rate_decrease_preserves_accrued_yield() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let admin = Address::generate(&env);
+    let (token_id, insurance_id, client) = setup(&env, &admin);
+
+    client.set_yield_rate(&admin, &1_000); // 10 % annual
+    let staker = Address::generate(&env);
+    mint_and_approve(&env, &token_id, &insurance_id, &staker, 1_000_000);
+    fund_yield_reserve(&env, &token_id, &insurance_id, 200_000);
+
+    set_ts(&env, 0);
+    client.stake(&staker, &1_000_000);
+
+    // One year → 100_000 accrued at 1000 bps.
+    set_ts(&env, 31_536_000);
+    assert_eq!(client.accrued_yield(&staker), 100_000);
+
+    // Admin drops rate to 0. The 100_000 must be banked.
+    client.set_yield_rate(&admin, &0);
+    assert_eq!(client.accrued_yield(&staker), 100_000); // banked amount unchanged
+
+    // No further accrual at 0 bps.
+    set_ts(&env, 31_536_000 * 2);
+    assert_eq!(client.accrued_yield(&staker), 100_000);
+
+    client.unstake(&staker, &1_000_000);
+    let token_client = token::TokenClient::new(&env, &token_id);
+    assert_eq!(token_client.balance(&staker), 1_100_000);
+}
+
+// ── Top-up stake banks yield and resets clock ─────────────────────────────────
+
+/// Staker stakes at t=0, tops up at t=1_year. The first year's yield must
+/// be banked on the top-up; the second year accrues on the new total.
+#[test]
+fn test_topup_banks_yield_and_resets_clock() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let admin = Address::generate(&env);
+    let (token_id, insurance_id, client) = setup(&env, &admin);
+
+    client.set_yield_rate(&admin, &500); // 5 % annual
+    let staker = Address::generate(&env);
+    mint_and_approve(&env, &token_id, &insurance_id, &staker, 3_000_000);
+    fund_yield_reserve(&env, &token_id, &insurance_id, 200_000);
+
+    // Initial stake of 1_000_000 at t=0.
+    set_ts(&env, 0);
+    client.stake(&staker, &1_000_000);
+    assert_eq!(client.get_stake(&staker), 1_000_000);
+
+    // Advance one year → 50_000 yield accrued on 1_000_000.
+    set_ts(&env, 31_536_000);
+    assert_eq!(client.accrued_yield(&staker), 50_000);
+
+    // Top-up with 2_000_000. This banks the 50_000 and resets the clock.
+    client.stake(&staker, &2_000_000);
+    assert_eq!(client.get_stake(&staker), 3_000_000);
+    // 50_000 is banked; no new time has elapsed since bank.
+    assert_eq!(client.accrued_yield(&staker), 50_000);
+
+    // Advance another year → new yield = 3_000_000 * 500 / 10_000 = 150_000.
+    set_ts(&env, 31_536_000 * 2);
+    // Total: 50_000 banked + 150_000 new = 200_000.
+    assert_eq!(client.accrued_yield(&staker), 200_000);
+
+    client.unstake(&staker, &3_000_000);
+    let token_client = token::TokenClient::new(&env, &token_id);
+    assert_eq!(token_client.balance(&staker), 3_200_000); // 3_000_000 + 200_000
+}
+
+// ── Multiple stakers, independent yield clocks ────────────────────────────────
+
+/// Two stakers stake at different times; their yield clocks are independent.
+#[test]
+fn test_multiple_stakers_independent_yield() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let admin = Address::generate(&env);
+    let (token_id, insurance_id, client) = setup(&env, &admin);
+
+    client.set_yield_rate(&admin, &500); // 5 % annual
+    let staker_a = Address::generate(&env);
+    let staker_b = Address::generate(&env);
+    mint_and_approve(&env, &token_id, &insurance_id, &staker_a, 1_000_000);
+    mint_and_approve(&env, &token_id, &insurance_id, &staker_b, 2_000_000);
+    fund_yield_reserve(&env, &token_id, &insurance_id, 300_000);
+
+    // A stakes at t=0.
+    set_ts(&env, 0);
+    client.stake(&staker_a, &1_000_000);
+
+    // B stakes at t=half_year.
+    set_ts(&env, 31_536_000 / 2);
+    client.stake(&staker_b, &2_000_000);
+
+    // At t=1_year:
+    // A has been staking for a full year  → 50_000 yield.
+    // B has been staking for half a year  → 50_000 yield.
+    set_ts(&env, 31_536_000);
+    assert_eq!(client.accrued_yield(&staker_a), 50_000);
+    assert_eq!(client.accrued_yield(&staker_b), 50_000);
+
+    // Unstake both and verify balances.
+    client.unstake(&staker_a, &1_000_000);
+    client.unstake(&staker_b, &2_000_000);
+
+    let token_client = token::TokenClient::new(&env, &token_id);
+    assert_eq!(token_client.balance(&staker_a), 1_050_000);
+    assert_eq!(token_client.balance(&staker_b), 2_050_000);
+}
+
+// ── set_yield_rate guard: admin only ─────────────────────────────────────────
+
+#[test]
+#[should_panic(expected = "Error(Contract, #1)")]
+fn test_set_yield_rate_non_admin_panics() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let admin = Address::generate(&env);
+    let (_, _, client) = setup(&env, &admin);
+
+    let impostor = Address::generate(&env);
+    // Calling with an address that is not the admin — must panic Unauthorized.
+    // mock_all_auths satisfies the require_auth; the explicit admin-equality
+    // check rejects the call.
+    client.set_yield_rate(&impostor, &500);
+}
+
+// ── accrued_yield for non-staker returns 0 ───────────────────────────────────
+
+#[test]
+fn test_accrued_yield_non_staker_returns_zero() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let admin = Address::generate(&env);
+    let (_, _, client) = setup(&env, &admin);
+    client.set_yield_rate(&admin, &500);
+
+    let stranger = Address::generate(&env);
+    set_ts(&env, 31_536_000);
+    assert_eq!(client.accrued_yield(&stranger), 0);
+}
