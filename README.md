@@ -207,6 +207,30 @@ Or trigger the **[Deploy Contract](https://github.com/Stellar-VaultLink/invofi-c
 
 For a full redeploy and migration, follow the [migration runbook](./docs/migration-runbook.md).
 
+### Mainnet deployment
+
+Mainnet deploys use a separate, **manual-only** workflow:
+[**Deploy Contracts to Mainnet**](https://github.com/Stellar-VaultLink/invofi-contracts/actions/workflows/deploy-mainnet.yml)
+
+The workflow has **no push or pull_request trigger** — it can only be started from the Actions UI or the GitHub API with an explicit `workflow_dispatch` event. It runs in two stages:
+
+| Stage | Job | What happens |
+|---|---|---|
+| 1 | **Build & Hash (dry run)** | Compiles all five WASM artifacts, records their SHA-256 hashes in the job summary, checks sizes, and uploads the artifacts. Requires approval from the `production` environment's required reviewers before the next stage runs. |
+| 2 | **Deploy to Mainnet** | Downloads the exact artifacts from stage 1, re-verifies their hashes, then deploys all five contracts and wires cross-contract callers, currencies, and the POS token. Runs under the `production` environment (second reviewer gate). |
+
+**Prerequisites before triggering:**
+
+1. Create a `production` environment in the repository settings and add at least one required reviewer.
+2. Add the `STELLAR_MAINNET_DEPLOYER_SECRET_KEY` secret to that environment (not to the repository — scoping it to the environment ensures it is only accessible after reviewer approval).
+3. The deployer account must be funded on Mainnet before the workflow runs (Friendbot does not exist on Mainnet).
+
+**Rollback note:** Soroban contracts are immutable once deployed. There is no automated rollback. If a deployed contract contains a critical bug, the recovery path is:
+1. Deploy a patched build as a **new** contract using this same workflow.
+2. Re-point all cross-contract wiring and frontend env vars to the new contract IDs.
+3. Follow the [migration runbook](./docs/migration-runbook.md) for state migration details.
+4. Keep the old contract IDs recorded until the new deployment is fully verified.
+
 ---
 
 ## Roadmap
