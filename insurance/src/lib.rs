@@ -14,7 +14,16 @@
 
 use soroban_sdk::{contract, contractimpl, symbol_short, token, Address, Env, Map, Symbol, Vec};
 
-use invofi_common::{assert_not_paused, ContractError, InvoiceStatus, RegistryClient};
+use invofi_common::{
+    assert_not_paused, assert_schema_version, write_schema_version, ContractError, InvoiceStatus,
+    RegistryClient,
+};
+
+/// Current storage schema version for the insurance contract.
+///
+/// Increment this constant when a new release changes the layout of any
+/// persistent or instance storage key. See docs/adr/0009-storage-schema-versioning.md.
+pub const SCHEMA_VERSION: u32 = 1;
 
 // ─── Storage Helpers ─────────────────────────────────────────────────────────
 
@@ -76,6 +85,7 @@ impl InsuranceContract {
         env.storage()
             .instance()
             .set(&symbol_short!("token"), &token);
+        write_schema_version(&env, SCHEMA_VERSION);
     }
 
     pub fn get_admin(env: Env) -> Address {
@@ -88,6 +98,7 @@ impl InsuranceContract {
     /// Transfers admin rights. Only current admin.
     pub fn transfer_admin(env: Env, admin: Address, new_admin: Address) {
         assert_not_paused(&env);
+        assert_schema_version(&env, SCHEMA_VERSION);
         admin.require_auth();
         let current: Address = env
             .storage()
@@ -106,6 +117,7 @@ impl InsuranceContract {
     /// set this before opening the pool to stakers.
     pub fn set_staking_token(env: Env, admin: Address, token: Address) {
         assert_not_paused(&env);
+        assert_schema_version(&env, SCHEMA_VERSION);
         admin.require_auth();
         let current: Address = env
             .storage()
@@ -129,6 +141,7 @@ impl InsuranceContract {
     /// is configured (fail-closed).
     pub fn set_payout_caller(env: Env, admin: Address, payout_caller: Address) {
         assert_not_paused(&env);
+        assert_schema_version(&env, SCHEMA_VERSION);
         admin.require_auth();
         let current: Address = env
             .storage()
@@ -217,6 +230,7 @@ impl InsuranceContract {
     /// contract). Credits the staker's balance and the pool total.
     pub fn stake(env: Env, staker: Address, amount: i128) {
         assert_not_paused(&env);
+        assert_schema_version(&env, SCHEMA_VERSION);
         staker.require_auth();
         if amount <= 0 {
             env.panic_with_error(ContractError::InvalidInput);
@@ -249,6 +263,7 @@ impl InsuranceContract {
     /// the pool total; the pool pays the staker directly from its holdings.
     pub fn unstake(env: Env, staker: Address, amount: i128) {
         assert_not_paused(&env);
+        assert_schema_version(&env, SCHEMA_VERSION);
         staker.require_auth();
         if amount <= 0 {
             env.panic_with_error(ContractError::InvalidInput);
@@ -306,6 +321,7 @@ impl InsuranceContract {
     /// pool is short).
     pub fn pay_out(env: Env, invoice_id: Symbol, beneficiary: Address, amount: i128) -> i128 {
         assert_not_paused(&env);
+        assert_schema_version(&env, SCHEMA_VERSION);
         let payout_caller: Address = env
             .storage()
             .instance()

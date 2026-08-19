@@ -15,7 +15,13 @@
 
 use soroban_sdk::{contract, contractimpl, contracttype, symbol_short, Address, Env, Map};
 
-use invofi_common::{assert_not_paused, ContractError};
+use invofi_common::{assert_not_paused, assert_schema_version, write_schema_version, ContractError};
+
+/// Current storage schema version for the reputation contract.
+///
+/// Increment this constant when a new release changes the layout of any
+/// persistent or instance storage key. See docs/adr/0009-storage-schema-versioning.md.
+pub const SCHEMA_VERSION: u32 = 1;
 
 /// Outcome discriminant for a successful full repayment.
 pub const OUTCOME_REPAID: u32 = 0;
@@ -66,6 +72,7 @@ impl ReputationContract {
         env.storage()
             .instance()
             .set(&symbol_short!("admin"), &admin);
+        write_schema_version(&env, SCHEMA_VERSION);
     }
 
     pub fn get_admin(env: Env) -> Address {
@@ -80,6 +87,7 @@ impl ReputationContract {
     /// recorder is configured (fail-closed).
     pub fn set_recorder(env: Env, admin: Address, recorder: Address) {
         assert_not_paused(&env);
+        assert_schema_version(&env, SCHEMA_VERSION);
         admin.require_auth();
         let current: Address = env
             .storage()
@@ -149,6 +157,7 @@ impl ReputationContract {
     /// once per terminal outcome (once on full repay, once on reclaim).
     pub fn record_outcome(env: Env, originator: Address, outcome: u32) {
         assert_not_paused(&env);
+        assert_schema_version(&env, SCHEMA_VERSION);
         let recorder: Address = env
             .storage()
             .instance()

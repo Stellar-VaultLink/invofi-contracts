@@ -1632,3 +1632,131 @@ fn test_set_penalty_blocked_while_paused() {
     c.rep.pause(&c.admin);
     c.rep.set_penalty(&c.admin, &PEN_BPS, &PEN_CAP_BPS);
 }
+
+// ─── Schema version tests (issue #66) ───────────────────────────────────────
+
+mod schema_version_tests {
+    use super::RepaymentContract;
+    use crate::RepaymentContractClient;
+    use invofi_financing::FinancingContract;
+    use invofi_registry::RegistryContract;
+    use soroban_sdk::{symbol_short, testutils::Address as _, Address, Env};
+
+    /// Deploy registry + financing + repayment and return the repayment contract
+    /// id, the admin address, and client. The repayment contract is the one whose schver we manipulate.
+    fn deploy<'a>(env: &'a Env) -> (Address, Address, RepaymentContractClient<'a>) {
+        let admin = Address::generate(env);
+        let token = Address::generate(env);
+
+        let registry_id = env.register(RegistryContract, (admin.clone(),));
+        let financing_id =
+            env.register(FinancingContract, (admin.clone(), registry_id.clone(), token.clone()));
+        let repayment_id = env.register(
+            RepaymentContract,
+            (
+                admin.clone(),
+                registry_id.clone(),
+                financing_id.clone(),
+                token.clone(),
+            ),
+        );
+        let client = RepaymentContractClient::new(env, &repayment_id);
+
+        // Wire the three contracts together so cross-contract auth works.
+        invofi_financing::FinancingContractClient::new(env, &financing_id)
+            .set_repayment_contract(&admin, &repayment_id);
+        invofi_registry::RegistryContractClient::new(env, &registry_id)
+            .set_repayment_contract(&admin, &repayment_id);
+        invofi_registry::RegistryContractClient::new(env, &registry_id)
+            .set_financing_contract(&admin, &financing_id);
+
+        (repayment_id, admin, client)
+    }
+
+    // ── Matching version: normal deployment ──────────────────────────────────
+
+    /// A freshly deployed repayment contract has schver=1 written by
+    /// __constructor. State-mutating calls proceed normally.
+    #[test]
+    fn normal_deployment_version_matches() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let insurance = Address::generate(&env);
+        let (_, admin, client) = deploy(&env);
+
+        // set_insurance calls assert_schema_version — must succeed on a fresh
+        // deployment because __constructor wrote schver=1.
+        client.set_insurance(&admin, &insurance);
+    }
+
+    // ── Legacy fallback: absent schver key ───────────────────────────────────
+
+    /// Simulate a legacy deployment by removing the schver key after
+    /// construction. State-mutating calls must still work — they fall through
+    /// the absent-key path in assert_schema_version.
+    #[test]
+    fn legacy_absent_schver_succeeds() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let insurance = Address::generate(&env);
+        let (contract_id, admin, client) = deploy(&env);
+
+        // Remove schver to simulate a pre-versioning deployment.
+        env.as_contract(&contract_id, || {
+            env.storage().instance().remove(&symbol_short!("schver"));
+        });
+
+        // Verify schver is absent.
+        let has_schver: bool = env.as_contract(&contract_id, || {
+            env.storage().instance().has(&symbol_short!("schver"))
+        });
+        assert!(!has_schver, "schver should be absent for legacy simulation");
+
+        // A state-mutating call must succeed via the legacy fallback path.
+        client.set_insurance(&admin, &insurance);
+    }
+
+    // ── Mismatch: wrong version panics ───────────────────────────────────────
+
+    /// If schver is present but does not match SCHEMA_VERSION (e.g. schver=2
+    /// but SCHEMA_VERSION=1), every state-mutating call must panic with
+    /// `Error(Contract, #10)` (ContractError::SchemaMismatch).
+    #[test]
+    #[should_panic(expected = "Error(Contract, #10)")]
+    fn mismatched_version_panics_on_state_mutating_call() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let insurance = Address::generate(&env);
+        let (contract_id, admin, client) = deploy(&env);
+
+        // Overwrite schver with a future version — binary still expects 1.
+        // Simulates deploying v1 binary onto v2-migrated storage.
+        env.as_contract(&contract_id, || {
+            env.storage()
+                .instance()
+                .set(&symbol_short!("schver"), &2u32);
+        });
+
+        // Must panic with SchemaMismatch (discriminant 10).
+        client.set_insurance(&admin, &insurance);
+    }
+
+    /// Transfer admin also goes through assert_schema_version — verify mismatch
+    /// blocks it as well, since it is a different state-mutating entrypoint.
+    #[test]
+    #[should_panic(expected = "Error(Contract, #10)")]
+    fn mismatched_version_blocks_transfer_admin() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let new_admin = Address::generate(&env);
+        let (contract_id, admin, client) = deploy(&env);
+
+        env.as_contract(&contract_id, || {
+            env.storage()
+                .instance()
+                .set(&symbol_short!("schver"), &2u32);
+        });
+
+        client.transfer_admin(&admin, &new_admin);
+    }
+}

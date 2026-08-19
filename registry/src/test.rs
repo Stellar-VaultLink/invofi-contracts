@@ -1185,3 +1185,110 @@ fn test_repayment_marks_defaulted_requires_overdue() {
     client.update_invoice_status(&invoice_id, &originator, &InvoiceStatus::Financed);
     client.repayment_marks_defaulted(&invoice_id);
 }
+
+// ─── Schema version tests (issue #66) ───────────────────────────────────────
+
+mod schema_version_tests {
+    use super::RegistryContract;
+    use crate::RegistryContractClient;
+    use soroban_sdk::{symbol_short, testutils::Address as _, Address, Env};
+
+    fn make_admin(env: &Env) -> Address {
+        Address::generate(env)
+    }
+
+    // ── Matching version: normal deployment ──────────────────────────────────
+
+    /// A freshly deployed registry (with __constructor) has schver=1 written.
+    /// State-mutating calls proceed normally.
+    #[test]
+    fn normal_deployment_version_matches() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let admin = make_admin(&env);
+        let contract_id = env.register(RegistryContract, (admin.clone(),));
+        let client = RegistryContractClient::new(&env, &contract_id);
+
+        // register_invoice calls assert_schema_version — must succeed on a
+        // fresh deployment because __constructor wrote schver=1.
+        let originator = Address::generate(&env);
+        client.register_invoice(
+            &symbol_short!("invA"),
+            &originator,
+            &10_000_000i128,
+            &symbol_short!("XLM"),
+            &1_800_000_000u64,
+        );
+    }
+
+    // ── Legacy fallback: absent schver key ───────────────────────────────────
+
+    /// Simulate a legacy deployment: manually set up storage WITHOUT going
+    /// through __constructor (so schver is absent). State-mutating calls must
+    /// still work — they fall through the absent-key path.
+    #[test]
+    fn legacy_deployment_absent_schver_succeeds() {
+        let env = Env::default();
+        env.mock_all_auths();
+
+        let admin = make_admin(&env);
+        let contract_id = env.register(RegistryContract, (admin.clone(),));
+
+        // Remove the schver key to simulate a pre-versioning deployment.
+        env.as_contract(&contract_id, || {
+            env.storage().instance().remove(&symbol_short!("schver"));
+        });
+
+        // Verify schver is absent.
+        let has_schver: bool = env.as_contract(&contract_id, || {
+            env.storage().instance().has(&symbol_short!("schver"))
+        });
+        assert!(!has_schver, "schver should be absent for legacy simulation");
+
+        let client = RegistryContractClient::new(&env, &contract_id);
+
+        // A state-mutating call (register_invoice) must succeed via legacy fallback.
+        let originator = Address::generate(&env);
+        client.register_invoice(
+            &symbol_short!("invB"),
+            &originator,
+            &10_000_000i128,
+            &symbol_short!("XLM"),
+            &1_800_000_000u64,
+        );
+    }
+
+    // ── Mismatch: wrong version panics ───────────────────────────────────────
+
+    /// If schver is present but does not match SCHEMA_VERSION (e.g. schver=2
+    /// but SCHEMA_VERSION=1), every state-mutating call must panic with
+    /// `Error(Contract, #10)`.
+    #[test]
+    #[should_panic(expected = "Error(Contract, #10)")]
+    fn mismatched_version_panics_on_state_mutating_call() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let admin = make_admin(&env);
+        let contract_id = env.register(RegistryContract, (admin.clone(),));
+
+        // Overwrite schver with a future version (2) — the binary still
+        // expects 1. This simulates deploying a v1 binary on top of a v2
+        // migrated storage without running migrate() first.
+        env.as_contract(&contract_id, || {
+            env.storage()
+                .instance()
+                .set(&symbol_short!("schver"), &2u32);
+        });
+
+        let client = RegistryContractClient::new(&env, &contract_id);
+        let originator = Address::generate(&env);
+        // Must panic with SchemaMismatch (discriminant 10).
+        client.register_invoice(
+            &symbol_short!("invC"),
+            &originator,
+            &10_000_000i128,
+            &symbol_short!("XLM"),
+            &1_800_000_000u64,
+        );
+    }
+}

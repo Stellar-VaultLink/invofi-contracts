@@ -141,3 +141,78 @@ fn test_record_outcome_invalid_outcome_panics() {
 
     client.record_outcome(&originator, &99);
 }
+
+// ─── Schema version tests (issue #66) ───────────────────────────────────────
+
+mod schema_version_tests {
+    use super::ReputationContract;
+    use crate::ReputationContractClient;
+    use soroban_sdk::{symbol_short, testutils::Address as _, Address, Env};
+
+    // ── Matching version ─────────────────────────────────────────────────────
+
+    #[test]
+    fn normal_deployment_allows_state_mutations() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let admin = Address::generate(&env);
+        let recorder = Address::generate(&env);
+        let originator = Address::generate(&env);
+
+        let contract_id = env.register(ReputationContract, (admin.clone(),));
+        let client = ReputationContractClient::new(&env, &contract_id);
+        client.set_recorder(&admin, &recorder);
+
+        // record_outcome calls assert_schema_version — must succeed.
+        client.record_outcome(&originator, &0u32);
+        assert_eq!(client.get_score(&originator), 1);
+    }
+
+    // ── Legacy fallback ──────────────────────────────────────────────────────
+
+    #[test]
+    fn legacy_absent_schver_still_works() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let admin = Address::generate(&env);
+        let recorder = Address::generate(&env);
+        let originator = Address::generate(&env);
+
+        let contract_id = env.register(ReputationContract, (admin.clone(),));
+        // Remove schver to simulate legacy deployment.
+        env.as_contract(&contract_id, || {
+            env.storage().instance().remove(&symbol_short!("schver"));
+        });
+
+        let client = ReputationContractClient::new(&env, &contract_id);
+        client.set_recorder(&admin, &recorder);
+        // Must succeed via legacy fallback.
+        client.record_outcome(&originator, &0u32);
+        assert_eq!(client.get_score(&originator), 1);
+    }
+
+    // ── Mismatch panics ──────────────────────────────────────────────────────
+
+    #[test]
+    #[should_panic(expected = "Error(Contract, #10)")]
+    fn mismatched_schver_blocks_state_mutations() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let admin = Address::generate(&env);
+        let recorder = Address::generate(&env);
+        let originator = Address::generate(&env);
+
+        let contract_id = env.register(ReputationContract, (admin.clone(),));
+        // Overwrite schver with a future version.
+        env.as_contract(&contract_id, || {
+            env.storage()
+                .instance()
+                .set(&symbol_short!("schver"), &2u32);
+        });
+
+        let client = ReputationContractClient::new(&env, &contract_id);
+        client.set_recorder(&admin, &recorder);
+        // Must panic with SchemaMismatch (#10).
+        client.record_outcome(&originator, &0u32);
+    }
+}

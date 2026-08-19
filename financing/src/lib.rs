@@ -6,10 +6,17 @@
 use soroban_sdk::{contract, contractimpl, symbol_short, token, Address, Env, Map, Symbol, Vec};
 
 use invofi_common::{
-    assert_not_paused, resolve_token, ContractError, FinancingOffer, Invoice, InvoiceStatus,
-    LenderStats, OfferStatus, ProtocolStats, RegistryClient, RepaymentSchedule,
-    ScheduleFrequency, MAX_OFFER_DURATION_SECS, MIN_OFFER_DURATION_SECS,
+    assert_not_paused, assert_schema_version, write_schema_version, resolve_token, ContractError,
+    FinancingOffer, Invoice, InvoiceStatus, LenderStats, OfferStatus, ProtocolStats,
+    RegistryClient, RepaymentSchedule, ScheduleFrequency, MAX_OFFER_DURATION_SECS,
+    MIN_OFFER_DURATION_SECS,
 };
+
+/// Current storage schema version for the financing contract.
+///
+/// Increment this constant when a new release changes the layout of any
+/// persistent or instance storage key. See docs/adr/0009-storage-schema-versioning.md.
+pub const SCHEMA_VERSION: u32 = 1;
 
 // ─── Storage Helpers ─────────────────────────────────────────────────────────
 
@@ -115,6 +122,7 @@ impl FinancingContract {
         env.storage()
             .instance()
             .set(&symbol_short!("token"), &token);
+        write_schema_version(&env, SCHEMA_VERSION);
     }
 
     /// Register the repayment contract address. Only admin.
@@ -122,6 +130,7 @@ impl FinancingContract {
     /// callback methods (update_offer_status, update_offer_amount_repaid, etc.).
     pub fn set_repayment_contract(env: Env, admin: Address, repayment: Address) {
         assert_not_paused(&env);
+        assert_schema_version(&env, SCHEMA_VERSION);
         admin.require_auth();
         let current: Address = env
             .storage()
@@ -153,6 +162,7 @@ impl FinancingContract {
     /// Transfers admin rights. Only current admin.
     pub fn transfer_admin(env: Env, admin: Address, new_admin: Address) {
         assert_not_paused(&env);
+        assert_schema_version(&env, SCHEMA_VERSION);
         admin.require_auth();
         let current: Address = env
             .storage()
@@ -172,6 +182,7 @@ impl FinancingContract {
     /// Register a currency → token mapping. Admin only.
     pub fn register_currency(env: Env, admin: Address, currency: Symbol, token_addr: Address) {
         assert_not_paused(&env);
+        assert_schema_version(&env, SCHEMA_VERSION);
         admin.require_auth();
         let current: Address = env
             .storage()
@@ -199,6 +210,7 @@ impl FinancingContract {
     /// contract-invoker auth — see ADR-0002).
     pub fn set_position_token(env: Env, admin: Address, token: Address) {
         assert_not_paused(&env);
+        assert_schema_version(&env, SCHEMA_VERSION);
         admin.require_auth();
         let current: Address = env
             .storage()
@@ -271,6 +283,7 @@ impl FinancingContract {
         duration: u64,
     ) -> FinancingOffer {
         assert_not_paused(&env);
+        assert_schema_version(&env, SCHEMA_VERSION);
         lender.require_auth();
         assert_not_blacklisted(&env, &lender);
         assert!(amount > 0, "offer amount must be greater than zero");
@@ -357,6 +370,7 @@ impl FinancingContract {
     /// Withdraw a pending offer. Only the lender.
     pub fn withdraw_offer(env: Env, offer_id: Symbol, lender: Address) -> FinancingOffer {
         assert_not_paused(&env);
+        assert_schema_version(&env, SCHEMA_VERSION);
         lender.require_auth();
         let mut offers = load_offers(&env);
         let mut offer = offers
@@ -384,6 +398,7 @@ impl FinancingContract {
     /// Cross-contract: reads + updates invoice status in the registry contract.
     pub fn accept_offer(env: Env, offer_id: Symbol, invoice_originator: Address) -> FinancingOffer {
         assert_not_paused(&env);
+        assert_schema_version(&env, SCHEMA_VERSION);
         invoice_originator.require_auth();
 
         let mut offers = load_offers(&env);
@@ -470,6 +485,7 @@ impl FinancingContract {
     /// Reject a financing offer. Only the invoice originator.
     pub fn reject_offer(env: Env, offer_id: Symbol, invoice_originator: Address) -> FinancingOffer {
         assert_not_paused(&env);
+        assert_schema_version(&env, SCHEMA_VERSION);
         invoice_originator.require_auth();
 
         let mut offers = load_offers(&env);
@@ -519,6 +535,7 @@ impl FinancingContract {
     /// after accept/reject/repay/reclaim to keep offer state in sync.
     pub fn update_offer_status(env: Env, id: Symbol, new_status: OfferStatus) {
         assert_not_paused(&env);
+        assert_schema_version(&env, SCHEMA_VERSION);
         Self::assert_only_repayment(&env);
         let mut offers = load_offers(&env);
         let mut offer = offers
@@ -532,6 +549,7 @@ impl FinancingContract {
     /// Update the running amount_repaid on an offer. Called by Repayment.
     pub fn update_offer_amount_repaid(env: Env, id: Symbol, amount_repaid: i128) {
         assert_not_paused(&env);
+        assert_schema_version(&env, SCHEMA_VERSION);
         Self::assert_only_repayment(&env);
         let mut offers = load_offers(&env);
         let mut offer = offers
@@ -545,6 +563,7 @@ impl FinancingContract {
     /// Update lender stats after a repayment. Called by Repayment.
     pub fn update_lender_stats_repaid(env: Env, lender: Address, fully_repaid: bool) {
         assert_not_paused(&env);
+        assert_schema_version(&env, SCHEMA_VERSION);
         Self::assert_only_repayment(&env);
         let mut lstats = load_lender_stats(&env, &lender);
         if fully_repaid {
@@ -556,6 +575,7 @@ impl FinancingContract {
     /// Update protocol-level stats after a repayment. Called by Repayment.
     pub fn update_stats_repaid(env: Env, amount: i128, fee_amount: i128) {
         assert_not_paused(&env);
+        assert_schema_version(&env, SCHEMA_VERSION);
         Self::assert_only_repayment(&env);
         let mut s = load_stats(&env);
         s.total_repaid += amount;
@@ -705,6 +725,7 @@ impl FinancingContract {
         first_due: u64,
     ) -> RepaymentSchedule {
         assert_not_paused(&env);
+        assert_schema_version(&env, SCHEMA_VERSION);
         caller.require_auth();
 
         assert!(count >= 1, "count must be at least 1");

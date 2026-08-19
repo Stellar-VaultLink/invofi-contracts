@@ -192,7 +192,7 @@ Every state-mutating function publishes a Soroban contract event. Topics are
 # Build
 cargo build --target wasm32v1-none --release
 
-# Run tests (110 tests across registry / financing / repayment / insurance / reputation)
+# Run tests (189 tests across common / registry / financing / repayment / insurance / reputation)
 cargo test
 
 # Check WASM size stays under 256 KB
@@ -218,6 +218,7 @@ For a full redeploy and migration, follow the [migration runbook](./docs/migrati
 - [x] Insurance payout on default, reputation scoring
 - [x] Emergency pause / circuit breaker, full protocol event coverage
 - [x] Deployer-bound `__constructor` initialization (issue #75), CI: tests + clippy + Soroban Scout
+- [x] Storage schema versioning — `SCHEMA_VERSION`, `assert_schema_version`, legacy fallback, `migrate()` pattern documented (issue #66, [ADR-0009](./docs/adr/0009-storage-schema-versioning.md))
 
 ### Open
 
