@@ -522,7 +522,7 @@ jobs:
                   | contains("coderabbit"))
                   | (.state | ascii_downcase
                     | if . == "error" then "failure" else . end)] | last' \
-                2>/dev/null; } | grep -v '^$' | tail -1 )"
+                2>/dev/null; } | grep -v '^$' | tail -1 || true )"
               case "${CR_STATE}" in
                 "")
                   echo "  no CodeRabbit status — proceeding without its review"
@@ -622,7 +622,7 @@ jobs:
               fi
             else
               MERGE_ERR="$(printf '%s' "${MERGE_OUT}" \
-                | head -3 | tr '\n' ' ')"
+                | head -3 | tr '\n' ' ' || true)"
               [ -n "${MERGE_ERR}" ] || MERGE_ERR="(no error output)"
               MARKER2="<!-- BOT-MERGE-FAIL sha=${SHA} -->"
               ALREADY2="$(gh pr view "${PR}" --repo "${REPO}" \
