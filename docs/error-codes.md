@@ -76,6 +76,7 @@ document fixes the naming convention only.
 | `E_INVOICE_DUE_DATE_NOT_PASSED` | Invoice due date has not yet elapsed; cannot mark overdue | Registry | **Toast:** "Invoice is not yet overdue." |
 | `E_GRACE_PERIOD_NOT_ELAPSED` | 7-day grace period after overdue has not yet elapsed; cannot reclaim | Repayment | **Toast:** "Grace period has not elapsed. Reclaim available after 7 days past due." |
 | `E_TERMINAL_OFFER` | Cannot schedule repayment on a terminal (Repaid/Defaulted/Rejected) offer | Financing | **Toast:** Refresh offer state |
+| `E_NEGOTIATION_CLOSED` | The offer negotiation is no longer open — the 72-hour window elapsed, a party closed it, or it already settled | Financing | **Toast:** "This negotiation has ended." Disable amend/counter and refresh |
 
 ### Invalid Input / Parameters
 
@@ -90,6 +91,7 @@ document fixes the naming convention only.
 | `E_PAST_DUE_DATE` | Invoice `due_date` is in the past at registration time | Registry | **Toast:** "Due date must be in the future." |
 | `E_FIRST_DUE_IN_PAST` | `first_due` for schedule is not in the future | Financing | **Toast:** "First due date must be in the future." |
 | `E_ZERO_INSTALLMENT` | Computed installment amount is zero (amount/count too small) | Financing | **Toast:** "Installment amount too small." |
+| `E_STALE_NEGOTIATION_ROUND` | `expected_round` does not match the negotiation's current length — the other party moved since the caller read state | Financing | **Toast:** "Terms changed while you were reviewing." Re-read the negotiation and resubmit |
 
 ### Duplicate Key
 

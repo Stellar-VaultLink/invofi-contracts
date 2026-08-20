@@ -8,6 +8,50 @@ and are enforced by commitlint in CI.
 ## [Unreleased]
 
 ### Added
+- **Offer amendment and counter-offer protocol (issue #180)** — financing
+  offers are no longer take-it-or-leave-it. A lender can revise their own terms
+  with `amend_offer`, an originator can name theirs with `counter_offer`, and
+  when the two sides land on the same terms the offer settles in that same
+  transaction. Design in `docs/adr/0008-offer-negotiation.md`.
+  - **Auto-accept matches two pre-existing commitments** rather than spending
+    on a counterparty's behalf. Agreement is exact equality of the canonical
+    term tuple `(amount, interest_rate, duration)` — no tolerance, no rounding.
+    When the originator counters at the lender's standing terms, their own
+    `require_auth` covers the settlement; when the lender amends onto the
+    originator's live counter-offer, what authorizes financing them is the
+    counter-offer they themselves recorded on-chain. Settlement runs the
+    extracted `settle_acceptance`, the same code path `accept_offer` uses, so
+    the two can never drift.
+  - **Every round is version-guarded.** `amend_offer` / `counter_offer` take
+    `expected_round`, the history length the caller believes it is amending. A
+    round written against a negotiation that moved underneath it reverts with
+    `InvalidInput` instead of applying to terms the caller never saw — which is
+    what would otherwise let a stale counter-offer auto-execute.
+  - **A recorded counter-offer is bounded and revocable.** It stays executable
+    only inside the negotiation window (default 72 h, admin-configurable within
+    1 h – 30 days via `set_negotiation_window`); the deadline is frozen when
+    the negotiation opens, so later rounds never push it out; proposing again
+    supersedes, since only a party's most recent record is live; and either
+    party can end the negotiation outright with `close_negotiation`.
+  - **Expiry is derived on read**, since Soroban has no scheduler:
+    `get_negotiation_status` computes `Expired` from the deadline whether or
+    not anyone has called anything. `close_negotiation` is the poke that
+    persists the outcome and emits the event — permissionless after the
+    deadline, restricted to the two parties before it.
+  - New storage `negotiations:{offer_id}` as a `Vec<NegotiationRecord>`, capped
+    at 20 rounds so the entry stays bounded. New reads `get_negotiation`,
+    `get_negotiation_status`, `get_negotiation_deadline`,
+    `get_negotiation_window`. New events `off_amd`, `ctr_off`, `neg_clsd`.
+  - Amended terms are validated against the same bounds `create_offer`
+    enforces, so a negotiation cannot reach terms the offer could not have been
+    created with.
+  - 26 new tests, driven through the contract client and asserting on real
+    settlement effects (token balances, registry invoice status): both
+    auto-accept directions, the near-miss that must not settle, a superseded
+    counter-offer that must not execute, stale-round rejection from both sides,
+    derived expiry at the deadline boundary, an expired counter-offer that can
+    no longer be taken, revocation, permissionless post-deadline close, the
+    round cap, the pause and authorization guards, and the events.
 - **Partial repayment with pro-rata interest (issue #176)** — originators
   can now make partial payments against an invoice, with interest calculated
   pro-rata on the remaining principal: `interest = remaining × rate_bps ×

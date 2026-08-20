@@ -84,6 +84,11 @@ register_invoice()  →  create_offer()  →  accept_offer()
 | `create_offer(offer_id, invoice_id, lender, amount, currency, rate, duration)` | Lender | Submit an offer (validates amount/rate/duration bounds) |
 | `withdraw_offer / reject_offer` | Lender / Originator | Withdraw or reject a Pending offer |
 | `accept_offer(offer_id, originator)` | Originator | Pulls principal lender → business **and mints the lender's position token** |
+| `amend_offer(offer_id, lender, expected_round, amount, rate, duration)` | Lender | Revise a Pending offer's terms; settles immediately if they match the originator's live counter-offer (ADR-0008) |
+| `counter_offer(offer_id, originator, expected_round, amount, rate, duration)` | Originator | Propose different terms; settles immediately if they match the lender's standing terms (ADR-0008) |
+| `close_negotiation(offer_id, caller)` | Lender / Originator, or anyone once expired | End a negotiation — revokes a live counter-offer before the deadline, records expiry after it |
+| `get_negotiation / get_negotiation_status / get_negotiation_deadline` | Anyone | Read the on-chain negotiation history, its derived status, and its frozen deadline |
+| `set_negotiation_window(admin, secs)` | Admin | Negotiation window, default 72 h, clamped to 1 h – 30 days |
 | `register_currency(admin, currency, token)` | Admin | Add a settlement currency — one registry entry, no code branch per currency |
 | `set_position_token(admin, token)` | Admin | Configure the SEP-41 position-token contract (ADR-0002) |
 | `get_position_token()` | Anyone | Read the configured position token |
@@ -161,6 +166,9 @@ Every state-mutating function publishes a Soroban contract event. Topics are
 | `off_acc` | `accept_offer` | `(invoice_id, lender, amount)` |
 | `off_rej` | `reject_offer` | `invoice_id` |
 | `off_wdr` | `withdraw_offer` | `lender` |
+| `off_amd` | `amend_offer` | `(lender, amount, interest_rate, duration)` |
+| `ctr_off` | `counter_offer` | `(originator, amount, interest_rate, duration)` |
+| `neg_clsd` | `close_negotiation`, auto-accept, `withdraw_offer` / `reject_offer` on an open negotiation | `(NegotiationStatus, closer)` |
 | `off_def` | `reclaim_invoice` | `(invoice_id, lender)` |
 | `inv_rep` | `repay_invoice` | `(offer_id, amount, fully_repaid)` |
 | `inv_ovd` | `mark_overdue` | `due_date` |
@@ -190,6 +198,9 @@ All contracts emit machine-readable `E_*` error codes (see [docs/error-codes.md]
 | `MIN_OFFER_DURATION_SECS` | 86,400 | Minimum offer duration (1 day) |
 | `MAX_OFFER_DURATION_SECS` | 31,536,000 | Maximum offer duration (1 year) |
 | `MIN_INVOICE_AMOUNT` | 10,000,000 | Minimum invoice amount in stroops (10 XLM / 10 USDC) |
+| `DEFAULT_NEGOTIATION_WINDOW_SECS` | 259,200 | Default offer-negotiation window (72 hours) |
+| `MIN_NEGOTIATION_WINDOW_SECS` / `MAX_NEGOTIATION_WINDOW_SECS` | 3,600 / 2,592,000 | Bounds an admin may configure the window to (1 hour – 30 days) |
+| `MAX_NEGOTIATION_ROUNDS` | 20 | Cap on recorded negotiation rounds per offer |
 
 ---
 
