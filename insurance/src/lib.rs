@@ -124,6 +124,71 @@ fn save_yield_acc(env: &Env, map: &Map<Address, i128>) {
         .set(&symbol_short!("yld_acc"), map);
 }
 
+// ── Insurance claim storage helpers (Issue #137) ───────────────────────────
+
+fn load_total_outstanding(env: &Env) -> i128 {
+    env.storage()
+        .instance()
+        .get(&symbol_short!("tot_out"))
+        .unwrap_or(0)
+}
+
+fn save_total_outstanding(env: &Env, total: i128) {
+    env.storage()
+        .instance()
+        .set(&symbol_short!("tot_out"), &total);
+}
+
+fn load_reserved(env: &Env, offer_id: &Symbol) -> i128 {
+    let map: Map<Symbol, i128> = env
+        .storage()
+        .persistent()
+        .get(&symbol_short!("resrvd"))
+        .unwrap_or_else(|| Map::new(env));
+    map.get(offer_id.clone()).unwrap_or(0)
+}
+
+fn save_reserved(env: &Env, offer_id: &Symbol, amount: i128) {
+    let mut map: Map<Symbol, i128> = env
+        .storage()
+        .persistent()
+        .get(&symbol_short!("resrvd"))
+        .unwrap_or_else(|| Map::new(env));
+    if amount == 0 {
+        map.remove(offer_id.clone());
+    } else {
+        map.set(offer_id.clone(), amount);
+    }
+    env.storage()
+        .persistent()
+        .set(&symbol_short!("resrvd"), &map);
+}
+
+fn load_paid(env: &Env, offer_id: &Symbol) -> i128 {
+    let map: Map<Symbol, i128> = env
+        .storage()
+        .persistent()
+        .get(&symbol_short!("paid"))
+        .unwrap_or_else(|| Map::new(env));
+    map.get(offer_id.clone()).unwrap_or(0)
+}
+
+fn save_paid(env: &Env, offer_id: &Symbol, amount: i128) {
+    let mut map: Map<Symbol, i128> = env
+        .storage()
+        .persistent()
+        .get(&symbol_short!("paid"))
+        .unwrap_or_else(|| Map::new(env));
+    if amount == 0 {
+        map.remove(offer_id.clone());
+    } else {
+        map.set(offer_id.clone(), amount);
+    }
+    env.storage()
+        .persistent()
+        .set(&symbol_short!("paid"), &map);
+}
+
 // ── Yield math ────────────────────────────────────────────────────────────────
 
 /// Compute the yield earned by `principal` at `rate_bps` over `elapsed_secs`.
