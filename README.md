@@ -299,6 +299,13 @@ Thanks to everyone who has contributed to InvoFi — the list below is generated
                 </a>
             </td>
             <td align="center">
+                <a href="https://github.com/KarenZita01">
+                    <img src="https://avatars.githubusercontent.com/u/261386615?v=4" width="100;" alt="KarenZita01"/>
+                    <br />
+                    <sub><b>Karen Agbo</b></sub>
+                </a>
+            </td>
+            <td align="center">
                 <a href="https://github.com/Abdulrasaq1515">
                     <img src="https://avatars.githubusercontent.com/u/209874744?v=4" width="100;" alt="Abdulrasaq1515"/>
                     <br />
@@ -320,13 +327,6 @@ Thanks to everyone who has contributed to InvoFi — the list below is generated
                 </a>
             </td>
             <td align="center">
-                <a href="https://github.com/hexlaapp">
-                    <img src="https://avatars.githubusercontent.com/u/287440938?v=4" width="100;" alt="hexlaapp"/>
-                    <br />
-                    <sub><b>hexlaapp</b></sub>
-                </a>
-            </td>
-            <td align="center">
                 <a href="https://github.com/Fury03">
                     <img src="https://avatars.githubusercontent.com/u/98775983?v=4" width="100;" alt="Fury03"/>
                     <br />
@@ -335,6 +335,13 @@ Thanks to everyone who has contributed to InvoFi — the list below is generated
             </td>
 		</tr>
 		<tr>
+            <td align="center">
+                <a href="https://github.com/hexlaapp">
+                    <img src="https://avatars.githubusercontent.com/u/287440938?v=4" width="100;" alt="hexlaapp"/>
+                    <br />
+                    <sub><b>hexlaapp</b></sub>
+                </a>
+            </td>
             <td align="center">
                 <a href="https://github.com/Awointa">
                     <img src="https://avatars.githubusercontent.com/u/82676631?v=4" width="100;" alt="Awointa"/>
@@ -370,6 +377,8 @@ Thanks to everyone who has contributed to InvoFi — the list below is generated
                     <sub><b>Raw_Nuke</b></sub>
                 </a>
             </td>
+		</tr>
+		<tr>
             <td align="center">
                 <a href="https://github.com/Wetshakat">
                     <img src="https://avatars.githubusercontent.com/u/182114004?v=4" width="100;" alt="Wetshakat"/>
