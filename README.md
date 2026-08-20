@@ -320,12 +320,21 @@ Thanks to everyone who has contributed to InvoFi — the list below is generated
                 </a>
             </td>
             <td align="center">
+                <a href="https://github.com/Fury03">
+                    <img src="https://avatars.githubusercontent.com/u/98775983?v=4" width="100;" alt="Fury03"/>
+                    <br />
+                    <sub><b>Damilola Ogunrotimi</b></sub>
+                </a>
+            </td>
+            <td align="center">
                 <a href="https://github.com/p3ris0n">
                     <img src="https://avatars.githubusercontent.com/u/94976593?v=4" width="100;" alt="p3ris0n"/>
                     <br />
                     <sub><b>Promise Raji</b></sub>
                 </a>
             </td>
+		</tr>
+		<tr>
             <td align="center">
                 <a href="https://github.com/Awointa">
                     <img src="https://avatars.githubusercontent.com/u/82676631?v=4" width="100;" alt="Awointa"/>
@@ -333,8 +342,6 @@ Thanks to everyone who has contributed to InvoFi — the list below is generated
                     <sub><b>Bob_The_Builder</b></sub>
                 </a>
             </td>
-		</tr>
-		<tr>
             <td align="center">
                 <a href="https://github.com/Just-Bamford">
                     <img src="https://avatars.githubusercontent.com/u/233368823?v=4" width="100;" alt="Just-Bamford"/>
@@ -347,13 +354,6 @@ Thanks to everyone who has contributed to InvoFi — the list below is generated
                     <img src="https://avatars.githubusercontent.com/u/220715997?v=4" width="100;" alt="DevSolex"/>
                     <br />
                     <sub><b>Dev solex</b></sub>
-                </a>
-            </td>
-            <td align="center">
-                <a href="https://github.com/Fury03">
-                    <img src="https://avatars.githubusercontent.com/u/98775983?v=4" width="100;" alt="Fury03"/>
-                    <br />
-                    <sub><b>Damilola Ogunrotimi</b></sub>
                 </a>
             </td>
             <td align="center">
