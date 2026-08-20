@@ -113,10 +113,10 @@ register_invoice()  →  create_offer()  →  accept_offer()
 | `get_contract_token_balance()` | Anyone | Actual on-chain balance — audit check that accounting matches |
 | `pay_out(beneficiary, amount)` | Payout caller only (repayment) | Pay up to `amount`, capped at pool balance; returns amount actually paid |
 | `get_payout_caller()` | Anyone | Read the configured payout caller |
+| `set_yield_rate(admin, rate_bps)` | Admin | Set the annual flat yield rate in basis points (e.g. 500 = 5 %). Banks existing yield prospectively before applying the new rate |
+| `get_yield_rate()` | Anyone | Read the current annual yield rate in basis points |
+| `accrued_yield(staker)` | Anyone | Preview the total accrued yield for a staker (banked + since last checkpoint) |
 | `set_staking_token / pause / unpause / transfer_admin` | Admin | Admin controls |
-
-> Yield-rate calculation remains intentionally out of scope — the pool is flat accounting with
-> payout-on-default wired through `pay_out`. See ADR-0003 for the payout design.
 
 ---
 
@@ -171,7 +171,14 @@ Every state-mutating function publishes a Soroban contract event. Topics are
 | `pool_stk` | `stake` (insurance) | `amount` |
 | `pool_un` | `unstake` (insurance) | `amount` |
 | `pool_pay` | `pay_out` (insurance) | `amount paid` |
+| `pool_yld` | `unstake` (insurance) | `yield paid` — emitted only when yield > 0 |
 | `reputn` | `record_outcome` (reputation) | `outcome` |
+
+---
+
+## Error Codes
+
+All contracts emit machine-readable `E_*` error codes (see [docs/error-codes.md](./docs/error-codes.md)). Clients must branch on these stable codes — never on free-text error messages. The SDK maps typed contract errors → codes; the frontend maps codes → UI behaviour (redirect on `E_UNAUTHORIZED`, toast on `E_PAUSED`, etc.).
 
 ---
 
@@ -205,6 +212,30 @@ bash scripts/deploy.sh
 Or trigger the **[Deploy Contract](https://github.com/Stellar-VaultLink/invofi-contracts/actions/workflows/deploy-contract.yml)** GitHub Actions workflow for a one-click Testnet deploy.
 
 For a full redeploy and migration, follow the [migration runbook](./docs/migration-runbook.md).
+
+### Mainnet deployment
+
+Mainnet deploys use a separate, **manual-only** workflow:
+[**Deploy Contracts to Mainnet**](https://github.com/Stellar-VaultLink/invofi-contracts/actions/workflows/deploy-mainnet.yml)
+
+The workflow has **no push or pull_request trigger** — it can only be started from the Actions UI or the GitHub API with an explicit `workflow_dispatch` event. It runs in two stages:
+
+| Stage | Job | What happens |
+|---|---|---|
+| 1 | **Build & Hash (dry run)** | Compiles all five WASM artifacts, records their SHA-256 hashes in the job summary, checks sizes, and uploads the artifacts. Requires approval from the `production` environment's required reviewers before the next stage runs. |
+| 2 | **Deploy to Mainnet** | Downloads the exact artifacts from stage 1, re-verifies their hashes, then deploys all five contracts and wires cross-contract callers, currencies, and the POS token. Runs under the `production` environment (second reviewer gate). |
+
+**Prerequisites before triggering:**
+
+1. Create a `production` environment in the repository settings and add at least one required reviewer.
+2. Add the `STELLAR_MAINNET_DEPLOYER_SECRET_KEY` secret to that environment (not to the repository — scoping it to the environment ensures it is only accessible after reviewer approval).
+3. The deployer account must be funded on Mainnet before the workflow runs (Friendbot does not exist on Mainnet).
+
+**Rollback note:** Soroban contracts are immutable once deployed. There is no automated rollback. If a deployed contract contains a critical bug, the recovery path is:
+1. Deploy a patched build as a **new** contract using this same workflow.
+2. Re-point all cross-contract wiring and frontend env vars to the new contract IDs.
+3. Follow the [migration runbook](./docs/migration-runbook.md) for state migration details.
+4. Keep the old contract IDs recorded until the new deployment is fully verified.
 
 ---
 
@@ -294,6 +325,13 @@ Thanks to everyone who has contributed to InvoFi — the list below is generated
 		</tr>
 		<tr>
             <td align="center">
+                <a href="https://github.com/Just-Bamford">
+                    <img src="https://avatars.githubusercontent.com/u/233368823?v=4" width="100;" alt="Just-Bamford"/>
+                    <br />
+                    <sub><b>Bamford</b></sub>
+                </a>
+            </td>
+            <td align="center">
                 <a href="https://github.com/DevSolex">
                     <img src="https://avatars.githubusercontent.com/u/220715997?v=4" width="100;" alt="DevSolex"/>
                     <br />
@@ -319,6 +357,13 @@ Thanks to everyone who has contributed to InvoFi — the list below is generated
                     <img src="https://avatars.githubusercontent.com/u/67506722?v=4" width="100;" alt="RawNuke"/>
                     <br />
                     <sub><b>Raw_Nuke</b></sub>
+                </a>
+            </td>
+            <td align="center">
+                <a href="https://github.com/Wetshakat">
+                    <img src="https://avatars.githubusercontent.com/u/182114004?v=4" width="100;" alt="Wetshakat"/>
+                    <br />
+                    <sub><b>Ishaku Dyelshak </b></sub>
                 </a>
             </td>
 		</tr>

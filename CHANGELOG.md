@@ -8,6 +8,30 @@ and are enforced by commitlint in CI.
 ## [Unreleased]
 
 ### Added
+- **Partial repayment with pro-rata interest (issue #176)** — originators
+  can now make partial payments against an invoice, with interest calculated
+  pro-rata on the remaining principal: `interest = remaining × rate_bps ×
+  days_elapsed / 3_650_000`. The offer stays `Financed` until the remaining
+  principal reaches zero, at which point the final payment triggers full
+  settlement.
+  - New `PaymentRecord` struct in `common/src/lib.rs` tracks each payment's
+    id, amount, interest_paid, principal_paid, timestamp, and payer.
+  - Payment history stored on-chain as `Vec<PaymentRecord>` per invoice
+    (storage key `("pays", invoice_id)`), queryable via
+    `get_payment_history(invoice_id)`.
+  - Minimum partial payment enforced: each payment must be ≥ 1% of the
+    original principal unless it fully settles the remaining balance.
+  - `get_remaining_principal(offer_id)` and
+    `calculate_accrued_interest(offer_id)` read-only queries added.
+  - Two new Soroban events: `parpay` (partial payment received, carrying
+    offer_id, amount, principal_portion, interest_portion, remaining) and
+    `inv_frp` (invoice fully repaid, carrying offer_id, amount,
+    principal_portion, interest_portion). The legacy `inv_rep` event is
+    preserved for backward compatibility.
+  - `calculate_total_due` now returns `remaining_principal + pro-rata
+    interest + penalty` instead of the previous flat-yield model.
+  - All existing tests updated for the new interest model; proptest
+    (2 000 cases) validates the math invariants.
 - **Cross-crate integration test harness** — new `integration/` workspace crate
   that deploys all five contracts (registry, financing, repayment, insurance,
   reputation) with mock tokens and drives the full invoice lifecycle across

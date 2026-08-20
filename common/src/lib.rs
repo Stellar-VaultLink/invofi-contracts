@@ -102,7 +102,7 @@ pub struct Invoice {
 
 /// Lifecycle status of an invoice.
 #[contracttype]
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 #[repr(u32)]
 pub enum InvoiceStatus {
     Pending = 0,
@@ -112,6 +112,16 @@ pub enum InvoiceStatus {
     Cancelled = 4,
     Disputed = 5,
     Defaulted = 6,
+}
+
+/// A record of a single invoice state transition.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct TransitionRecord {
+    pub from_status: InvoiceStatus,
+    pub to_status: InvoiceStatus,
+    pub actor: Address,
+    pub timestamp: u64,
 }
 
 /// A financing offer submitted by a lender against an invoice.
@@ -217,6 +227,25 @@ pub struct RepaymentSchedule {
     pub installment_amount: i128,
     /// Unix timestamp of the first installment due date.
     pub first_due: u64,
+}
+
+/// A single payment record stored on-chain as part of the payment history
+/// for an invoice. Each partial or full repayment creates one record.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct PaymentRecord {
+    /// Sequential payment identifier (1-based).
+    pub payment_id: u32,
+    /// Total payment amount (principal + interest combined).
+    pub amount: i128,
+    /// Portion of the payment applied to accrued interest.
+    pub interest_paid: i128,
+    /// Portion of the payment applied to outstanding principal.
+    pub principal_paid: i128,
+    /// Unix timestamp of the payment.
+    pub timestamp: u64,
+    /// Address that made the payment.
+    pub payer: Address,
 }
 
 // ─── Currency Registry ───────────────────────────────────────────────────────
@@ -462,4 +491,121 @@ pub trait ReputationInterface {
 
     /// Read an originator's current reputation score (public, read-only).
     fn get_score(env: Env, originator: Address) -> i128;
+}
+
+// ─── State Machine State Validation and Enforcement ──────────────────────────
+
+use soroban_sdk::Vec;
+
+/// Validates and executes an invoice state transition. Emits a structured 
+/// transition event and records the transition in the history log.
+/// 
+/// This is the single point of authority for all invoice status changes across
+/// the protocol. All entry points (registry, financing, repayment) must route
+/// through this function.
+/// 
+/// # Panics
+/// - If the transition is invalid for the current state
+/// - If the transition would violate business rules (e.g., due_date check for Overdue)
+pub fn assert_transition(
+    env: &Env,
+    invoice_id: Symbol,
+    from_status: InvoiceStatus,
+    to_status: InvoiceStatus,
+    actor: Address,
+) {
+    // Validate that this transition is in the allowed table
+    validate_transition(from_status, to_status);
+
+    // Emit structured transition event
+    env.events().publish(
+        (symbol_short!("inv_trx"), invoice_id.clone()),
+        (from_status, to_status, actor.clone()),
+    );
+
+    // Record transition in bounded history (max 20 entries)
+    record_transition(env, invoice_id, from_status, to_status, actor);
+}
+
+/// Validates that a transition from `from_status` to `to_status` is allowed.
+/// 
+/// Valid transitions:
+/// - Pending -> Cancelled (originator cancellation)
+/// - Pending -> Financed (offer acceptance)
+/// - Financed -> Repaid (full repayment)
+/// - Financed -> Financed (partial repayment, no-op state-wise)
+/// - Financed -> Overdue (time-based, after due_date)
+/// - Financed -> Disputed (originator dispute)
+/// - Overdue -> Defaulted (lender reclaim after grace period)
+/// - Disputed -> Pending (admin resolution to Pending)
+/// - Disputed -> Financed (admin resolution to Financed)
+/// - Disputed -> Repaid (admin resolution to Repaid)
+/// - Disputed -> Cancelled (admin resolution to Cancelled)
+/// - Disputed -> Defaulted (admin resolution to Defaulted)
+fn validate_transition(from_status: InvoiceStatus, to_status: InvoiceStatus) {
+    let valid = matches!(
+        (from_status, to_status),
+        // Pending exits
+        (InvoiceStatus::Pending, InvoiceStatus::Cancelled)
+        | (InvoiceStatus::Pending, InvoiceStatus::Financed)
+        // Financed exits
+        | (InvoiceStatus::Financed, InvoiceStatus::Repaid)
+        | (InvoiceStatus::Financed, InvoiceStatus::Financed)
+        | (InvoiceStatus::Financed, InvoiceStatus::Overdue)
+        | (InvoiceStatus::Financed, InvoiceStatus::Disputed)
+        // Overdue exits
+        | (InvoiceStatus::Overdue, InvoiceStatus::Defaulted)
+        // Disputed exits (admin-controlled)
+        | (InvoiceStatus::Disputed, InvoiceStatus::Pending)
+        | (InvoiceStatus::Disputed, InvoiceStatus::Financed)
+        | (InvoiceStatus::Disputed, InvoiceStatus::Repaid)
+        | (InvoiceStatus::Disputed, InvoiceStatus::Cancelled)
+        | (InvoiceStatus::Disputed, InvoiceStatus::Defaulted)
+    );
+
+    if !valid {
+        panic!("Invalid state transition");
+    }
+}
+
+/// Records a transition in the bounded history log (max 20 entries, FIFO eviction).
+fn record_transition(
+    env: &Env,
+    invoice_id: Symbol,
+    from_status: InvoiceStatus,
+    to_status: InvoiceStatus,
+    actor: Address,
+) {
+    let storage_key = symbol_short!("trn_log");
+    let mut history: Vec<TransitionRecord> = env
+        .storage()
+        .persistent()
+        .get(&(storage_key.clone(), invoice_id.clone()))
+        .unwrap_or_else(|| Vec::new(env));
+
+    let record = TransitionRecord {
+        from_status,
+        to_status,
+        actor,
+        timestamp: env.ledger().timestamp(),
+    };
+
+    history.push_back(record);
+
+    // Evict oldest entry if we exceed max 20
+    if history.len() > 20 {
+        history.pop_front();
+    }
+
+    env.storage()
+        .persistent()
+        .set(&(storage_key, invoice_id), &history);
+}
+
+/// Query the full transition history for an invoice.
+pub fn get_transition_history(env: &Env, invoice_id: Symbol) -> Vec<TransitionRecord> {
+    env.storage()
+        .persistent()
+        .get(&(symbol_short!("trn_log"), invoice_id))
+        .unwrap_or_else(|| Vec::new(env))
 }

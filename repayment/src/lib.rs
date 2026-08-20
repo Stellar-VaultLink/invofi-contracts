@@ -1,11 +1,11 @@
 #![no_std]
 
-use soroban_sdk::{contract, contractimpl, symbol_short, token, Address, Env, Symbol};
+use soroban_sdk::{contract, contractimpl, symbol_short, token, Address, Env, Symbol, Vec};
 
 use invofi_common::{
     assert_not_paused, resolve_token, ContractError, FinancingClient, FinancingOffer,
-    InsuranceClient, Invoice, InvoiceStatus, OfferStatus, RegistryClient, ReputationClient,
-    GRACE_PERIOD_SECS, MAX_OFFER_DURATION_SECS, MIN_OFFER_DURATION_SECS,
+    InsuranceClient, Invoice, InvoiceStatus, OfferStatus, PaymentRecord, RegistryClient,
+    ReputationClient, GRACE_PERIOD_SECS, MAX_OFFER_DURATION_SECS, MIN_OFFER_DURATION_SECS,
 };
 
 // ─── Overdue penalty (ADR-0007) ──────────────────────────────────────────────
@@ -16,6 +16,10 @@ const SECS_PER_DAY: u64 = 86_400;
 /// Upper bound on the configurable per-day penalty rate: 500 bps = 5%/day.
 /// Guards against a mis-keyed admin call setting an absurd rate.
 pub const MAX_PENALTY_BPS: u32 = 500;
+
+/// Minimum partial payment threshold in basis points of the principal.
+/// 100 bps = 1%. Prevents dust payments that waste gas.
+const MIN_PARTIAL_PAYMENT_BPS: u32 = 100;
 
 /// Accrued overdue penalty on an obligation, in the offer's currency.
 ///
@@ -91,6 +95,62 @@ fn load_penalty_config(env: &Env) -> (u32, u32) {
         .get(&symbol_short!("pencap"))
         .unwrap_or(0);
     (penalty_bps, cap_bps)
+}
+
+// ─── Payment History ────────────────────────────────────────────────────────
+
+/// Load the payment history for an invoice. Returns an empty Vec if no
+/// payments have been recorded yet.
+fn load_payments(env: &Env, invoice_id: &Symbol) -> Vec<PaymentRecord> {
+    env.storage()
+        .persistent()
+        .get(&(symbol_short!("pays"), invoice_id.clone()))
+        .unwrap_or_else(|| Vec::new(env))
+}
+
+/// Persist the payment history for an invoice.
+fn save_payments(env: &Env, invoice_id: &Symbol, payments: &Vec<PaymentRecord>) {
+    env.storage()
+        .persistent()
+        .set(&(symbol_short!("pays"), invoice_id.clone()), payments);
+}
+
+/// Calculate pro-rata interest on the remaining principal.
+///
+/// Formula: `remaining * rate_bps * days_elapsed / 3_650_000`
+///
+/// The denominator is `365 * 10_000` (days-in-year × bps divisor), which
+/// converts the annual basis-point rate into a per-day fractional multiplier.
+/// Rounding runs in the protocol's favour (toward zero) because integer
+/// division truncates.
+fn pro_rata_interest(remaining_principal: i128, rate_bps: u32, days_elapsed: i128) -> i128 {
+    if remaining_principal <= 0 || rate_bps == 0 || days_elapsed <= 0 {
+        return 0;
+    }
+    remaining_principal
+        .saturating_mul(rate_bps as i128)
+        .saturating_mul(days_elapsed)
+        / 3_650_000
+}
+
+/// Sum the principal repaid across all stored payment records.
+///
+/// The iteration is bounded at `MAX_PAYMENTS_PER_INVOICE` to satisfy the
+/// Soroban Scout `dos_unbounded_operation` detector. In practice an invoice
+/// will never have more than a handful of payments.
+const MAX_PAYMENTS_PER_INVOICE: u32 = 1_000;
+
+fn total_principal_repaid(payments: &Vec<PaymentRecord>) -> i128 {
+    let mut total: i128 = 0;
+    let limit = payments.len().min(MAX_PAYMENTS_PER_INVOICE);
+    let mut i: u32 = 0;
+    while i < limit {
+        if let Some(record) = payments.get(i) {
+            total += record.principal_paid;
+        }
+        i += 1;
+    }
+    total
 }
 
 // ─── Contract ────────────────────────────────────────────────────────────────
@@ -335,22 +395,50 @@ impl RepaymentContract {
 
         let token_id = resolve_token(&env, &offer.currency);
         let token_client = token::TokenClient::new(&env, &token_id);
-        let yield_amount = offer.amount * (offer.interest_rate as i128) / 10_000;
-        let total_due = offer.amount + yield_amount;
+
+        // ── Pro-rata interest calculation (issue #176) ──────────────────────
+        // Load existing payment history to compute remaining principal.
+        let payments = load_payments(&env, &invoice_id);
+        let principal_repaid_so_far = total_principal_repaid(&payments);
+        let remaining_principal = (offer.amount - principal_repaid_so_far).max(0);
+
+        // Calculate pro-rata accrued interest on the remaining principal.
+        // interest = remaining * rate_bps * days_elapsed / 3_650_000
+        let now = env.ledger().timestamp();
+        let days_since_funded = ((now - offer.funded_at) / SECS_PER_DAY) as i128;
+        let accrued_interest = pro_rata_interest(
+            remaining_principal,
+            offer.interest_rate,
+            days_since_funded,
+        );
 
         // Overdue penalty (ADR-0007). Accrues from the invoice due date, on a
-        // base frozen at principal + yield. Zero unless an admin has enabled
-        // it, and zero while the invoice is not yet past due.
+        // base frozen at principal + flat yield. Zero unless an admin has
+        // enabled it, and zero while the invoice is not yet past due.
+        let yield_amount = offer.amount * (offer.interest_rate as i128) / 10_000;
+        let frozen_base = offer.amount + yield_amount;
         let (penalty_bps, cap_bps) = load_penalty_config(&env);
-        let penalty = accrued_penalty(&env, total_due, invoice.due_date, penalty_bps, cap_bps);
-        let total_owed = total_due + penalty;
+        let penalty = accrued_penalty(&env, frozen_base, invoice.due_date, penalty_bps, cap_bps);
 
-        let remaining_balance = total_owed - offer.amount_repaid;
-        if amount > remaining_balance {
+        // Total obligation: remaining principal + accrued interest + penalty.
+        let total_owed = remaining_principal + accrued_interest + penalty;
+
+        // Minimum partial payment check (1% of original principal).
+        // Final payments that settle the remaining balance are exempt.
+        let min_payment = offer.amount * (MIN_PARTIAL_PAYMENT_BPS as i128) / 10_000;
+        if amount < min_payment && amount < total_owed {
+            env.panic_with_error(ContractError::InvalidInput);
+        }
+
+        if amount > total_owed {
             env.panic_with_error(ContractError::InsufficientBalance);
         }
 
-        // Protocol fee deduction
+        // Split the payment: interest first, then principal.
+        let interest_portion = amount.min(accrued_interest);
+        let principal_portion = amount - interest_portion;
+
+        // Protocol fee deduction (applied to the total payment amount)
         let fee_bps: u32 = financing_client.get_fee_bps();
         let fee_amount = amount * (fee_bps as i128) / 10_000;
         let lender_amount = amount - fee_amount;
@@ -366,8 +454,26 @@ impl RepaymentContract {
             token_client.transfer(&repayer, &admin, &fee_amount);
         }
 
+        // ── Store payment record ───────────────────────────────────────────
+        let payment_id = payments.len() + 1;
+        let record = PaymentRecord {
+            payment_id,
+            amount,
+            interest_paid: interest_portion,
+            principal_paid: principal_portion,
+            timestamp: now,
+            payer: repayer.clone(),
+        };
+        let mut updated_payments = payments;
+        updated_payments.push_back(record);
+        save_payments(&env, &invoice_id, &updated_payments);
+
+        // Determine if fully repaid: remaining principal is zero after this payment.
+        let new_remaining = remaining_principal - principal_portion;
+        let fully_repaid = new_remaining <= 0;
+
+        // Update offer.amount_repaid for backward compatibility with financing contract.
         offer.amount_repaid += amount;
-        let fully_repaid = offer.amount_repaid >= total_owed;
         let new_status = if fully_repaid {
             OfferStatus::Repaid
         } else {
@@ -400,6 +506,26 @@ impl RepaymentContract {
             }
         }
 
+        // Emit the appropriate event.
+        if fully_repaid {
+            env.events().publish(
+                (symbol_short!("inv_frp"), invoice_id.clone()),
+                (offer_id.clone(), amount, principal_portion, interest_portion),
+            );
+        } else {
+            env.events().publish(
+                (symbol_short!("parpay"), invoice_id.clone()),
+                (
+                    offer_id.clone(),
+                    amount,
+                    principal_portion,
+                    interest_portion,
+                    new_remaining,
+                ),
+            );
+        }
+
+        // Legacy event for backward compatibility with indexers.
         env.events().publish(
             (symbol_short!("inv_rep"), invoice_id),
             (offer_id, amount, fully_repaid),
@@ -553,10 +679,15 @@ impl RepaymentContract {
         if offer.status == OfferStatus::Repaid || offer.status == OfferStatus::Defaulted {
             return 0;
         }
-        let yield_amount = offer.amount * (offer.interest_rate as i128) / 10_000;
-        let total_due = offer.amount + yield_amount;
+        // Pro-rata: remaining principal + accrued interest + penalty.
+        let payments = load_payments(&env, &offer.invoice_id);
+        let principal_repaid = total_principal_repaid(&payments);
+        let remaining = (offer.amount - principal_repaid).max(0);
+        let now = env.ledger().timestamp();
+        let days = ((now - offer.funded_at) / SECS_PER_DAY) as i128;
+        let interest = pro_rata_interest(remaining, offer.interest_rate, days);
         let penalty = penalty_for_offer(&env, &offer);
-        (total_due + penalty - offer.amount_repaid).max(0)
+        (remaining + interest + penalty).max(0)
     }
 
     /// The overdue penalty accrued on an offer so far (ADR-0007), before
@@ -604,6 +735,57 @@ impl RepaymentContract {
         let financing_client = FinancingClient::new(&env, &financing_addr);
         // CEI: Read-only cross-contract call.
         financing_client.get_installment_due(&offer_id)
+    }
+
+    // ── Partial repayment queries (issue #176) ─────────────────────────────
+
+    /// Return the full payment history for an invoice as a Vec of
+    /// `PaymentRecord`. Empty if no payments have been made.
+    pub fn get_payment_history(env: Env, invoice_id: Symbol) -> Vec<PaymentRecord> {
+        load_payments(&env, &invoice_id)
+    }
+
+    /// Return the remaining principal on an offer (original principal minus
+    /// the sum of all principal portions recorded in payment history).
+    pub fn get_remaining_principal(env: Env, offer_id: Symbol) -> i128 {
+        let financing_addr: Address = env
+            .storage()
+            .instance()
+            .get(&symbol_short!("financing"))
+            .unwrap_or_else(|| panic!("Not initialized"));
+        let financing_client = FinancingClient::new(&env, &financing_addr);
+        // CEI: Read-only cross-contract call.
+        let offer: FinancingOffer = financing_client.get_offer(&offer_id);
+
+        if offer.status == OfferStatus::Repaid || offer.status == OfferStatus::Defaulted {
+            return 0;
+        }
+        let payments = load_payments(&env, &offer.invoice_id);
+        let principal_repaid = total_principal_repaid(&payments);
+        (offer.amount - principal_repaid).max(0)
+    }
+
+    /// Calculate the pro-rata accrued interest on an offer's remaining
+    /// principal. Returns 0 for terminal-status offers.
+    pub fn calculate_accrued_interest(env: Env, offer_id: Symbol) -> i128 {
+        let financing_addr: Address = env
+            .storage()
+            .instance()
+            .get(&symbol_short!("financing"))
+            .unwrap_or_else(|| panic!("Not initialized"));
+        let financing_client = FinancingClient::new(&env, &financing_addr);
+        // CEI: Read-only cross-contract call.
+        let offer: FinancingOffer = financing_client.get_offer(&offer_id);
+
+        if offer.status == OfferStatus::Repaid || offer.status == OfferStatus::Defaulted {
+            return 0;
+        }
+        let payments = load_payments(&env, &offer.invoice_id);
+        let principal_repaid = total_principal_repaid(&payments);
+        let remaining = (offer.amount - principal_repaid).max(0);
+        let now = env.ledger().timestamp();
+        let days = ((now - offer.funded_at) / SECS_PER_DAY) as i128;
+        pro_rata_interest(remaining, offer.interest_rate, days)
     }
 }
 
