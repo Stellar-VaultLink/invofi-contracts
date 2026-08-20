@@ -490,7 +490,14 @@ impl FinancingContract {
             env.panic_with_error(ContractError::InvalidTransition);
         }
 
-        Self::settle_acceptance(&env, offer_id, offer, &registry_client, &invoice)
+        Self::settle_acceptance(
+            &env,
+            offer_id,
+            offer,
+            &registry_client,
+            &invoice,
+            &invoice_originator,
+        )
     }
 
     /// Move the money and flip every piece of state that an accepted offer
@@ -508,10 +515,25 @@ impl FinancingContract {
         offer: FinancingOffer,
         registry_client: &RegistryClient,
         invoice: &Invoice,
+        closer: &Address,
     ) -> FinancingOffer {
         let env = env.clone();
         let mut offers = load_offers(&env);
         let mut offer = offer;
+
+        // Settlement ends any negotiation that was still running, whichever
+        // route reached it: term convergence in amend/counter, or the
+        // originator accepting the standing offer outright. Recording it here
+        // rather than in each caller is what keeps the two routes from
+        // diverging on the negotiation's final state.
+        if !load_negotiation(&env, &offer_id).is_empty() && load_outcome(&env, &offer_id).is_none()
+        {
+            save_outcome(&env, &offer_id, NegotiationStatus::Accepted);
+            env.events().publish(
+                (symbol_short!("neg_clsd"), offer_id.clone()),
+                (NegotiationStatus::Accepted, closer.clone()),
+            );
+        }
 
         // Pull the lender's principal and pay it straight to the business.
         let token_id = resolve_token(&env, &offer.currency);
@@ -1010,13 +1032,14 @@ impl FinancingContract {
         assert_not_blacklisted(env, &offer.lender);
         assert_not_blacklisted(env, &invoice.originator);
 
-        save_outcome(env, offer_id, NegotiationStatus::Accepted);
-        env.events().publish(
-            (symbol_short!("neg_clsd"), offer_id.clone()),
-            (NegotiationStatus::Accepted, closer.clone()),
-        );
-
-        Self::settle_acceptance(env, offer_id.clone(), offer, &registry_client, &invoice)
+        Self::settle_acceptance(
+            env,
+            offer_id.clone(),
+            offer,
+            &registry_client,
+            &invoice,
+            closer,
+        )
     }
 
     /// Emit `neg_clsd` when an offer leaves Pending with a negotiation still
