@@ -175,6 +175,12 @@ Every state-mutating function publishes a Soroban contract event. Topics are
 
 ---
 
+## Error Codes
+
+All contracts emit machine-readable `E_*` error codes (see [docs/error-codes.md](./docs/error-codes.md)). Clients must branch on these stable codes — never on free-text error messages. The SDK maps typed contract errors → codes; the frontend maps codes → UI behaviour (redirect on `E_UNAUTHORIZED`, toast on `E_PAUSED`, etc.).
+
+---
+
 ## Constants
 
 | Constant | Value | Description |
