@@ -78,7 +78,7 @@ register_invoice()  →  create_offer()  →  accept_offer()
 | `get_verification_status(invoice_id, type)` / `get_invoice_verification_status(invoice_id)` | Anyone | Verification status per type, and the conjunction across all three |
 | `get_verifications(invoice_id)` | Anyone | Every attestation recorded against an invoice |
 | `expire_verifications(invoice_id)` | Anyone | Permissionless poke that records lapsed attestations and emits `ver_exp` |
-| `add_verifier / remove_verifier / set_verifier_threshold` | Admin | Trusted verifier set and the m of m-of-n |
+| `add_verifier / remove_verifier / set_verifier_threshold` | Admin | Trusted verifier set and the m-of-n threshold |
 | `set_verification_fee / set_attestation_validity / register_currency` | Admin | Fee in bps (default 0 = off), attestation validity (default 90 days), fee settlement token |
 | `set_rate / set_fee / transfer_admin / pause / unpause` | Admin | Admin controls |
 

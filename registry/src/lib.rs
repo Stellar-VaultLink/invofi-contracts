@@ -153,10 +153,70 @@ fn type_status(
     if approvals >= threshold {
         return VerificationStatus::Verified;
     }
-    if expired {
+    // `Expired` means the type has no live statement left. A type that still
+    // holds a live approval but has not reached the threshold is
+    // under-attested, not expired -- it needs another verifier, not a refresh
+    // of one that already spoke.
+    if expired && approvals == 0 {
         return VerificationStatus::Expired;
     }
     VerificationStatus::Pending
+}
+
+/// Free one slot in a full attestation list so a trusted verifier is never
+/// locked out of an invoice.
+///
+/// The cap is `MAX_VERIFIERS x 3`, which is exactly enough for the whole
+/// active set to speak on all three types — but records from verifiers that
+/// have since been removed keep occupying slots, so a rotated-through set can
+/// fill the list and permanently block admission. History yields to liveness
+/// in a defined order: the oldest record from a verifier that is no longer
+/// trusted goes first (it can no longer count toward any threshold), then the
+/// oldest lapsed record.
+///
+/// The final `None` arm cannot trigger under the current constants, and the
+/// arithmetic is worth stating because it is what makes the cap safe. A list
+/// with nothing evictable is 60 live records held by trusted verifiers, which
+/// at `MAX_VERIFIERS = 20` and three types means every trusted verifier
+/// already holds a record for every type. An incoming attestation therefore
+/// always replaces one of them, freeing its own slot before this is reached.
+/// The arm is kept as the correct behaviour — refuse rather than drop a live
+/// statement from an active verifier — if those constants are ever changed
+/// out of that relationship.
+fn evict_one_slot(env: &Env, list: &Vec<Attestation>, now: u64) -> Vec<Attestation> {
+    let trusted = load_verifiers(env);
+    let is_trusted = |who: &Address| trusted.iter().any(|entry| entry == *who);
+
+    let mut victim: Option<u32> = None;
+    // Pass 1: the oldest record whose verifier has been removed from the set.
+    for (idx, attestation) in list.iter().enumerate() {
+        if !is_trusted(&attestation.verifier) {
+            victim = Some(idx as u32);
+            break;
+        }
+    }
+    // Pass 2: failing that, the oldest record that has lapsed.
+    if victim.is_none() {
+        for (idx, attestation) in list.iter().enumerate() {
+            if effective_status(&attestation, now) == VerificationStatus::Expired {
+                victim = Some(idx as u32);
+                break;
+            }
+        }
+    }
+
+    let victim = match victim {
+        Some(idx) => idx,
+        None => env.panic_with_error(ContractError::InvalidTransition),
+    };
+
+    let mut kept: Vec<Attestation> = Vec::new(env);
+    for (idx, attestation) in list.iter().enumerate() {
+        if idx as u32 != victim {
+            kept.push_back(attestation);
+        }
+    }
+    kept
 }
 
 fn assert_not_blacklisted(env: &Env, address: &Address) {
@@ -1075,7 +1135,7 @@ impl RegistryContract {
             updated.push_back(existing);
         }
         if updated.len() >= MAX_ATTESTATIONS_PER_INVOICE {
-            env.panic_with_error(ContractError::InvalidTransition);
+            updated = evict_one_slot(&env, &updated, now);
         }
         updated.push_back(attestation.clone());
         save_verifications(&env, &invoice_id, &updated);

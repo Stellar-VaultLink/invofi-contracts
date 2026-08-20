@@ -2416,3 +2416,146 @@ fn count_events(env: &Env, name: Symbol) -> u32 {
     }
     count
 }
+
+
+#[test]
+fn test_live_approval_below_threshold_reads_pending_not_expired() {
+    let env = Env::default();
+    env.mock_all_auths();
+    env.ledger().set_timestamp(1_000_000);
+
+    let invoice_id = symbol_short!("vinv20");
+    let (client, admin, _originator, first) = setup_oracle(&env, &invoice_id, 1_000_000_000);
+    let second = Address::generate(&env);
+    client.add_verifier(&admin, &second);
+    client.set_verifier_threshold(&admin, &2u32);
+
+    // Verifier one attests, then lets its attestation lapse.
+    client.attest(
+        &invoice_id,
+        &first,
+        &VerificationType::DocumentHash,
+        &evidence_hash(&env, 1),
+        &true,
+    );
+    env.ledger()
+        .set_timestamp(1_000_000 + 7_776_000 + 1);
+
+    // Verifier two now attests, so the type holds one live approval against a
+    // threshold of two.
+    client.attest(
+        &invoice_id,
+        &second,
+        &VerificationType::DocumentHash,
+        &evidence_hash(&env, 2),
+        &true,
+    );
+
+    // That is under-attested, not expired: it needs a second verifier, not a
+    // refresh of the one that lapsed. Reading Expired here would tell a client
+    // the evidence went stale when in fact it never had enough of it.
+    assert_eq!(
+        client.get_verification_status(&invoice_id, &VerificationType::DocumentHash),
+        VerificationStatus::Pending,
+        "a live approval below threshold must read Pending, not Expired"
+    );
+
+    // And once the threshold is met it flips to Verified.
+    let third = Address::generate(&env);
+    client.add_verifier(&admin, &third);
+    client.attest(
+        &invoice_id,
+        &third,
+        &VerificationType::DocumentHash,
+        &evidence_hash(&env, 3),
+        &true,
+    );
+    assert_eq!(
+        client.get_verification_status(&invoice_id, &VerificationType::DocumentHash),
+        VerificationStatus::Verified
+    );
+}
+
+#[test]
+fn test_expired_reads_only_when_no_live_statement_remains() {
+    let env = Env::default();
+    env.mock_all_auths();
+    env.ledger().set_timestamp(1_000_000);
+
+    let invoice_id = symbol_short!("vinv21");
+    let (client, _admin, _originator, verifier) = setup_oracle(&env, &invoice_id, 1_000_000_000);
+
+    client.attest(
+        &invoice_id,
+        &verifier,
+        &VerificationType::TaxCompliance,
+        &evidence_hash(&env, 1),
+        &true,
+    );
+    env.ledger()
+        .set_timestamp(1_000_000 + 7_776_000 + 1);
+
+    assert_eq!(
+        client.get_verification_status(&invoice_id, &VerificationType::TaxCompliance),
+        VerificationStatus::Expired,
+        "with every statement lapsed the type reads Expired"
+    );
+}
+
+#[test]
+fn test_rotated_out_verifiers_cannot_lock_an_invoice() {
+    let env = Env::default();
+    env.mock_all_auths();
+    env.ledger().set_timestamp(1_000_000);
+
+    let invoice_id = symbol_short!("vinv22");
+    let (client, admin, _originator, _seed) = setup_oracle(&env, &invoice_id, 1_000_000_000);
+
+    // Fill the invoice to its cap by rotating 20 verifiers through the set,
+    // each attesting to all three types before being removed.
+    let types = [
+        VerificationType::DocumentHash,
+        VerificationType::BusinessRegistration,
+        VerificationType::TaxCompliance,
+    ];
+    for round in 0..20u8 {
+        let rotating = Address::generate(&env);
+        client.add_verifier(&admin, &rotating);
+        for (offset, v_type) in types.iter().enumerate() {
+            client.attest(
+                &invoice_id,
+                &rotating,
+                v_type,
+                &evidence_hash(&env, round * 3 + offset as u8),
+                &true,
+            );
+        }
+        client.remove_verifier(&admin, &rotating);
+    }
+    assert_eq!(client.get_verifications(&invoice_id).len(), 60);
+
+    // A freshly trusted verifier must still be able to speak. Before the
+    // eviction policy this reverted, and the invoice could never be verified
+    // again by anyone.
+    let fresh = Address::generate(&env);
+    client.add_verifier(&admin, &fresh);
+    client.attest(
+        &invoice_id,
+        &fresh,
+        &VerificationType::DocumentHash,
+        &evidence_hash(&env, 99),
+        &true,
+    );
+
+    let stored = client.get_verifications(&invoice_id);
+    assert_eq!(stored.len(), 60, "the cap still holds");
+    assert!(
+        stored.iter().any(|a| a.verifier == fresh),
+        "the active verifier's attestation must be recorded"
+    );
+    assert_eq!(
+        client.get_verification_status(&invoice_id, &VerificationType::DocumentHash),
+        VerificationStatus::Verified
+    );
+}
+
