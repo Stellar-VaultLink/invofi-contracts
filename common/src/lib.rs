@@ -25,6 +25,25 @@ pub const MAX_OFFER_DURATION_SECS: u64 = 31_536_000;
 /// Prevents dust invoices that would cost more in fees than they're worth.
 pub const MIN_INVOICE_AMOUNT: i128 = 10_000_000;
 
+/// Default negotiation window for offer amendment / counter-offer. 72 hours,
+/// in seconds. Admin-configurable per deployment via
+/// `set_negotiation_window`.
+pub const DEFAULT_NEGOTIATION_WINDOW_SECS: u64 = 259_200;
+
+/// Lower bound an admin may configure the negotiation window to. 1 hour.
+/// A window shorter than this makes a good-faith reply impractical.
+pub const MIN_NEGOTIATION_WINDOW_SECS: u64 = 3_600;
+
+/// Upper bound an admin may configure the negotiation window to. 30 days.
+/// The window bounds how long a recorded counter-offer stays executable, so
+/// it must not be settable to an effectively unbounded value.
+pub const MAX_NEGOTIATION_WINDOW_SECS: u64 = 2_592_000;
+
+/// Hard cap on negotiation rounds per offer. Every round appends a
+/// `NegotiationRecord` to a single persistent `Vec`, so the cap is what keeps
+/// that entry's size — and the cost of reading it — bounded.
+pub const MAX_NEGOTIATION_ROUNDS: u32 = 20;
+
 // ─── Shared Error Enum ────────────────────────────────────────────────────────
 
 /// Structured error type shared across all InvoFi contracts.
@@ -248,6 +267,62 @@ pub struct PaymentRecord {
     pub payer: Address,
 }
 
+/// Which side of a financing negotiation proposed a set of terms.
+#[contracttype]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[repr(u32)]
+pub enum NegotiationParty {
+    /// The lender who created the offer, via `amend_offer`.
+    Lender = 0,
+    /// The invoice originator, via `counter_offer`.
+    Originator = 1,
+}
+
+/// One round of an offer negotiation: the terms one party put on the table,
+/// and when. The full `Vec<NegotiationRecord>` for an offer is the on-chain
+/// negotiation history.
+///
+/// `(amount, interest_rate, duration)` is the **canonical term tuple**.
+/// Agreement is exact equality of that tuple — there is no rounding or
+/// tolerance, so "these are the same terms" is never a judgement call.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct NegotiationRecord {
+    /// Which side proposed these terms.
+    pub party: NegotiationParty,
+    /// Proposed principal.
+    pub amount: i128,
+    /// Proposed interest rate in basis points.
+    pub interest_rate: u32,
+    /// Proposed financing duration in seconds.
+    pub duration: u64,
+    /// Ledger timestamp at which the round was recorded.
+    pub timestamp: u64,
+}
+
+/// Lifecycle status of an offer negotiation.
+///
+/// `Expired` is **derived on read** from the window deadline: Soroban has no
+/// scheduler, so nothing flips a negotiation to expired on its own. `Closed`
+/// and `Accepted` are persisted, because both are the result of an actual
+/// call.
+#[contracttype]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[repr(u32)]
+pub enum NegotiationStatus {
+    /// No negotiation has been opened on this offer.
+    None = 0,
+    /// Open: within the window, still accepting rounds.
+    Open = 1,
+    /// The window elapsed without agreement. Terminal.
+    Expired = 2,
+    /// A party ended the negotiation early. Terminal.
+    Closed = 3,
+    /// The two sides converged on identical terms and the offer executed.
+    /// Terminal.
+    Accepted = 4,
+}
+
 // ─── Currency Registry ───────────────────────────────────────────────────────
 
 /// Load the currency registry (an empty map if none has been configured).
@@ -314,6 +389,7 @@ pub fn resolve_token(env: &Env, currency: &Symbol) -> Address {
 ///   - exceptions: pause, unpause, contract_is_paused, getters.
 /// - Financing:
 ///   - state-changing: create_offer, withdraw_offer, accept_offer, reject_offer,
+///     amend_offer, counter_offer, close_negotiation, set_negotiation_window,
 ///     update_offer_status, update_offer_amount_repaid, update_lender_stats_repaid,
 ///     update_stats_repaid, register_currency, set_position_token, set_repayment_contract,
 ///     transfer_admin.

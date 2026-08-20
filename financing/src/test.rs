@@ -2,12 +2,12 @@
 extern crate std;
 
 use super::FinancingContract;
-use invofi_common::{InvoiceStatus, OfferStatus};
+use invofi_common::{InvoiceStatus, NegotiationParty, NegotiationStatus, OfferStatus};
 use invofi_registry::RegistryContract;
 use soroban_sdk::{
     symbol_short,
-    testutils::{Address as _, Ledger as _},
-    token, Address, Env,
+    testutils::{Address as _, Events as _, Ledger as _},
+    token, Address, Env, Symbol, TryFromVal,
 };
 
 /// Deploy the registry + financing contracts and return both clients.
@@ -1518,4 +1518,1060 @@ fn test_daily_frequency_period() {
     // Advance past 2 daily periods — installment 1 paid, installment 2 is now due.
     env.ledger().set_timestamp(first_due + 86_400 + 1);
     assert_eq!(fin.get_installment_due(&symbol_short!("off_sc1")), 2);
+}
+
+// ─── Offer negotiation: amendment & counter-offer (issue #180) ───────────────
+//
+// The tests below drive the negotiation through the public contract client —
+// the same entrypoints a wallet calls — and assert on real settlement effects
+// (token balances, registry invoice status), not on internal helpers.
+
+/// Deploy registry + financing wired to a real SEP-41 token, register an
+/// invoice, and post an offer the lender can actually fund. Returns everything
+/// a negotiation test needs.
+#[allow(clippy::type_complexity)]
+fn setup_negotiation<'a>(
+    env: &'a Env,
+    invoice_id: &soroban_sdk::Symbol,
+    offer_id: &soroban_sdk::Symbol,
+    amount: i128,
+) -> (
+    invofi_registry::RegistryContractClient<'a>,
+    super::FinancingContractClient<'a>,
+    Address, // admin
+    Address, // originator
+    Address, // lender
+    Address, // token
+) {
+    let admin = Address::generate(env);
+    let originator = Address::generate(env);
+    let lender = Address::generate(env);
+
+    let token_id = create_token(env);
+    let registry_id = env.register(RegistryContract, (admin.clone(),));
+    let reg = invofi_registry::RegistryContractClient::new(env, &registry_id);
+    let financing_id = env.register(
+        FinancingContract,
+        (admin.clone(), registry_id.clone(), token_id.clone()),
+    );
+    let fin = super::FinancingContractClient::new(env, &financing_id);
+
+    reg.set_financing_contract(&admin, &financing_id);
+    // The lender's standing allowance to the financing contract is their
+    // pre-commitment: it is what makes auto-accept executable without a second
+    // signature from them at match time.
+    mint_and_approve(env, &token_id, &financing_id, &lender, amount * 4);
+
+    reg.register_invoice(
+        invoice_id,
+        &originator,
+        &amount,
+        &symbol_short!("USDC"),
+        &(9_000_000u64),
+    );
+    fin.create_offer(
+        offer_id,
+        invoice_id,
+        &lender,
+        &amount,
+        &symbol_short!("USDC"),
+        &500u32,
+        &(1_296_000u64),
+    );
+
+    (reg, fin, admin, originator, lender, token_id)
+}
+
+#[test]
+fn test_amend_offer_rewrites_terms_and_opens_negotiation() {
+    let env = Env::default();
+    env.mock_all_auths();
+    env.ledger().set_timestamp(1_000_000);
+
+    let invoice_id = symbol_short!("ninv01");
+    let offer_id = symbol_short!("noff01");
+    let (_reg, fin, _admin, _originator, lender, _token) =
+        setup_negotiation(&env, &invoice_id, &offer_id, 1_000_000_000);
+
+    let amended = fin.amend_offer(
+        &offer_id,
+        &lender,
+        &0u32,
+        &900_000_000i128,
+        &400u32,
+        &(2_592_000u64),
+    );
+
+    assert_eq!(amended.status, OfferStatus::Pending);
+    assert_eq!(amended.amount, 900_000_000);
+    assert_eq!(amended.interest_rate, 400);
+    assert_eq!(amended.duration, 2_592_000);
+
+    // The offer itself is the lender's standing position, so a plain read
+    // sees the amended terms.
+    let stored = fin.get_offer(&offer_id);
+    assert_eq!(stored.amount, 900_000_000);
+    assert_eq!(stored.interest_rate, 400);
+
+    let history = fin.get_negotiation(&offer_id);
+    assert_eq!(history.len(), 1);
+    let round = history.get(0).unwrap();
+    assert_eq!(round.party, NegotiationParty::Lender);
+    assert_eq!(round.amount, 900_000_000);
+    assert_eq!(round.interest_rate, 400);
+    assert_eq!(round.duration, 2_592_000);
+    assert_eq!(round.timestamp, 1_000_000);
+
+    assert_eq!(fin.get_negotiation_status(&offer_id), NegotiationStatus::Open);
+    // 72-hour default window, frozen at open.
+    assert_eq!(fin.get_negotiation_deadline(&offer_id), 1_000_000 + 259_200);
+
+    // total_offered follows the amendment by its delta rather than
+    // double-counting the offer.
+    assert_eq!(fin.get_lender_stats(&lender).total_offered, 900_000_000);
+}
+
+#[test]
+#[should_panic(expected = "Error(Contract, #1)")]
+fn test_amend_offer_by_non_lender_panics() {
+    let env = Env::default();
+    env.mock_all_auths();
+    env.ledger().set_timestamp(1_000_000);
+
+    let invoice_id = symbol_short!("ninv02");
+    let offer_id = symbol_short!("noff02");
+    let (_reg, fin, _admin, originator, _lender, _token) =
+        setup_negotiation(&env, &invoice_id, &offer_id, 1_000_000_000);
+
+    fin.amend_offer(
+        &offer_id,
+        &originator,
+        &0u32,
+        &900_000_000i128,
+        &400u32,
+        &(2_592_000u64),
+    );
+}
+
+#[test]
+fn test_counter_offer_records_round_without_touching_the_offer() {
+    let env = Env::default();
+    env.mock_all_auths();
+    env.ledger().set_timestamp(1_000_000);
+
+    let invoice_id = symbol_short!("ninv03");
+    let offer_id = symbol_short!("noff03");
+    let (_reg, fin, _admin, originator, _lender, _token) =
+        setup_negotiation(&env, &invoice_id, &offer_id, 1_000_000_000);
+
+    let returned = fin.counter_offer(
+        &offer_id,
+        &originator,
+        &0u32,
+        &1_000_000_000i128,
+        &250u32,
+        &(1_296_000u64),
+    );
+
+    // A counter-offer is a proposal, not a rewrite: the offer still says what
+    // the lender said.
+    assert_eq!(returned.status, OfferStatus::Pending);
+    assert_eq!(fin.get_offer(&offer_id).interest_rate, 500);
+
+    let history = fin.get_negotiation(&offer_id);
+    assert_eq!(history.len(), 1);
+    assert_eq!(history.get(0).unwrap().party, NegotiationParty::Originator);
+    assert_eq!(history.get(0).unwrap().interest_rate, 250);
+}
+
+#[test]
+#[should_panic(expected = "Error(Contract, #1)")]
+fn test_counter_offer_by_non_originator_panics() {
+    let env = Env::default();
+    env.mock_all_auths();
+    env.ledger().set_timestamp(1_000_000);
+
+    let invoice_id = symbol_short!("ninv04");
+    let offer_id = symbol_short!("noff04");
+    let (_reg, fin, _admin, _originator, _lender, _token) =
+        setup_negotiation(&env, &invoice_id, &offer_id, 1_000_000_000);
+
+    let stranger = Address::generate(&env);
+    fin.counter_offer(
+        &offer_id,
+        &stranger,
+        &0u32,
+        &1_000_000_000i128,
+        &250u32,
+        &(1_296_000u64),
+    );
+}
+
+#[test]
+fn test_negotiation_history_records_every_round_in_order() {
+    let env = Env::default();
+    env.mock_all_auths();
+    env.ledger().set_timestamp(1_000_000);
+
+    let invoice_id = symbol_short!("ninv05");
+    let offer_id = symbol_short!("noff05");
+    let (_reg, fin, _admin, originator, lender, _token) =
+        setup_negotiation(&env, &invoice_id, &offer_id, 1_000_000_000);
+
+    fin.amend_offer(
+        &offer_id,
+        &lender,
+        &0u32,
+        &1_000_000_000i128,
+        &450u32,
+        &(1_296_000u64),
+    );
+    env.ledger().set_timestamp(1_000_100);
+    fin.counter_offer(
+        &offer_id,
+        &originator,
+        &1u32,
+        &1_000_000_000i128,
+        &300u32,
+        &(1_296_000u64),
+    );
+    env.ledger().set_timestamp(1_000_200);
+    fin.amend_offer(
+        &offer_id,
+        &lender,
+        &2u32,
+        &1_000_000_000i128,
+        &380u32,
+        &(1_296_000u64),
+    );
+
+    let history = fin.get_negotiation(&offer_id);
+    assert_eq!(history.len(), 3);
+    assert_eq!(history.get(0).unwrap().party, NegotiationParty::Lender);
+    assert_eq!(history.get(0).unwrap().interest_rate, 450);
+    assert_eq!(history.get(1).unwrap().party, NegotiationParty::Originator);
+    assert_eq!(history.get(1).unwrap().interest_rate, 300);
+    assert_eq!(history.get(2).unwrap().party, NegotiationParty::Lender);
+    assert_eq!(history.get(2).unwrap().interest_rate, 380);
+    assert_eq!(history.get(2).unwrap().timestamp, 1_000_200);
+
+    // The deadline was frozen by the *first* round, not pushed out by later
+    // ones — a negotiation cannot be extended indefinitely by ping-pong.
+    assert_eq!(fin.get_negotiation_deadline(&offer_id), 1_000_000 + 259_200);
+}
+
+// ── Auto-accept: the two paths that actually move money ──────────────────────
+
+#[test]
+fn test_auto_accept_when_lender_amends_onto_the_live_counter_offer() {
+    let env = Env::default();
+    env.mock_all_auths();
+    env.ledger().set_timestamp(1_000_000);
+
+    let invoice_id = symbol_short!("ninv06");
+    let offer_id = symbol_short!("noff06");
+    let amount: i128 = 1_000_000_000;
+    let (reg, fin, _admin, originator, lender, token_id) =
+        setup_negotiation(&env, &invoice_id, &offer_id, amount);
+
+    // Originator counters at a lower rate and a shorter duration.
+    fin.counter_offer(
+        &offer_id,
+        &originator,
+        &0u32,
+        &(amount),
+        &250u32,
+        &(864_000u64),
+    );
+
+    let token_client = token::TokenClient::new(&env, &token_id);
+    assert_eq!(token_client.balance(&originator), 0);
+
+    // The lender meets it exactly. Agreement -> settlement in this same call,
+    // with no further signature from the originator.
+    let settled = fin.amend_offer(&offer_id, &lender, &1u32, &(amount), &250u32, &(864_000u64));
+
+    assert_eq!(settled.status, OfferStatus::Accepted);
+    assert_eq!(settled.interest_rate, 250);
+    assert_eq!(settled.duration, 864_000);
+    assert_eq!(settled.funded_at, 1_000_000);
+
+    // The headline, proved from the outside: the invoice is financed and the
+    // principal is in the business's account.
+    assert_eq!(reg.get_invoice(&invoice_id).status, InvoiceStatus::Financed);
+    assert_eq!(token_client.balance(&originator), amount);
+
+    assert_eq!(
+        fin.get_negotiation_status(&offer_id),
+        NegotiationStatus::Accepted
+    );
+    assert_eq!(fin.get_negotiation(&offer_id).len(), 2);
+}
+
+#[test]
+fn test_auto_accept_when_originator_counters_at_the_standing_terms() {
+    let env = Env::default();
+    env.mock_all_auths();
+    env.ledger().set_timestamp(1_000_000);
+
+    let invoice_id = symbol_short!("ninv07");
+    let offer_id = symbol_short!("noff07");
+    let amount: i128 = 1_000_000_000;
+    let (reg, fin, _admin, originator, lender, token_id) =
+        setup_negotiation(&env, &invoice_id, &offer_id, amount);
+
+    // Lender amends down to 300 bps; the originator takes exactly that.
+    fin.amend_offer(
+        &offer_id,
+        &lender,
+        &0u32,
+        &(amount),
+        &300u32,
+        &(1_296_000u64),
+    );
+    let settled = fin.counter_offer(
+        &offer_id,
+        &originator,
+        &1u32,
+        &(amount),
+        &300u32,
+        &(1_296_000u64),
+    );
+
+    assert_eq!(settled.status, OfferStatus::Accepted);
+    assert_eq!(reg.get_invoice(&invoice_id).status, InvoiceStatus::Financed);
+    let token_client = token::TokenClient::new(&env, &token_id);
+    assert_eq!(token_client.balance(&originator), amount);
+    assert_eq!(
+        fin.get_negotiation_status(&offer_id),
+        NegotiationStatus::Accepted
+    );
+}
+
+#[test]
+fn test_near_miss_terms_do_not_auto_accept() {
+    let env = Env::default();
+    env.mock_all_auths();
+    env.ledger().set_timestamp(1_000_000);
+
+    let invoice_id = symbol_short!("ninv08");
+    let offer_id = symbol_short!("noff08");
+    let amount: i128 = 1_000_000_000;
+    let (reg, fin, _admin, originator, lender, token_id) =
+        setup_negotiation(&env, &invoice_id, &offer_id, amount);
+
+    fin.counter_offer(
+        &offer_id,
+        &originator,
+        &0u32,
+        &(amount),
+        &250u32,
+        &(864_000u64),
+    );
+    // One basis point off is not agreement.
+    let still_open = fin.amend_offer(&offer_id, &lender, &1u32, &(amount), &251u32, &(864_000u64));
+
+    assert_eq!(still_open.status, OfferStatus::Pending);
+    assert_eq!(reg.get_invoice(&invoice_id).status, InvoiceStatus::Pending);
+    let token_client = token::TokenClient::new(&env, &token_id);
+    assert_eq!(token_client.balance(&originator), 0);
+    assert_eq!(fin.get_negotiation_status(&offer_id), NegotiationStatus::Open);
+}
+
+#[test]
+fn test_superseded_counter_offer_is_not_executable() {
+    // Adversarial: the originator proposes T1, then moves off it to T2. A
+    // lender who later amends onto T1 must not be able to settle against a
+    // proposal the originator has abandoned.
+    let env = Env::default();
+    env.mock_all_auths();
+    env.ledger().set_timestamp(1_000_000);
+
+    let invoice_id = symbol_short!("ninv09");
+    let offer_id = symbol_short!("noff09");
+    let amount: i128 = 1_000_000_000;
+    let (reg, fin, _admin, originator, lender, token_id) =
+        setup_negotiation(&env, &invoice_id, &offer_id, amount);
+
+    fin.counter_offer(
+        &offer_id,
+        &originator,
+        &0u32,
+        &(amount),
+        &200u32,
+        &(864_000u64),
+    );
+    fin.counter_offer(
+        &offer_id,
+        &originator,
+        &1u32,
+        &(amount),
+        &220u32,
+        &(864_000u64),
+    );
+
+    // The lender reaches for the abandoned T1.
+    let result = fin.amend_offer(&offer_id, &lender, &2u32, &(amount), &200u32, &(864_000u64));
+
+    assert_eq!(result.status, OfferStatus::Pending);
+    assert_eq!(reg.get_invoice(&invoice_id).status, InvoiceStatus::Pending);
+    assert_eq!(token::TokenClient::new(&env, &token_id).balance(&originator), 0);
+}
+
+// ── Optimistic concurrency ───────────────────────────────────────────────────
+
+#[test]
+#[should_panic(expected = "Error(Contract, #6)")]
+fn test_stale_round_index_is_rejected() {
+    // Adversarial: the lender reads the negotiation at round 0, the originator
+    // counters before the lender's transaction lands, and the lender's
+    // amendment would otherwise apply to a term-set that changed underneath
+    // it — and could auto-execute against a counter-offer it never saw.
+    let env = Env::default();
+    env.mock_all_auths();
+    env.ledger().set_timestamp(1_000_000);
+
+    let invoice_id = symbol_short!("ninv10");
+    let offer_id = symbol_short!("noff10");
+    let (_reg, fin, _admin, originator, lender, _token) =
+        setup_negotiation(&env, &invoice_id, &offer_id, 1_000_000_000);
+
+    fin.counter_offer(
+        &offer_id,
+        &originator,
+        &0u32,
+        &1_000_000_000i128,
+        &250u32,
+        &(864_000u64),
+    );
+
+    // Lender still believes the history is empty.
+    fin.amend_offer(
+        &offer_id,
+        &lender,
+        &0u32,
+        &1_000_000_000i128,
+        &400u32,
+        &(1_296_000u64),
+    );
+}
+
+#[test]
+#[should_panic(expected = "Error(Contract, #6)")]
+fn test_counter_offer_with_stale_round_index_is_rejected() {
+    let env = Env::default();
+    env.mock_all_auths();
+    env.ledger().set_timestamp(1_000_000);
+
+    let invoice_id = symbol_short!("ninv11");
+    let offer_id = symbol_short!("noff11");
+    let (_reg, fin, _admin, originator, lender, _token) =
+        setup_negotiation(&env, &invoice_id, &offer_id, 1_000_000_000);
+
+    fin.amend_offer(
+        &offer_id,
+        &lender,
+        &0u32,
+        &1_000_000_000i128,
+        &400u32,
+        &(1_296_000u64),
+    );
+    fin.counter_offer(
+        &offer_id,
+        &originator,
+        &0u32,
+        &1_000_000_000i128,
+        &250u32,
+        &(864_000u64),
+    );
+}
+
+// ── Expiry ───────────────────────────────────────────────────────────────────
+
+#[test]
+fn test_negotiation_status_expires_on_read_without_any_call() {
+    let env = Env::default();
+    env.mock_all_auths();
+    env.ledger().set_timestamp(1_000_000);
+
+    let invoice_id = symbol_short!("ninv12");
+    let offer_id = symbol_short!("noff12");
+    let (_reg, fin, _admin, _originator, lender, _token) =
+        setup_negotiation(&env, &invoice_id, &offer_id, 1_000_000_000);
+
+    fin.amend_offer(
+        &offer_id,
+        &lender,
+        &0u32,
+        &1_000_000_000i128,
+        &400u32,
+        &(1_296_000u64),
+    );
+
+    // On the deadline itself the negotiation is still open.
+    env.ledger().set_timestamp(1_000_000 + 259_200);
+    assert_eq!(fin.get_negotiation_status(&offer_id), NegotiationStatus::Open);
+
+    // One second later it is expired — derived, with nothing having been
+    // called in between.
+    env.ledger().set_timestamp(1_000_000 + 259_201);
+    assert_eq!(
+        fin.get_negotiation_status(&offer_id),
+        NegotiationStatus::Expired
+    );
+}
+
+#[test]
+#[should_panic(expected = "Error(Contract, #3)")]
+fn test_amend_after_expiry_panics() {
+    let env = Env::default();
+    env.mock_all_auths();
+    env.ledger().set_timestamp(1_000_000);
+
+    let invoice_id = symbol_short!("ninv13");
+    let offer_id = symbol_short!("noff13");
+    let (_reg, fin, _admin, _originator, lender, _token) =
+        setup_negotiation(&env, &invoice_id, &offer_id, 1_000_000_000);
+
+    fin.amend_offer(
+        &offer_id,
+        &lender,
+        &0u32,
+        &1_000_000_000i128,
+        &400u32,
+        &(1_296_000u64),
+    );
+
+    env.ledger().set_timestamp(1_000_000 + 259_201);
+    fin.amend_offer(
+        &offer_id,
+        &lender,
+        &1u32,
+        &1_000_000_000i128,
+        &350u32,
+        &(1_296_000u64),
+    );
+}
+
+#[test]
+#[should_panic(expected = "Error(Contract, #3)")]
+fn test_expired_counter_offer_cannot_be_executed_by_the_lender() {
+    // The commitment a counter-offer represents is bounded by the window: an
+    // originator who proposed terms three days ago is not still on the hook
+    // for them.
+    let env = Env::default();
+    env.mock_all_auths();
+    env.ledger().set_timestamp(1_000_000);
+
+    let invoice_id = symbol_short!("ninv14");
+    let offer_id = symbol_short!("noff14");
+    let amount: i128 = 1_000_000_000;
+    let (_reg, fin, _admin, originator, lender, _token) =
+        setup_negotiation(&env, &invoice_id, &offer_id, amount);
+
+    fin.counter_offer(
+        &offer_id,
+        &originator,
+        &0u32,
+        &(amount),
+        &250u32,
+        &(864_000u64),
+    );
+
+    env.ledger().set_timestamp(1_000_000 + 259_201);
+    fin.amend_offer(&offer_id, &lender, &1u32, &(amount), &250u32, &(864_000u64));
+}
+
+#[test]
+fn test_close_negotiation_after_expiry_is_permissionless() {
+    let env = Env::default();
+    env.mock_all_auths();
+    env.ledger().set_timestamp(1_000_000);
+
+    let invoice_id = symbol_short!("ninv15");
+    let offer_id = symbol_short!("noff15");
+    let (_reg, fin, _admin, _originator, lender, _token) =
+        setup_negotiation(&env, &invoice_id, &offer_id, 1_000_000_000);
+
+    fin.amend_offer(
+        &offer_id,
+        &lender,
+        &0u32,
+        &1_000_000_000i128,
+        &400u32,
+        &(1_296_000u64),
+    );
+
+    env.ledger().set_timestamp(1_000_000 + 300_000);
+    let keeper = Address::generate(&env);
+    let outcome = fin.close_negotiation(&offer_id, &keeper);
+
+    assert_eq!(outcome, NegotiationStatus::Expired);
+    assert_eq!(
+        fin.get_negotiation_status(&offer_id),
+        NegotiationStatus::Expired
+    );
+}
+
+#[test]
+#[should_panic(expected = "Error(Contract, #3)")]
+fn test_close_negotiation_twice_panics() {
+    let env = Env::default();
+    env.mock_all_auths();
+    env.ledger().set_timestamp(1_000_000);
+
+    let invoice_id = symbol_short!("ninv16");
+    let offer_id = symbol_short!("noff16");
+    let (_reg, fin, _admin, _originator, lender, _token) =
+        setup_negotiation(&env, &invoice_id, &offer_id, 1_000_000_000);
+
+    fin.amend_offer(
+        &offer_id,
+        &lender,
+        &0u32,
+        &1_000_000_000i128,
+        &400u32,
+        &(1_296_000u64),
+    );
+    fin.close_negotiation(&offer_id, &lender);
+    fin.close_negotiation(&offer_id, &lender);
+}
+
+// ── Early close / revocation ─────────────────────────────────────────────────
+
+#[test]
+#[should_panic(expected = "Error(Contract, #3)")]
+fn test_originator_can_revoke_a_counter_offer_before_the_window_ends() {
+    let env = Env::default();
+    env.mock_all_auths();
+    env.ledger().set_timestamp(1_000_000);
+
+    let invoice_id = symbol_short!("ninv17");
+    let offer_id = symbol_short!("noff17");
+    let amount: i128 = 1_000_000_000;
+    let (_reg, fin, _admin, originator, lender, _token) =
+        setup_negotiation(&env, &invoice_id, &offer_id, amount);
+
+    fin.counter_offer(
+        &offer_id,
+        &originator,
+        &0u32,
+        &(amount),
+        &250u32,
+        &(864_000u64),
+    );
+    assert_eq!(
+        fin.close_negotiation(&offer_id, &originator),
+        NegotiationStatus::Closed
+    );
+
+    // The lender can no longer settle against the revoked proposal.
+    fin.amend_offer(&offer_id, &lender, &1u32, &(amount), &250u32, &(864_000u64));
+}
+
+#[test]
+#[should_panic(expected = "Error(Contract, #1)")]
+fn test_stranger_cannot_close_an_open_negotiation() {
+    let env = Env::default();
+    env.mock_all_auths();
+    env.ledger().set_timestamp(1_000_000);
+
+    let invoice_id = symbol_short!("ninv18");
+    let offer_id = symbol_short!("noff18");
+    let (_reg, fin, _admin, _originator, lender, _token) =
+        setup_negotiation(&env, &invoice_id, &offer_id, 1_000_000_000);
+
+    fin.amend_offer(
+        &offer_id,
+        &lender,
+        &0u32,
+        &1_000_000_000i128,
+        &400u32,
+        &(1_296_000u64),
+    );
+    fin.close_negotiation(&offer_id, &Address::generate(&env));
+}
+
+#[test]
+#[should_panic(expected = "Error(Contract, #2)")]
+fn test_close_negotiation_that_was_never_opened_panics() {
+    let env = Env::default();
+    env.mock_all_auths();
+    env.ledger().set_timestamp(1_000_000);
+
+    let invoice_id = symbol_short!("ninv19");
+    let offer_id = symbol_short!("noff19");
+    let (_reg, fin, _admin, _originator, lender, _token) =
+        setup_negotiation(&env, &invoice_id, &offer_id, 1_000_000_000);
+
+    fin.close_negotiation(&offer_id, &lender);
+}
+
+#[test]
+fn test_withdrawing_the_offer_ends_its_negotiation() {
+    let env = Env::default();
+    env.mock_all_auths();
+    env.ledger().set_timestamp(1_000_000);
+
+    let invoice_id = symbol_short!("ninv20");
+    let offer_id = symbol_short!("noff20");
+    let (_reg, fin, _admin, _originator, lender, _token) =
+        setup_negotiation(&env, &invoice_id, &offer_id, 1_000_000_000);
+
+    fin.amend_offer(
+        &offer_id,
+        &lender,
+        &0u32,
+        &1_000_000_000i128,
+        &400u32,
+        &(1_296_000u64),
+    );
+    fin.withdraw_offer(&offer_id, &lender);
+
+    assert_eq!(
+        fin.get_negotiation_status(&offer_id),
+        NegotiationStatus::Closed
+    );
+}
+
+// ── Guards ───────────────────────────────────────────────────────────────────
+
+#[test]
+#[should_panic(expected = "Error(Contract, #3)")]
+fn test_amend_after_acceptance_panics() {
+    let env = Env::default();
+    env.mock_all_auths();
+    env.ledger().set_timestamp(1_000_000);
+
+    let invoice_id = symbol_short!("ninv21");
+    let offer_id = symbol_short!("noff21");
+    let amount: i128 = 1_000_000_000;
+    let (_reg, fin, _admin, originator, lender, _token) =
+        setup_negotiation(&env, &invoice_id, &offer_id, amount);
+
+    fin.accept_offer(&offer_id, &originator);
+    fin.amend_offer(&offer_id, &lender, &0u32, &(amount), &400u32, &(1_296_000u64));
+}
+
+#[test]
+#[should_panic(expected = "Error(Contract, #6)")]
+fn test_amend_cannot_reach_terms_create_offer_would_reject() {
+    let env = Env::default();
+    env.mock_all_auths();
+    env.ledger().set_timestamp(1_000_000);
+
+    let invoice_id = symbol_short!("ninv22");
+    let offer_id = symbol_short!("noff22");
+    let (_reg, fin, _admin, _originator, lender, _token) =
+        setup_negotiation(&env, &invoice_id, &offer_id, 1_000_000_000);
+
+    // 10 001 bps is above the create_offer ceiling.
+    fin.amend_offer(
+        &offer_id,
+        &lender,
+        &0u32,
+        &1_000_000_000i128,
+        &10_001u32,
+        &(1_296_000u64),
+    );
+}
+
+#[test]
+#[should_panic(expected = "Error(Contract, #6)")]
+fn test_counter_offer_below_minimum_duration_panics() {
+    let env = Env::default();
+    env.mock_all_auths();
+    env.ledger().set_timestamp(1_000_000);
+
+    let invoice_id = symbol_short!("ninv23");
+    let offer_id = symbol_short!("noff23");
+    let (_reg, fin, _admin, originator, _lender, _token) =
+        setup_negotiation(&env, &invoice_id, &offer_id, 1_000_000_000);
+
+    fin.counter_offer(
+        &offer_id,
+        &originator,
+        &0u32,
+        &1_000_000_000i128,
+        &250u32,
+        &(86_399u64),
+    );
+}
+
+#[test]
+#[should_panic(expected = "Error(Contract, #3)")]
+fn test_negotiation_round_cap_is_enforced() {
+    let env = Env::default();
+    env.mock_all_auths();
+    env.ledger().set_timestamp(1_000_000);
+
+    let invoice_id = symbol_short!("ninv24");
+    let offer_id = symbol_short!("noff24");
+    let (_reg, fin, _admin, originator, lender, _token) =
+        setup_negotiation(&env, &invoice_id, &offer_id, 1_000_000_000);
+
+    // 20 rounds fit; the 21st does not. Terms differ every round so nothing
+    // auto-accepts along the way.
+    for round in 0u32..20 {
+        let rate = 400 + round;
+        if round % 2 == 0 {
+            fin.amend_offer(
+                &offer_id,
+                &lender,
+                &round,
+                &1_000_000_000i128,
+                &rate,
+                &(1_296_000u64),
+            );
+        } else {
+            fin.counter_offer(
+                &offer_id,
+                &originator,
+                &round,
+                &900_000_000i128,
+                &rate,
+                &(1_296_000u64),
+            );
+        }
+    }
+    assert_eq!(fin.get_negotiation(&offer_id).len(), 20);
+
+    fin.amend_offer(
+        &offer_id,
+        &lender,
+        &20u32,
+        &1_000_000_000i128,
+        &499u32,
+        &(1_296_000u64),
+    );
+}
+
+#[test]
+#[should_panic(expected = "Error(Contract, #4)")]
+fn test_amend_offer_is_pause_guarded() {
+    let env = Env::default();
+    env.mock_all_auths();
+    env.ledger().set_timestamp(1_000_000);
+
+    let invoice_id = symbol_short!("ninv25");
+    let offer_id = symbol_short!("noff25");
+    let (_reg, fin, admin, _originator, lender, _token) =
+        setup_negotiation(&env, &invoice_id, &offer_id, 1_000_000_000);
+
+    fin.pause(&admin);
+    fin.amend_offer(
+        &offer_id,
+        &lender,
+        &0u32,
+        &1_000_000_000i128,
+        &400u32,
+        &(1_296_000u64),
+    );
+}
+
+#[test]
+#[should_panic(expected = "Error(Contract, #4)")]
+fn test_counter_offer_is_pause_guarded() {
+    let env = Env::default();
+    env.mock_all_auths();
+    env.ledger().set_timestamp(1_000_000);
+
+    let invoice_id = symbol_short!("ninv26");
+    let offer_id = symbol_short!("noff26");
+    let (_reg, fin, admin, originator, _lender, _token) =
+        setup_negotiation(&env, &invoice_id, &offer_id, 1_000_000_000);
+
+    fin.pause(&admin);
+    fin.counter_offer(
+        &offer_id,
+        &originator,
+        &0u32,
+        &1_000_000_000i128,
+        &250u32,
+        &(1_296_000u64),
+    );
+}
+
+// ── Window configuration ─────────────────────────────────────────────────────
+
+#[test]
+fn test_negotiation_window_is_configurable_and_deadlines_are_frozen() {
+    let env = Env::default();
+    env.mock_all_auths();
+    env.ledger().set_timestamp(1_000_000);
+
+    let invoice_id = symbol_short!("ninv27");
+    let offer_id = symbol_short!("noff27");
+    let (_reg, fin, admin, _originator, lender, _token) =
+        setup_negotiation(&env, &invoice_id, &offer_id, 1_000_000_000);
+
+    assert_eq!(fin.get_negotiation_window(), 259_200);
+
+    fin.set_negotiation_window(&admin, &7_200u64);
+    assert_eq!(fin.get_negotiation_window(), 7_200);
+
+    fin.amend_offer(
+        &offer_id,
+        &lender,
+        &0u32,
+        &1_000_000_000i128,
+        &400u32,
+        &(1_296_000u64),
+    );
+    assert_eq!(fin.get_negotiation_deadline(&offer_id), 1_007_200);
+
+    // Widening the window afterwards must not resurrect a negotiation that is
+    // already running against a frozen deadline.
+    fin.set_negotiation_window(&admin, &2_592_000u64);
+    assert_eq!(fin.get_negotiation_deadline(&offer_id), 1_007_200);
+    env.ledger().set_timestamp(1_007_201);
+    assert_eq!(
+        fin.get_negotiation_status(&offer_id),
+        NegotiationStatus::Expired
+    );
+}
+
+#[test]
+#[should_panic(expected = "Error(Contract, #1)")]
+fn test_set_negotiation_window_is_admin_only() {
+    let env = Env::default();
+    env.mock_all_auths();
+    env.ledger().set_timestamp(1_000_000);
+
+    let invoice_id = symbol_short!("ninv28");
+    let offer_id = symbol_short!("noff28");
+    let (_reg, fin, _admin, _originator, lender, _token) =
+        setup_negotiation(&env, &invoice_id, &offer_id, 1_000_000_000);
+
+    fin.set_negotiation_window(&lender, &7_200u64);
+}
+
+#[test]
+#[should_panic(expected = "Error(Contract, #6)")]
+fn test_negotiation_window_below_minimum_panics() {
+    let env = Env::default();
+    env.mock_all_auths();
+    env.ledger().set_timestamp(1_000_000);
+
+    let invoice_id = symbol_short!("ninv29");
+    let offer_id = symbol_short!("noff29");
+    let (_reg, fin, admin, _originator, _lender, _token) =
+        setup_negotiation(&env, &invoice_id, &offer_id, 1_000_000_000);
+
+    fin.set_negotiation_window(&admin, &3_599u64);
+}
+
+#[test]
+#[should_panic(expected = "Error(Contract, #6)")]
+fn test_negotiation_window_above_maximum_panics() {
+    let env = Env::default();
+    env.mock_all_auths();
+    env.ledger().set_timestamp(1_000_000);
+
+    let invoice_id = symbol_short!("ninv30");
+    let offer_id = symbol_short!("noff30");
+    let (_reg, fin, admin, _originator, _lender, _token) =
+        setup_negotiation(&env, &invoice_id, &offer_id, 1_000_000_000);
+
+    fin.set_negotiation_window(&admin, &2_592_001u64);
+}
+
+// ── Events ───────────────────────────────────────────────────────────────────
+
+/// How many published events carry `name` as their first topic.
+fn count_events(env: &Env, name: Symbol) -> u32 {
+    let mut count = 0;
+    for (_contract, topics, _data) in env.events().all().iter() {
+        if let Some(first) = topics.get(0) {
+            if let Ok(topic) = Symbol::try_from_val(env, &first) {
+                if topic == name {
+                    count += 1;
+                }
+            }
+        }
+    }
+    count
+}
+
+#[test]
+fn test_negotiation_emits_amend_counter_and_close_events() {
+    let env = Env::default();
+    env.mock_all_auths();
+    env.ledger().set_timestamp(1_000_000);
+
+    let invoice_id = symbol_short!("ninv31");
+    let offer_id = symbol_short!("noff31");
+    let (_reg, fin, _admin, originator, lender, _token) =
+        setup_negotiation(&env, &invoice_id, &offer_id, 1_000_000_000);
+
+    // The test harness exposes the events of the most recent invocation, so
+    // each call is checked as it lands rather than all of them at the end.
+    fin.amend_offer(
+        &offer_id,
+        &lender,
+        &0u32,
+        &1_000_000_000i128,
+        &400u32,
+        &(1_296_000u64),
+    );
+    assert_eq!(
+        count_events(&env, symbol_short!("off_amd")),
+        1,
+        "amend_offer must emit off_amd"
+    );
+
+    fin.counter_offer(
+        &offer_id,
+        &originator,
+        &1u32,
+        &1_000_000_000i128,
+        &250u32,
+        &(864_000u64),
+    );
+    assert_eq!(
+        count_events(&env, symbol_short!("ctr_off")),
+        1,
+        "counter_offer must emit ctr_off"
+    );
+
+    fin.close_negotiation(&offer_id, &originator);
+    assert_eq!(
+        count_events(&env, symbol_short!("neg_clsd")),
+        1,
+        "close_negotiation must emit neg_clsd"
+    );
+}
+
+#[test]
+fn test_auto_accept_emits_negotiation_closed() {
+    let env = Env::default();
+    env.mock_all_auths();
+    env.ledger().set_timestamp(1_000_000);
+
+    let invoice_id = symbol_short!("ninv32");
+    let offer_id = symbol_short!("noff32");
+    let amount: i128 = 1_000_000_000;
+    let (_reg, fin, _admin, originator, lender, _token) =
+        setup_negotiation(&env, &invoice_id, &offer_id, amount);
+
+    fin.counter_offer(
+        &offer_id,
+        &originator,
+        &0u32,
+        &(amount),
+        &250u32,
+        &(864_000u64),
+    );
+    fin.amend_offer(&offer_id, &lender, &1u32, &(amount), &250u32, &(864_000u64));
+
+    assert_eq!(
+        count_events(&env, symbol_short!("neg_clsd")),
+        1,
+        "auto-accept must emit neg_clsd exactly once"
+    );
+    assert_eq!(
+        count_events(&env, symbol_short!("off_acc")),
+        1,
+        "auto-accept must run the ordinary off_acc settlement path"
+    );
 }
