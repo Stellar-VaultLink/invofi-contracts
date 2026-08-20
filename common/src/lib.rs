@@ -537,6 +537,16 @@ pub trait InsuranceInterface {
     /// is in `Defaulted` status before moving any funds. Returns the amount
     /// actually paid.
     fn pay_out(env: Env, invoice_id: Symbol, beneficiary: Address, amount: i128) -> i128;
+
+    /// Claim a partial payout from the insurance pool for a specific offer.
+    /// The claim amount is bounded by the reserved amount for this offer and
+    /// the pool's available balance. Returns (paid, remaining_reserved).
+    fn claim_payout(
+        env: Env,
+        offer_id: Symbol,
+        lender: Address,
+        amount: i128,
+    ) -> (i128, i128);
 }
 
 // ─── Reputation Cross-Contract Interface ─────────────────────────────────────

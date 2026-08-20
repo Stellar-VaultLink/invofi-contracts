@@ -3,7 +3,7 @@
 extern crate std;
 
 use super::InsuranceContract;
-use soroban_sdk::{testutils::{Address as _, Ledger}, token, Address, Env};
+use soroban_sdk::{symbol_short, testutils::{Address as _, Ledger}, token, Address, Env};
 
 /// Deploy the insurance contract + a staking token, and initialize.
 fn setup<'a>(
