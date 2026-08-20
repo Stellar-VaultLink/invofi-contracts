@@ -7,7 +7,9 @@
 
 #![no_std]
 
-use soroban_sdk::{contractclient, contracterror, contracttype, symbol_short, Address, Env, Map, Symbol};
+use soroban_sdk::{
+    contractclient, contracterror, contracttype, symbol_short, Address, BytesN, Env, Map, Symbol,
+};
 
 // ─── Constants ───────────────────────────────────────────────────────────────
 
@@ -43,6 +45,37 @@ pub const MAX_NEGOTIATION_WINDOW_SECS: u64 = 2_592_000;
 /// `NegotiationRecord` to a single persistent `Vec`, so the cap is what keeps
 /// that entry's size — and the cost of reading it — bounded.
 pub const MAX_NEGOTIATION_ROUNDS: u32 = 20;
+/// Default validity period for a verification attestation. 90 days, in
+/// seconds. Admin-configurable per deployment via `set_attestation_validity`.
+pub const DEFAULT_ATTESTATION_VALIDITY_SECS: u64 = 7_776_000;
+
+/// Lower bound an admin may configure attestation validity to. 1 day.
+pub const MIN_ATTESTATION_VALIDITY_SECS: u64 = 86_400;
+
+/// Upper bound an admin may configure attestation validity to. 365 days.
+/// An attestation is a snapshot of an off-chain fact that can change without
+/// anyone telling the chain, so it must not be settable to never expire.
+pub const MAX_ATTESTATION_VALIDITY_SECS: u64 = 31_536_000;
+
+/// Maximum verification fee an admin may configure, in basis points (5%) —
+/// the same ceiling `set_fee` applies to the protocol fee.
+pub const MAX_VERIFICATION_FEE_BPS: u32 = 500;
+
+/// Maximum size of the trusted verifier set.
+pub const MAX_VERIFIERS: u32 = 20;
+
+/// Maximum attestations retained per invoice. One per (verifier, type) keeps
+/// this at `MAX_VERIFIERS x 3` for the current verifier set; the cap also
+/// bounds the residue left behind by verifiers who have since been removed.
+pub const MAX_ATTESTATIONS_PER_INVOICE: u32 = 60;
+
+/// The off-chain facts the verification oracle attests to. Used to decide
+/// whether an invoice is fully verified — every type must clear the threshold.
+pub const VERIFICATION_TYPES: [VerificationType; 3] = [
+    VerificationType::DocumentHash,
+    VerificationType::BusinessRegistration,
+    VerificationType::TaxCompliance,
+];
 
 // ─── Shared Error Enum ────────────────────────────────────────────────────────
 
@@ -321,6 +354,66 @@ pub enum NegotiationStatus {
     /// The two sides converged on identical terms and the offer executed.
     /// Terminal.
     Accepted = 4,
+}
+
+/// The class of off-chain fact an attestation speaks to.
+#[contracttype]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[repr(u32)]
+pub enum VerificationType {
+    /// The hash of the invoice document itself matches what the originator
+    /// registered off-chain.
+    DocumentHash = 0,
+    /// The originator is a registered business in good standing.
+    BusinessRegistration = 1,
+    /// The originator is current on its tax obligations.
+    TaxCompliance = 2,
+}
+
+/// Verification state of an invoice, or of one verification type on it.
+///
+/// `Expired` is **derived on read** from `valid_until`: Soroban has no
+/// scheduler, so nothing flips an attestation to expired on its own.
+#[contracttype]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[repr(u32)]
+pub enum VerificationStatus {
+    /// No attestation yet, or not enough of them to clear the threshold.
+    Pending = 0,
+    /// Enough distinct verifiers attested affirmatively, none of them
+    /// expired, and no verifier rejected.
+    Verified = 1,
+    /// A verifier attested negatively. A live rejection outranks any number
+    /// of approvals.
+    Rejected = 2,
+    /// Every attestation that existed has passed its `valid_until`.
+    Expired = 3,
+}
+
+/// A verifier's signed statement about one off-chain fact, stored on-chain.
+///
+/// The contract cannot check that `hash` corresponds to a real invoice
+/// document, or that a business registration is genuine. What it does is
+/// authenticate that a *trusted verifier* said so and keep the statement
+/// tamper-evident and timestamped — see ADR-0009 for that trust boundary.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct Attestation {
+    /// The verifier who submitted it.
+    pub verifier: Address,
+    /// Which off-chain fact it speaks to.
+    pub v_type: VerificationType,
+    /// Hash of the off-chain evidence (document, registration record, filing).
+    pub hash: BytesN<32>,
+    /// Ledger timestamp at which it was submitted.
+    pub timestamp: u64,
+    /// Ledger timestamp after which it no longer counts.
+    pub valid_until: u64,
+    /// `Verified` or `Rejected` as submitted; flipped to `Expired` once
+    /// `expire_verifications` observes the lapse. Reads derive expiry from
+    /// `valid_until` regardless, so this field lagging never makes a read
+    /// wrong.
+    pub status: VerificationStatus,
 }
 
 // ─── Currency Registry ───────────────────────────────────────────────────────
