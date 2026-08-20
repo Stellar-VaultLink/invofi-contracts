@@ -40,7 +40,7 @@ lender. It appends the originator's proposal to the negotiation history, which
 the lender can then meet.
 
 Every round from either side appends a `NegotiationRecord` to
-`negotiations:{offer_id}`, so the full path from opening terms to settlement is
+the key `("negot", offer_id)`, so the full path from opening terms to settlement is
 on-chain and ordered.
 
 ### 2. Auto-accept is a match of two pre-existing commitments
@@ -109,9 +109,12 @@ restricted to the lender and the originator, because then it *is* a state
 change: it revokes a live commitment.
 
 `Closed` and `Accepted` are persisted, since both result from an actual call.
-An offer that leaves `Pending` by any other route — withdrawn, rejected,
-accepted outright — ends its negotiation, which reads as `Closed` and emits
-`negotiation_closed` from that call.
+An offer that leaves `Pending` by another route ends its negotiation from that
+call, and the two routes are distinguishable: acceptance — outright through
+`accept_offer` or by term convergence — records `Accepted`, while a withdrawal
+or rejection reads as `Closed`. Both announce the end with `neg_clsd`, so an
+indexer never loses a negotiation's final state and can tell a settled one from
+a walk-away.
 
 ### 6. Amended terms cannot exceed what `create_offer` allows
 
@@ -151,6 +154,9 @@ proposed.
 - `negotiation_expired` is not an event. Expiry is a derived read; the
   `negotiation_closed` event carries `NegotiationStatus::Expired` when the poke
   records one, and nothing depends on that poke ever happening.
+- The literal event topics are `off_amd`, `ctr_off` and `neg_clsd` — this ADR
+  uses the descriptive names, but `symbol_short!` caps a topic at 9 characters.
+  The README event table lists the emitted topics.
 
 ## Alternatives considered
 

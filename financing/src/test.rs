@@ -2575,3 +2575,76 @@ fn test_auto_accept_emits_negotiation_closed() {
         "auto-accept must run the ordinary off_acc settlement path"
     );
 }
+
+#[test]
+fn test_plain_accept_closes_an_open_negotiation_as_accepted() {
+    let env = Env::default();
+    env.mock_all_auths();
+    env.ledger().set_timestamp(1_000_000);
+
+    let invoice_id = symbol_short!("ninv33");
+    let offer_id = symbol_short!("noff33");
+    let amount: i128 = 1_000_000_000;
+    let (_reg, fin, _admin, originator, lender, _token) =
+        setup_negotiation(&env, &invoice_id, &offer_id, amount);
+
+    // A negotiation is under way when the originator decides to just take the
+    // lender's standing terms through accept_offer instead of countering at
+    // them. That route settles the offer, so it ends the negotiation too.
+    fin.amend_offer(
+        &offer_id,
+        &lender,
+        &0u32,
+        &(amount),
+        &400u32,
+        &(1_296_000u64),
+    );
+    assert_eq!(
+        fin.get_negotiation_status(&offer_id),
+        NegotiationStatus::Open
+    );
+
+    fin.accept_offer(&offer_id, &originator);
+
+    // Events are read before any getter runs: the harness exposes only the
+    // most recent invocation's events, and a read call is an invocation.
+    assert_eq!(
+        count_events(&env, symbol_short!("neg_clsd")),
+        1,
+        "accept_offer must announce the end of an open negotiation"
+    );
+    assert_eq!(count_events(&env, symbol_short!("off_acc")), 1);
+
+    // Accepted, not Closed: the negotiation ended because the offer was taken,
+    // and an indexer must be able to tell that apart from a walk-away.
+    assert_eq!(
+        fin.get_negotiation_status(&offer_id),
+        NegotiationStatus::Accepted,
+        "accept_offer must record the negotiation as Accepted"
+    );
+}
+
+#[test]
+fn test_plain_accept_without_a_negotiation_emits_no_closure() {
+    let env = Env::default();
+    env.mock_all_auths();
+    env.ledger().set_timestamp(1_000_000);
+
+    let invoice_id = symbol_short!("ninv34");
+    let offer_id = symbol_short!("noff34");
+    let amount: i128 = 1_000_000_000;
+    let (_reg, fin, _admin, originator, _lender, _token) =
+        setup_negotiation(&env, &invoice_id, &offer_id, amount);
+
+    // No negotiation was ever opened, so there is nothing to close and the
+    // ordinary acceptance path must stay exactly as it was.
+    fin.accept_offer(&offer_id, &originator);
+
+    assert_eq!(count_events(&env, symbol_short!("off_acc")), 1);
+    assert_eq!(
+        count_events(&env, symbol_short!("neg_clsd")),
+        0,
+        "an offer with no negotiation must not emit neg_clsd"
+    );
+    assert_eq!(fin.get_negotiation_status(&offer_id), NegotiationStatus::None);
+}

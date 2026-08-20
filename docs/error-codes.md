@@ -76,7 +76,7 @@ document fixes the naming convention only.
 | `E_INVOICE_DUE_DATE_NOT_PASSED` | Invoice due date has not yet elapsed; cannot mark overdue | Registry | **Toast:** "Invoice is not yet overdue." |
 | `E_GRACE_PERIOD_NOT_ELAPSED` | 7-day grace period after overdue has not yet elapsed; cannot reclaim | Repayment | **Toast:** "Grace period has not elapsed. Reclaim available after 7 days past due." |
 | `E_TERMINAL_OFFER` | Cannot schedule repayment on a terminal (Repaid/Defaulted/Rejected) offer | Financing | **Toast:** Refresh offer state |
-| `E_NEGOTIATION_CLOSED` | The offer negotiation is no longer open — the 72-hour window elapsed, a party closed it, or it already settled | Financing | **Toast:** "This negotiation has ended." Disable amend/counter and refresh |
+| `E_NEGOTIATION_CLOSED` | The offer negotiation is no longer open — the negotiation window (default 72 h, admin-configurable) elapsed, a party closed it, or it already settled | Financing | **Toast:** "This negotiation has ended." Disable amend/counter and refresh |
 
 ### Invalid Input / Parameters
 

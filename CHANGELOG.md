@@ -38,7 +38,7 @@ and are enforced by commitlint in CI.
     not anyone has called anything. `close_negotiation` is the poke that
     persists the outcome and emits the event — permissionless after the
     deadline, restricted to the two parties before it.
-  - New storage `negotiations:{offer_id}` as a `Vec<NegotiationRecord>`, capped
+  - New storage keyed `("negot", offer_id)` as a `Vec<NegotiationRecord>`, capped
     at 20 rounds so the entry stays bounded. New reads `get_negotiation`,
     `get_negotiation_status`, `get_negotiation_deadline`,
     `get_negotiation_window`. New events `off_amd`, `ctr_off`, `neg_clsd`.
