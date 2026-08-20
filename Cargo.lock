@@ -815,6 +815,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "invofi-event-indexer"
+version = "0.7.0"
+dependencies = [
+ "invofi-common",
+ "soroban-sdk",
+]
+
+[[package]]
 name = "invofi-financing"
 version = "0.7.0"
 dependencies = [

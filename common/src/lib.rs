@@ -7,7 +7,7 @@
 
 #![no_std]
 
-use soroban_sdk::{contractclient, contracttype, symbol_short, Address, Env, Map, Symbol};
+use soroban_sdk::{contractclient, contracttype, symbol_short, Address, Env, Map, Symbol, Vec};
 
 // ─── Constants ───────────────────────────────────────────────────────────────
 
@@ -401,4 +401,84 @@ pub trait ReputationInterface {
 
     /// Read an originator's current reputation score (public, read-only).
     fn get_score(env: Env, originator: Address) -> i128;
+}
+
+// ─── Event Indexer Types ─────────────────────────────────────────────────────
+
+/// A record of a protocol event stored in the on-chain event index.
+///
+/// The full event payload lives in Soroban's append-only event log. This
+/// record is a lightweight, queryable summary that enables efficient
+/// retrieval by type, time range, or actor without scanning the raw log.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct EventRecord {
+    /// Unique monotonic event ID (1-based).
+    pub event_id: u64,
+    /// Event type symbol (e.g. `inv_reg`, `off_new`, `inv_rep`).
+    pub event_type: Symbol,
+    /// Unix timestamp of the ledger that emitted the event.
+    pub timestamp: u64,
+    /// The primary actor address associated with this event.
+    pub actor: Address,
+    /// The contract that emitted the event.
+    pub contract_id: Address,
+    /// A reference key to the full event data (e.g. invoice/offer ID).
+    pub data_key: Symbol,
+}
+
+// ─── Event Indexer Cross-Contract Interface ──────────────────────────────────
+// Protocol contracts call `record_event` on the Event Indexer to maintain
+// the on-chain queryable index. The Event Indexer stores the trusted
+// recorder addresses and requires auth via implicit contract-invoker auth.
+
+/// Client trait for the Event Indexer contract, used by protocol contracts
+/// for cross-contract event recording. `#[contractclient]` generates a
+/// type-safe client from this trait.
+#[contractclient(name = "EventIndexerClient")]
+pub trait EventIndexerInterface {
+    /// Record an event in the on-chain index. Only callable by registered
+    /// recorder contracts (registry, financing, repayment, insurance,
+    /// reputation). Returns the assigned event ID.
+    fn record_event(
+        env: Env,
+        caller: Address,
+        event_type: Symbol,
+        actor: Address,
+        data_key: Symbol,
+    ) -> u64;
+
+    /// Read a single event record by its ID.
+    fn get_event(env: Env, event_id: u64) -> EventRecord;
+
+    /// Get all events of a specific type, with pagination.
+    fn get_events_by_type(
+        env: Env,
+        event_type: Symbol,
+        offset: u32,
+        limit: u32,
+    ) -> Vec<EventRecord>;
+
+    /// Get events within a time range [start, end], with pagination.
+    fn get_events_by_time(
+        env: Env,
+        start: u64,
+        end: u64,
+        offset: u32,
+        limit: u32,
+    ) -> Vec<EventRecord>;
+
+    /// Get all events for a specific actor address, with pagination.
+    fn get_events_by_actor(
+        env: Env,
+        actor: Address,
+        offset: u32,
+        limit: u32,
+    ) -> Vec<EventRecord>;
+
+    /// Total number of events in the index.
+    fn get_event_count(env: Env) -> u64;
+
+    /// Prune events older than `before_timestamp`. Admin only.
+    fn prune_events(env: Env, admin: Address, before_timestamp: u64) -> u64;
 }
