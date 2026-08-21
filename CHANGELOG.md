@@ -52,6 +52,10 @@ and are enforced by commitlint in CI.
     derived expiry at the deadline boundary, an expired counter-offer that can
     no longer be taken, revocation, permissionless post-deadline close, the
     round cap, the pause and authorization guards, and the events.
+  - `amend_offer` also satisfies issue #131 (lender-only amendment of a
+    Pending offer's amount/rate/duration, with bounds re-validated and a
+    clear panic on a non-Pending offer) — #131 was left open when this
+    landed even though #180 listed it as related.
 - **Invoice verification oracle (issue #181)** — `registry` now records
   attestations from a trusted verifier set about off-chain invoice facts:
   document hash, business registration, and tax compliance. Design in
