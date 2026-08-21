@@ -48,6 +48,7 @@ document fixes the naming convention only.
 | `E_NOT_ORIGINATOR` | Caller is not the invoice originator | Registry, Financing, Repayment | **Redirect** to `/403` |
 | `E_NOT_LENDER` | Caller is not the offer's lender | Financing, Repayment | **Redirect** to `/403` |
 | `E_NOT_REGISTERED_CALLER` | Cross-contract caller is not the registered system contract (financing, repayment, insurance, reputation) | Registry, Financing, Repayment, Insurance, Reputation | **Retry:** protocol configuration issue — admin must register the system caller |
+| `E_NOT_VERIFIER` | Caller is not in the registry's trusted verifier set | Registry | **Redirect** to `/403` — the address is not an approved verification oracle |
 
 ### Protocol Paused
 
@@ -70,6 +71,7 @@ document fixes the naming convention only.
 | `E_INVOICE_NOT_FINANCED` | Invoice must be Financed for this operation | Registry, Repayment | **Toast:** Refresh invoice state |
 | `E_INVOICE_NOT_OVERDUE` | Invoice must be Overdue for this operation (mark overdue, reclaim) | Registry, Repayment | **Toast:** Refresh invoice state |
 | `E_INVOICE_NOT_DISPUTED` | Invoice must be in Disputed status to resolve | Registry | **Toast:** Refresh invoice state |
+| `E_INVOICE_NOT_VERIFIABLE` | Invoice must be Pending or Financed to accept an attestation | Registry | **Toast:** "This invoice can no longer be verified." |
 | `E_OFFER_NOT_PENDING` | Offer must be Pending for this operation (withdraw, accept, reject) | Financing | **Toast:** Refresh offer state |
 | `E_OFFER_NOT_ACCEPTED` | Offer must be Accepted or Financed for this operation (repay, reclaim) | Repayment | **Toast:** Refresh offer state |
 | `E_INVOICE_NOT_DEFAULTED` | Invoice must be in Defaulted status for insurance payout | Insurance | **Toast:** Refresh invoice state |
@@ -87,6 +89,9 @@ document fixes the naming convention only.
 | `E_INVALID_RATE` | Interest rate is out of bounds (must be > 0 and ≤ 10,000 bps) | Financing, Registry | **Toast:** "Interest rate must be between 1 bps and 10,000 bps." |
 | `E_INVALID_DURATION` | Offer duration is outside the allowed range (< 86,400 s or > 31,536,000 s) | Financing | **Toast:** "Duration must be between 1 day and 365 days." |
 | `E_INVALID_FEE` | Protocol fee exceeds the cap (max 500 bps / 5%) | Registry | **Toast:** "Fee must be at most 5%." |
+| `E_INVALID_VERIFICATION_FEE` | Verification fee exceeds the cap (max 500 bps / 5%) | Registry | **Toast:** "Verification fee must be at most 5%." |
+| `E_INVALID_VERIFIER_THRESHOLD` | Verifier threshold is zero or above `MAX_VERIFIERS` | Registry | **Toast:** "Threshold must be between 1 and 20." |
+| `E_INVALID_ATTESTATION_VALIDITY` | Attestation validity is outside 1–365 days | Registry | **Toast:** "Validity must be between 1 and 365 days." |
 | `E_INVALID_INSTALLMENT_COUNT` | Installment count is outside 1–1,200 | Financing | **Toast:** "Installment count must be between 1 and 1,200." |
 | `E_PAST_DUE_DATE` | Invoice `due_date` is in the past at registration time | Registry | **Toast:** "Due date must be in the future." |
 | `E_FIRST_DUE_IN_PAST` | `first_due` for schedule is not in the future | Financing | **Toast:** "First due date must be in the future." |

@@ -2,11 +2,11 @@
 extern crate std;
 
 use super::RegistryContract;
-use invofi_common::{InvoiceStatus, RiskTier};
+use invofi_common::{InvoiceStatus, RiskTier, VerificationStatus, VerificationType};
 use soroban_sdk::{
     symbol_short,
     testutils::{Address as _, Events as _, Ledger as _},
-    Address, Env, IntoVal,
+    token, Address, BytesN, Env, IntoVal, Symbol, TryFromVal,
 };
 
 // ─── Invoice CRUD tests ──────────────────────────────────────────────────────
@@ -1585,3 +1585,977 @@ fn test_transition_events_emitted() {
         "Should emit events on state transition"
     );
 }
+
+// ─── Verification oracle (issue #181) ────────────────────────────────────────
+//
+// These tests drive the oracle through the contract client — the same
+// entrypoints an off-chain verifier service calls — and assert on real
+// effects: stored attestations, derived status, token balances, events.
+
+/// A deterministic 32-byte evidence hash, distinct per `seed`.
+fn evidence_hash(env: &Env, seed: u8) -> BytesN<32> {
+    let mut raw = [0u8; 32];
+    raw[0] = seed;
+    raw[31] = seed.wrapping_add(1);
+    BytesN::from_array(env, &raw)
+}
+
+/// Registry with an admin, one registered invoice, and one trusted verifier.
+fn setup_oracle<'a>(
+    env: &'a Env,
+    invoice_id: &Symbol,
+    amount: i128,
+) -> (
+    super::RegistryContractClient<'a>,
+    Address, // admin
+    Address, // originator
+    Address, // verifier
+) {
+    let admin = Address::generate(env);
+    let originator = Address::generate(env);
+    let verifier = Address::generate(env);
+
+    let contract_id = env.register(RegistryContract, (admin.clone(),));
+    let client = super::RegistryContractClient::new(env, &contract_id);
+
+    client.register_invoice(
+        invoice_id,
+        &originator,
+        &amount,
+        &symbol_short!("USDC"),
+        &(9_000_000u64),
+    );
+    client.add_verifier(&admin, &verifier);
+
+    (client, admin, originator, verifier)
+}
+
+#[test]
+fn test_verifier_set_management() {
+    let env = Env::default();
+    env.mock_all_auths();
+    env.ledger().set_timestamp(1_000_000);
+
+    let invoice_id = symbol_short!("vinv01");
+    let (client, admin, _originator, verifier) = setup_oracle(&env, &invoice_id, 1_000_000_000);
+
+    assert!(client.is_verifier(&verifier));
+    assert_eq!(client.get_verifiers().len(), 1);
+
+    // add_verifier is idempotent — re-adding must not double-count a verifier
+    // towards an m-of-n threshold.
+    client.add_verifier(&admin, &verifier);
+    assert_eq!(client.get_verifiers().len(), 1);
+
+    let second = Address::generate(&env);
+    client.add_verifier(&admin, &second);
+    assert_eq!(client.get_verifiers().len(), 2);
+
+    client.remove_verifier(&admin, &verifier);
+    assert!(!client.is_verifier(&verifier));
+    assert!(client.is_verifier(&second));
+}
+
+#[test]
+#[should_panic(expected = "Error(Contract, #1)")]
+fn test_add_verifier_is_admin_only() {
+    let env = Env::default();
+    env.mock_all_auths();
+    env.ledger().set_timestamp(1_000_000);
+
+    let invoice_id = symbol_short!("vinv02");
+    let (client, _admin, originator, _verifier) = setup_oracle(&env, &invoice_id, 1_000_000_000);
+
+    client.add_verifier(&originator, &Address::generate(&env));
+}
+
+#[test]
+#[should_panic(expected = "Error(Contract, #1)")]
+fn test_attest_by_untrusted_address_panics() {
+    let env = Env::default();
+    env.mock_all_auths();
+    env.ledger().set_timestamp(1_000_000);
+
+    let invoice_id = symbol_short!("vinv03");
+    let (client, _admin, _originator, _verifier) = setup_oracle(&env, &invoice_id, 1_000_000_000);
+
+    let impostor = Address::generate(&env);
+    client.attest(
+        &invoice_id,
+        &impostor,
+        &VerificationType::DocumentHash,
+        &evidence_hash(&env, 1),
+        &true,
+    );
+}
+
+#[test]
+fn test_attest_records_and_verifies_each_verification_type() {
+    let env = Env::default();
+    env.mock_all_auths();
+    env.ledger().set_timestamp(1_000_000);
+
+    let invoice_id = symbol_short!("vinv04");
+    let (client, _admin, _originator, verifier) = setup_oracle(&env, &invoice_id, 1_000_000_000);
+
+    for (index, v_type) in [
+        VerificationType::DocumentHash,
+        VerificationType::BusinessRegistration,
+        VerificationType::TaxCompliance,
+    ]
+    .iter()
+    .enumerate()
+    {
+        // Each type is independent until all three are in.
+        assert_eq!(
+            client.get_verification_status(&invoice_id, v_type),
+            VerificationStatus::Pending
+        );
+
+        let attestation = client.attest(
+            &invoice_id,
+            &verifier,
+            v_type,
+            &evidence_hash(&env, index as u8),
+            &true,
+        );
+
+        assert_eq!(attestation.verifier, verifier);
+        assert_eq!(attestation.v_type, *v_type);
+        assert_eq!(attestation.timestamp, 1_000_000);
+        // 90-day default validity.
+        assert_eq!(attestation.valid_until, 1_000_000 + 7_776_000);
+        assert_eq!(attestation.status, VerificationStatus::Verified);
+
+        assert_eq!(
+            client.get_verification_status(&invoice_id, v_type),
+            VerificationStatus::Verified
+        );
+    }
+
+    assert_eq!(client.get_verifications(&invoice_id).len(), 3);
+    // Verified as a whole only once every type is covered.
+    assert_eq!(
+        client.get_invoice_verification_status(&invoice_id),
+        VerificationStatus::Verified
+    );
+}
+
+#[test]
+fn test_invoice_is_not_verified_until_every_type_is() {
+    let env = Env::default();
+    env.mock_all_auths();
+    env.ledger().set_timestamp(1_000_000);
+
+    let invoice_id = symbol_short!("vinv05");
+    let (client, _admin, _originator, verifier) = setup_oracle(&env, &invoice_id, 1_000_000_000);
+
+    client.attest(
+        &invoice_id,
+        &verifier,
+        &VerificationType::DocumentHash,
+        &evidence_hash(&env, 1),
+        &true,
+    );
+    client.attest(
+        &invoice_id,
+        &verifier,
+        &VerificationType::BusinessRegistration,
+        &evidence_hash(&env, 2),
+        &true,
+    );
+
+    assert_eq!(
+        client.get_verification_status(&invoice_id, &VerificationType::DocumentHash),
+        VerificationStatus::Verified
+    );
+    assert_eq!(
+        client.get_verification_status(&invoice_id, &VerificationType::TaxCompliance),
+        VerificationStatus::Pending
+    );
+    assert_eq!(
+        client.get_invoice_verification_status(&invoice_id),
+        VerificationStatus::Pending
+    );
+}
+
+#[test]
+fn test_rejection_outranks_approvals() {
+    let env = Env::default();
+    env.mock_all_auths();
+    env.ledger().set_timestamp(1_000_000);
+
+    let invoice_id = symbol_short!("vinv06");
+    let (client, admin, _originator, verifier) = setup_oracle(&env, &invoice_id, 1_000_000_000);
+    let second = Address::generate(&env);
+    client.add_verifier(&admin, &second);
+
+    client.attest(
+        &invoice_id,
+        &verifier,
+        &VerificationType::DocumentHash,
+        &evidence_hash(&env, 1),
+        &true,
+    );
+    client.attest(
+        &invoice_id,
+        &second,
+        &VerificationType::DocumentHash,
+        &evidence_hash(&env, 2),
+        &false,
+    );
+
+    assert_eq!(
+        client.get_verification_status(&invoice_id, &VerificationType::DocumentHash),
+        VerificationStatus::Rejected
+    );
+    assert_eq!(
+        client.get_invoice_verification_status(&invoice_id),
+        VerificationStatus::Rejected
+    );
+}
+
+// ── m-of-n ───────────────────────────────────────────────────────────────────
+
+#[test]
+fn test_threshold_requires_distinct_verifiers() {
+    let env = Env::default();
+    env.mock_all_auths();
+    env.ledger().set_timestamp(1_000_000);
+
+    let invoice_id = symbol_short!("vinv07");
+    let (client, admin, _originator, verifier) = setup_oracle(&env, &invoice_id, 1_000_000_000);
+    let second = Address::generate(&env);
+    client.add_verifier(&admin, &second);
+    client.set_verifier_threshold(&admin, &2u32);
+    assert_eq!(client.get_verifier_threshold(), 2);
+
+    client.attest(
+        &invoice_id,
+        &verifier,
+        &VerificationType::DocumentHash,
+        &evidence_hash(&env, 1),
+        &true,
+    );
+    assert_eq!(
+        client.get_verification_status(&invoice_id, &VerificationType::DocumentHash),
+        VerificationStatus::Pending
+    );
+
+    // Adversarial: the same verifier attesting again must not clear a
+    // two-of-n threshold on its own — re-attesting replaces, it does not stack.
+    client.attest(
+        &invoice_id,
+        &verifier,
+        &VerificationType::DocumentHash,
+        &evidence_hash(&env, 9),
+        &true,
+    );
+    assert_eq!(client.get_verifications(&invoice_id).len(), 1);
+    assert_eq!(
+        client.get_verification_status(&invoice_id, &VerificationType::DocumentHash),
+        VerificationStatus::Pending
+    );
+
+    // A genuinely distinct verifier does clear it.
+    client.attest(
+        &invoice_id,
+        &second,
+        &VerificationType::DocumentHash,
+        &evidence_hash(&env, 2),
+        &true,
+    );
+    assert_eq!(
+        client.get_verification_status(&invoice_id, &VerificationType::DocumentHash),
+        VerificationStatus::Verified
+    );
+}
+
+#[test]
+#[should_panic(expected = "Error(Contract, #6)")]
+fn test_zero_verifier_threshold_panics() {
+    let env = Env::default();
+    env.mock_all_auths();
+    env.ledger().set_timestamp(1_000_000);
+
+    let invoice_id = symbol_short!("vinv08");
+    let (client, admin, _originator, _verifier) = setup_oracle(&env, &invoice_id, 1_000_000_000);
+
+    client.set_verifier_threshold(&admin, &0u32);
+}
+
+// ── Fees ─────────────────────────────────────────────────────────────────────
+
+#[test]
+fn test_verification_fee_is_charged_to_the_originator() {
+    let env = Env::default();
+    env.mock_all_auths();
+    env.ledger().set_timestamp(1_000_000);
+
+    let invoice_id = symbol_short!("vinv09");
+    let amount: i128 = 1_000_000_000;
+    let (client, admin, originator, verifier) = setup_oracle(&env, &invoice_id, amount);
+
+    // 50 bps of a 1 000 000 000 invoice = 5 000 000.
+    let token_admin = Address::generate(&env);
+    let sac = env.register_stellar_asset_contract_v2(token_admin);
+    let token_id = sac.address();
+    client.register_currency(&admin, &symbol_short!("USDC"), &token_id);
+    client.set_verification_fee(&admin, &50u32);
+    assert_eq!(client.calculate_verification_fee(&invoice_id), 5_000_000);
+
+    token::StellarAssetClient::new(&env, &token_id).mint(&originator, &amount);
+    token::TokenClient::new(&env, &token_id).approve(
+        &originator,
+        &client.address,
+        &amount,
+        &(env.ledger().sequence() + 1000),
+    );
+
+    client.attest(
+        &invoice_id,
+        &verifier,
+        &VerificationType::DocumentHash,
+        &evidence_hash(&env, 1),
+        &true,
+    );
+
+    let token_client = token::TokenClient::new(&env, &token_id);
+    assert_eq!(token_client.balance(&verifier), 5_000_000);
+    assert_eq!(token_client.balance(&originator), amount - 5_000_000);
+}
+
+#[test]
+fn test_fee_is_charged_on_rejection_too() {
+    // The fee pays for the verification work, not for a favourable answer —
+    // a fee contingent on approval would pay verifiers to approve.
+    let env = Env::default();
+    env.mock_all_auths();
+    env.ledger().set_timestamp(1_000_000);
+
+    let invoice_id = symbol_short!("vinv10");
+    let amount: i128 = 1_000_000_000;
+    let (client, admin, originator, verifier) = setup_oracle(&env, &invoice_id, amount);
+
+    let token_admin = Address::generate(&env);
+    let sac = env.register_stellar_asset_contract_v2(token_admin);
+    let token_id = sac.address();
+    client.register_currency(&admin, &symbol_short!("USDC"), &token_id);
+    client.set_verification_fee(&admin, &100u32);
+
+    token::StellarAssetClient::new(&env, &token_id).mint(&originator, &amount);
+    token::TokenClient::new(&env, &token_id).approve(
+        &originator,
+        &client.address,
+        &amount,
+        &(env.ledger().sequence() + 1000),
+    );
+
+    client.attest(
+        &invoice_id,
+        &verifier,
+        &VerificationType::DocumentHash,
+        &evidence_hash(&env, 1),
+        &false,
+    );
+
+    assert_eq!(
+        token::TokenClient::new(&env, &token_id).balance(&verifier),
+        10_000_000
+    );
+    assert_eq!(
+        client.get_verification_status(&invoice_id, &VerificationType::DocumentHash),
+        VerificationStatus::Rejected
+    );
+}
+
+#[test]
+fn test_zero_fee_needs_no_token_configured() {
+    // The default is 0 bps: the oracle is fully usable on a deployment that
+    // never registers a settlement token.
+    let env = Env::default();
+    env.mock_all_auths();
+    env.ledger().set_timestamp(1_000_000);
+
+    let invoice_id = symbol_short!("vinv11");
+    let (client, _admin, _originator, verifier) = setup_oracle(&env, &invoice_id, 1_000_000_000);
+
+    assert_eq!(client.get_verification_fee(), 0);
+    assert_eq!(client.calculate_verification_fee(&invoice_id), 0);
+
+    client.attest(
+        &invoice_id,
+        &verifier,
+        &VerificationType::TaxCompliance,
+        &evidence_hash(&env, 1),
+        &true,
+    );
+    assert_eq!(
+        client.get_verification_status(&invoice_id, &VerificationType::TaxCompliance),
+        VerificationStatus::Verified
+    );
+}
+
+#[test]
+#[should_panic(expected = "Verification fee token not configured for currency")]
+fn test_nonzero_fee_without_a_registered_token_panics() {
+    let env = Env::default();
+    env.mock_all_auths();
+    env.ledger().set_timestamp(1_000_000);
+
+    let invoice_id = symbol_short!("vinv12");
+    let (client, admin, _originator, verifier) = setup_oracle(&env, &invoice_id, 1_000_000_000);
+
+    client.set_verification_fee(&admin, &50u32);
+    client.attest(
+        &invoice_id,
+        &verifier,
+        &VerificationType::DocumentHash,
+        &evidence_hash(&env, 1),
+        &true,
+    );
+}
+
+#[test]
+#[should_panic(expected = "Error(Contract, #6)")]
+fn test_verification_fee_above_ceiling_panics() {
+    let env = Env::default();
+    env.mock_all_auths();
+    env.ledger().set_timestamp(1_000_000);
+
+    let invoice_id = symbol_short!("vinv13");
+    let (client, admin, _originator, _verifier) = setup_oracle(&env, &invoice_id, 1_000_000_000);
+
+    client.set_verification_fee(&admin, &501u32);
+}
+
+#[test]
+fn test_fee_math_rounds_down_and_does_not_overflow() {
+    let env = Env::default();
+    env.mock_all_auths();
+    env.ledger().set_timestamp(1_000_000);
+
+    let invoice_id = symbol_short!("vinv14");
+    // 1 bps of 19 999 999 stroops is 1 999.9999 -> 1 999: the division
+    // happens last and truncates in the payer's favour.
+    let (client, admin, _originator, _verifier) = setup_oracle(&env, &invoice_id, 19_999_999);
+    client.set_verification_fee(&admin, &1u32);
+    assert_eq!(client.calculate_verification_fee(&invoice_id), 1_999);
+
+    // 500 bps of the same is 999 999.95 -> 999 999, truncated the same way.
+    client.set_verification_fee(&admin, &500u32);
+    assert_eq!(client.calculate_verification_fee(&invoice_id), 999_999);
+}
+
+#[test]
+#[should_panic(expected = "Error(Contract, #6)")]
+fn test_fee_math_overflow_reverts_instead_of_wrapping() {
+    let env = Env::default();
+    env.mock_all_auths();
+    env.ledger().set_timestamp(1_000_000);
+
+    // An invoice large enough that amount * fee_bps cannot fit in i128. The
+    // widening multiply is checked, so this reverts rather than wrapping to a
+    // small (or negative) fee.
+    let invoice_id = symbol_short!("vinv15");
+    let (client, admin, _originator, _verifier) = setup_oracle(&env, &invoice_id, i128::MAX);
+    client.set_verification_fee(&admin, &500u32);
+    client.calculate_verification_fee(&invoice_id);
+}
+
+// ── Expiry ───────────────────────────────────────────────────────────────────
+
+#[test]
+fn test_attestation_expires_on_read_without_any_call() {
+    let env = Env::default();
+    env.mock_all_auths();
+    env.ledger().set_timestamp(1_000_000);
+
+    let invoice_id = symbol_short!("vinv15");
+    let (client, _admin, _originator, verifier) = setup_oracle(&env, &invoice_id, 1_000_000_000);
+
+    client.attest(
+        &invoice_id,
+        &verifier,
+        &VerificationType::DocumentHash,
+        &evidence_hash(&env, 1),
+        &true,
+    );
+
+    // On valid_until itself the attestation still counts.
+    env.ledger().set_timestamp(1_000_000 + 7_776_000);
+    assert_eq!(
+        client.get_verification_status(&invoice_id, &VerificationType::DocumentHash),
+        VerificationStatus::Verified
+    );
+
+    // One second later it does not — derived, with nothing called in between.
+    env.ledger().set_timestamp(1_000_000 + 7_776_001);
+    assert_eq!(
+        client.get_verification_status(&invoice_id, &VerificationType::DocumentHash),
+        VerificationStatus::Expired
+    );
+    assert_eq!(
+        client.get_invoice_verification_status(&invoice_id),
+        VerificationStatus::Expired
+    );
+}
+
+#[test]
+fn test_expire_verifications_is_idempotent() {
+    let env = Env::default();
+    env.mock_all_auths();
+    env.ledger().set_timestamp(1_000_000);
+
+    let invoice_id = symbol_short!("vinv16");
+    let (client, _admin, _originator, verifier) = setup_oracle(&env, &invoice_id, 1_000_000_000);
+
+    client.attest(
+        &invoice_id,
+        &verifier,
+        &VerificationType::DocumentHash,
+        &evidence_hash(&env, 1),
+        &true,
+    );
+    client.attest(
+        &invoice_id,
+        &verifier,
+        &VerificationType::TaxCompliance,
+        &evidence_hash(&env, 2),
+        &true,
+    );
+
+    // Nothing has lapsed yet.
+    assert_eq!(client.expire_verifications(&invoice_id), 0);
+
+    env.ledger().set_timestamp(1_000_000 + 7_776_001);
+    assert_eq!(client.expire_verifications(&invoice_id), 2);
+    // A second poke must not re-announce the same lapse.
+    assert_eq!(client.expire_verifications(&invoice_id), 0);
+
+    for attestation in client.get_verifications(&invoice_id).iter() {
+        assert_eq!(attestation.status, VerificationStatus::Expired);
+    }
+}
+
+#[test]
+fn test_reattesting_after_expiry_restores_verified() {
+    let env = Env::default();
+    env.mock_all_auths();
+    env.ledger().set_timestamp(1_000_000);
+
+    let invoice_id = symbol_short!("vinv17");
+    let (client, _admin, _originator, verifier) = setup_oracle(&env, &invoice_id, 1_000_000_000);
+
+    client.attest(
+        &invoice_id,
+        &verifier,
+        &VerificationType::BusinessRegistration,
+        &evidence_hash(&env, 1),
+        &true,
+    );
+
+    env.ledger().set_timestamp(1_000_000 + 7_776_001);
+    assert_eq!(
+        client.get_verification_status(&invoice_id, &VerificationType::BusinessRegistration),
+        VerificationStatus::Expired
+    );
+
+    client.attest(
+        &invoice_id,
+        &verifier,
+        &VerificationType::BusinessRegistration,
+        &evidence_hash(&env, 2),
+        &true,
+    );
+    assert_eq!(
+        client.get_verification_status(&invoice_id, &VerificationType::BusinessRegistration),
+        VerificationStatus::Verified
+    );
+    // The refresh replaced the lapsed statement rather than stacking on it.
+    assert_eq!(client.get_verifications(&invoice_id).len(), 1);
+}
+
+#[test]
+fn test_attestation_validity_is_configurable_and_not_retroactive() {
+    let env = Env::default();
+    env.mock_all_auths();
+    env.ledger().set_timestamp(1_000_000);
+
+    let invoice_id = symbol_short!("vinv18");
+    let (client, admin, _originator, verifier) = setup_oracle(&env, &invoice_id, 1_000_000_000);
+
+    assert_eq!(client.get_attestation_validity(), 7_776_000);
+    client.set_attestation_validity(&admin, &86_400u64);
+
+    let first = client.attest(
+        &invoice_id,
+        &verifier,
+        &VerificationType::DocumentHash,
+        &evidence_hash(&env, 1),
+        &true,
+    );
+    assert_eq!(first.valid_until, 1_000_000 + 86_400);
+
+    // Widening the setting must not extend an attestation already submitted.
+    client.set_attestation_validity(&admin, &31_536_000u64);
+    let stored = client.get_verifications(&invoice_id).get(0).unwrap();
+    assert_eq!(stored.valid_until, 1_000_000 + 86_400);
+    env.ledger().set_timestamp(1_000_000 + 86_401);
+    assert_eq!(
+        client.get_verification_status(&invoice_id, &VerificationType::DocumentHash),
+        VerificationStatus::Expired
+    );
+}
+
+#[test]
+#[should_panic(expected = "Error(Contract, #6)")]
+fn test_attestation_validity_below_minimum_panics() {
+    let env = Env::default();
+    env.mock_all_auths();
+    env.ledger().set_timestamp(1_000_000);
+
+    let invoice_id = symbol_short!("vinv19");
+    let (client, admin, _originator, _verifier) = setup_oracle(&env, &invoice_id, 1_000_000_000);
+
+    client.set_attestation_validity(&admin, &86_399u64);
+}
+
+#[test]
+#[should_panic(expected = "Error(Contract, #6)")]
+fn test_attestation_validity_above_maximum_panics() {
+    let env = Env::default();
+    env.mock_all_auths();
+    env.ledger().set_timestamp(1_000_000);
+
+    let invoice_id = symbol_short!("vinv20");
+    let (client, admin, _originator, _verifier) = setup_oracle(&env, &invoice_id, 1_000_000_000);
+
+    client.set_attestation_validity(&admin, &31_536_001u64);
+}
+
+// ── Guards ───────────────────────────────────────────────────────────────────
+
+#[test]
+#[should_panic(expected = "Error(Contract, #2)")]
+fn test_attest_on_unknown_invoice_panics() {
+    let env = Env::default();
+    env.mock_all_auths();
+    env.ledger().set_timestamp(1_000_000);
+
+    let invoice_id = symbol_short!("vinv21");
+    let (client, _admin, _originator, verifier) = setup_oracle(&env, &invoice_id, 1_000_000_000);
+
+    client.attest(
+        &symbol_short!("nope"),
+        &verifier,
+        &VerificationType::DocumentHash,
+        &evidence_hash(&env, 1),
+        &true,
+    );
+}
+
+#[test]
+#[should_panic(expected = "Error(Contract, #3)")]
+fn test_attest_on_cancelled_invoice_panics() {
+    let env = Env::default();
+    env.mock_all_auths();
+    env.ledger().set_timestamp(1_000_000);
+
+    let invoice_id = symbol_short!("vinv22");
+    let (client, _admin, originator, verifier) = setup_oracle(&env, &invoice_id, 1_000_000_000);
+
+    client.cancel_invoice(&invoice_id, &originator);
+    client.attest(
+        &invoice_id,
+        &verifier,
+        &VerificationType::DocumentHash,
+        &evidence_hash(&env, 1),
+        &true,
+    );
+}
+
+#[test]
+#[should_panic(expected = "Error(Contract, #4)")]
+fn test_attest_is_pause_guarded() {
+    let env = Env::default();
+    env.mock_all_auths();
+    env.ledger().set_timestamp(1_000_000);
+
+    let invoice_id = symbol_short!("vinv23");
+    let (client, admin, _originator, verifier) = setup_oracle(&env, &invoice_id, 1_000_000_000);
+
+    client.pause(&admin);
+    client.attest(
+        &invoice_id,
+        &verifier,
+        &VerificationType::DocumentHash,
+        &evidence_hash(&env, 1),
+        &true,
+    );
+}
+
+#[test]
+#[should_panic(expected = "Error(Contract, #2)")]
+fn test_expire_verifications_on_an_invoice_with_none_panics() {
+    let env = Env::default();
+    env.mock_all_auths();
+    env.ledger().set_timestamp(1_000_000);
+
+    let invoice_id = symbol_short!("vinv24");
+    let (client, _admin, _originator, _verifier) = setup_oracle(&env, &invoice_id, 1_000_000_000);
+
+    client.expire_verifications(&invoice_id);
+}
+
+#[test]
+fn test_removed_verifier_cannot_attest_but_keeps_its_history() {
+    let env = Env::default();
+    env.mock_all_auths();
+    env.ledger().set_timestamp(1_000_000);
+
+    let invoice_id = symbol_short!("vinv25");
+    let (client, admin, _originator, verifier) = setup_oracle(&env, &invoice_id, 1_000_000_000);
+
+    client.attest(
+        &invoice_id,
+        &verifier,
+        &VerificationType::DocumentHash,
+        &evidence_hash(&env, 1),
+        &true,
+    );
+    client.remove_verifier(&admin, &verifier);
+
+    // The record of what they said survives removal — that is the point of
+    // storing it.
+    assert_eq!(client.get_verifications(&invoice_id).len(), 1);
+    assert!(!client.is_verifier(&verifier));
+}
+
+// ── Events ───────────────────────────────────────────────────────────────────
+
+#[test]
+fn test_oracle_emits_submitted_completed_and_expired_events() {
+    let env = Env::default();
+    env.mock_all_auths();
+    env.ledger().set_timestamp(1_000_000);
+
+    let invoice_id = symbol_short!("vinv26");
+    let (client, _admin, _originator, verifier) = setup_oracle(&env, &invoice_id, 1_000_000_000);
+
+    client.attest(
+        &invoice_id,
+        &verifier,
+        &VerificationType::DocumentHash,
+        &evidence_hash(&env, 1),
+        &true,
+    );
+    assert_eq!(count_events(&env, symbol_short!("ver_sub")), 1);
+    assert_eq!(
+        count_events(&env, symbol_short!("ver_done")),
+        1,
+        "crossing the threshold must emit ver_done"
+    );
+
+    env.ledger().set_timestamp(1_000_000 + 7_776_001);
+    client.expire_verifications(&invoice_id);
+    assert_eq!(count_events(&env, symbol_short!("ver_exp")), 1);
+}
+
+#[test]
+fn test_verification_completed_is_emitted_once_per_status_change() {
+    let env = Env::default();
+    env.mock_all_auths();
+    env.ledger().set_timestamp(1_000_000);
+
+    let invoice_id = symbol_short!("vinv27");
+    let (client, admin, _originator, verifier) = setup_oracle(&env, &invoice_id, 1_000_000_000);
+    let second = Address::generate(&env);
+    client.add_verifier(&admin, &second);
+
+    // The test harness exposes the events of the most recent invocation, so
+    // each attestation is checked as it lands.
+    client.attest(
+        &invoice_id,
+        &verifier,
+        &VerificationType::DocumentHash,
+        &evidence_hash(&env, 1),
+        &true,
+    );
+    assert_eq!(count_events(&env, symbol_short!("ver_sub")), 1);
+    assert_eq!(count_events(&env, symbol_short!("ver_done")), 1);
+
+    // A second approval on an already-Verified type does not change the
+    // status, so it must not announce a second completion.
+    client.attest(
+        &invoice_id,
+        &second,
+        &VerificationType::DocumentHash,
+        &evidence_hash(&env, 2),
+        &true,
+    );
+    assert_eq!(count_events(&env, symbol_short!("ver_sub")), 1);
+    assert_eq!(
+        count_events(&env, symbol_short!("ver_done")),
+        0,
+        "an approval that changes nothing must not emit ver_done"
+    );
+}
+
+/// How many published events carry `name` as their first topic.
+fn count_events(env: &Env, name: Symbol) -> u32 {
+    let mut count = 0;
+    for (_contract, topics, _data) in env.events().all().iter() {
+        if let Some(first) = topics.get(0) {
+            if let Ok(topic) = Symbol::try_from_val(env, &first) {
+                if topic == name {
+                    count += 1;
+                }
+            }
+        }
+    }
+    count
+}
+
+
+#[test]
+fn test_live_approval_below_threshold_reads_pending_not_expired() {
+    let env = Env::default();
+    env.mock_all_auths();
+    env.ledger().set_timestamp(1_000_000);
+
+    let invoice_id = symbol_short!("vinv20");
+    let (client, admin, _originator, first) = setup_oracle(&env, &invoice_id, 1_000_000_000);
+    let second = Address::generate(&env);
+    client.add_verifier(&admin, &second);
+    client.set_verifier_threshold(&admin, &2u32);
+
+    // Verifier one attests, then lets its attestation lapse.
+    client.attest(
+        &invoice_id,
+        &first,
+        &VerificationType::DocumentHash,
+        &evidence_hash(&env, 1),
+        &true,
+    );
+    env.ledger()
+        .set_timestamp(1_000_000 + 7_776_000 + 1);
+
+    // Verifier two now attests, so the type holds one live approval against a
+    // threshold of two.
+    client.attest(
+        &invoice_id,
+        &second,
+        &VerificationType::DocumentHash,
+        &evidence_hash(&env, 2),
+        &true,
+    );
+
+    // That is under-attested, not expired: it needs a second verifier, not a
+    // refresh of the one that lapsed. Reading Expired here would tell a client
+    // the evidence went stale when in fact it never had enough of it.
+    assert_eq!(
+        client.get_verification_status(&invoice_id, &VerificationType::DocumentHash),
+        VerificationStatus::Pending,
+        "a live approval below threshold must read Pending, not Expired"
+    );
+
+    // And once the threshold is met it flips to Verified.
+    let third = Address::generate(&env);
+    client.add_verifier(&admin, &third);
+    client.attest(
+        &invoice_id,
+        &third,
+        &VerificationType::DocumentHash,
+        &evidence_hash(&env, 3),
+        &true,
+    );
+    assert_eq!(
+        client.get_verification_status(&invoice_id, &VerificationType::DocumentHash),
+        VerificationStatus::Verified
+    );
+}
+
+#[test]
+fn test_expired_reads_only_when_no_live_statement_remains() {
+    let env = Env::default();
+    env.mock_all_auths();
+    env.ledger().set_timestamp(1_000_000);
+
+    let invoice_id = symbol_short!("vinv21");
+    let (client, _admin, _originator, verifier) = setup_oracle(&env, &invoice_id, 1_000_000_000);
+
+    client.attest(
+        &invoice_id,
+        &verifier,
+        &VerificationType::TaxCompliance,
+        &evidence_hash(&env, 1),
+        &true,
+    );
+    env.ledger()
+        .set_timestamp(1_000_000 + 7_776_000 + 1);
+
+    assert_eq!(
+        client.get_verification_status(&invoice_id, &VerificationType::TaxCompliance),
+        VerificationStatus::Expired,
+        "with every statement lapsed the type reads Expired"
+    );
+}
+
+#[test]
+fn test_rotated_out_verifiers_cannot_lock_an_invoice() {
+    let env = Env::default();
+    env.mock_all_auths();
+    env.ledger().set_timestamp(1_000_000);
+
+    let invoice_id = symbol_short!("vinv22");
+    let (client, admin, _originator, _seed) = setup_oracle(&env, &invoice_id, 1_000_000_000);
+
+    // Fill the invoice to its cap by rotating 20 verifiers through the set,
+    // each attesting to all three types before being removed.
+    let types = [
+        VerificationType::DocumentHash,
+        VerificationType::BusinessRegistration,
+        VerificationType::TaxCompliance,
+    ];
+    for round in 0..20u8 {
+        let rotating = Address::generate(&env);
+        client.add_verifier(&admin, &rotating);
+        for (offset, v_type) in types.iter().enumerate() {
+            client.attest(
+                &invoice_id,
+                &rotating,
+                v_type,
+                &evidence_hash(&env, round * 3 + offset as u8),
+                &true,
+            );
+        }
+        client.remove_verifier(&admin, &rotating);
+    }
+    assert_eq!(client.get_verifications(&invoice_id).len(), 60);
+
+    // A freshly trusted verifier must still be able to speak. Before the
+    // eviction policy this reverted, and the invoice could never be verified
+    // again by anyone.
+    let fresh = Address::generate(&env);
+    client.add_verifier(&admin, &fresh);
+    client.attest(
+        &invoice_id,
+        &fresh,
+        &VerificationType::DocumentHash,
+        &evidence_hash(&env, 99),
+        &true,
+    );
+
+    let stored = client.get_verifications(&invoice_id);
+    assert_eq!(stored.len(), 60, "the cap still holds");
+    assert!(
+        stored.iter().any(|a| a.verifier == fresh),
+        "the active verifier's attestation must be recorded"
+    );
+    assert_eq!(
+        client.get_verification_status(&invoice_id, &VerificationType::DocumentHash),
+        VerificationStatus::Verified
+    );
+}
+

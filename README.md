@@ -74,6 +74,12 @@ register_invoice()  →  create_offer()  →  accept_offer()
 | `mark_invoice_overdue(id)` | Anyone | Overdue once due_date passes |
 | `raise_dispute / resolve_dispute` | Originator / Admin | Dispute lifecycle |
 | `blacklist_address / unblacklist_address / is_blacklisted` | Admin | Address blocking |
+| `attest(invoice_id, verifier, type, hash, approved)` | Trusted verifier | Record an off-chain attestation (document hash, business registration, tax compliance); charges the verification fee (ADR-0009) |
+| `get_verification_status(invoice_id, type)` / `get_invoice_verification_status(invoice_id)` | Anyone | Verification status per type, and the conjunction across all three |
+| `get_verifications(invoice_id)` | Anyone | Every attestation recorded against an invoice |
+| `expire_verifications(invoice_id)` | Anyone | Permissionless poke that records lapsed attestations and emits `ver_exp` |
+| `add_verifier / remove_verifier / set_verifier_threshold` | Admin | Trusted verifier set and the m-of-n threshold |
+| `set_verification_fee / set_attestation_validity / register_currency` | Admin | Fee in bps (default 0 = off), attestation validity (default 90 days), fee settlement token |
 | `set_rate / set_fee / transfer_admin / pause / unpause` | Admin | Admin controls |
 
 ### Financing — `financing/`
@@ -175,6 +181,9 @@ Every state-mutating function publishes a Soroban contract event. Topics are
 | `inv_cxl` | `cancel_invoice` | `originator` |
 | `inv_dsp` | `raise_dispute` | `originator` |
 | `inv_rsl` | `resolve_dispute` | `new_status` |
+| `ver_sub` | `attest` (registry) | `(verifier, type, hash, valid_until, fee)` |
+| `ver_done` | `attest` (registry) | `(type, VerificationStatus)` — emitted when a type reaches Verified or Rejected |
+| `ver_exp` | `expire_verifications` (registry) | `(verifier, type, valid_until)` |
 | `pos_mint` | `accept_offer` (financing) | `(lender, amount)` — position token minted |
 | `pool_stk` | `stake` (insurance) | `amount` |
 | `pool_un` | `unstake` (insurance) | `amount` |
@@ -201,6 +210,11 @@ All contracts emit machine-readable `E_*` error codes (see [docs/error-codes.md]
 | `DEFAULT_NEGOTIATION_WINDOW_SECS` | 259,200 | Default offer-negotiation window (72 hours) |
 | `MIN_NEGOTIATION_WINDOW_SECS` / `MAX_NEGOTIATION_WINDOW_SECS` | 3,600 / 2,592,000 | Bounds an admin may configure the window to (1 hour – 30 days) |
 | `MAX_NEGOTIATION_ROUNDS` | 20 | Cap on recorded negotiation rounds per offer |
+| `DEFAULT_ATTESTATION_VALIDITY_SECS` | 7,776,000 | Default verification attestation validity (90 days) |
+| `MIN_ATTESTATION_VALIDITY_SECS` / `MAX_ATTESTATION_VALIDITY_SECS` | 86,400 / 31,536,000 | Bounds an admin may configure attestation validity to (1–365 days) |
+| `MAX_VERIFICATION_FEE_BPS` | 500 | Verification fee ceiling (5% of invoice value) |
+| `MAX_VERIFIERS` | 20 | Maximum size of the trusted verifier set |
+| `MAX_ATTESTATIONS_PER_INVOICE` | 60 | Cap on stored attestations per invoice |
 
 ---
 

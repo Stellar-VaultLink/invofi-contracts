@@ -52,6 +52,51 @@ and are enforced by commitlint in CI.
     derived expiry at the deadline boundary, an expired counter-offer that can
     no longer be taken, revocation, permissionless post-deadline close, the
     round cap, the pause and authorization guards, and the events.
+- **Invoice verification oracle (issue #181)** — `registry` now records
+  attestations from a trusted verifier set about off-chain invoice facts:
+  document hash, business registration, and tax compliance. Design in
+  `docs/adr/0009-verification-oracle.md`.
+  - **The trust boundary is verifier authentication, not fact verification.**
+    A contract cannot check that a PDF hash corresponds to a real invoice or
+    that a tax filing is current. `attest` authenticates that a verifier in
+    the admin-governed set signed a claim and stores it immutably; the truth
+    of the claim rests on verifier honesty, bounded by the m-of-n threshold.
+    The ADR states this explicitly so "trust-minimised" is not read as
+    on-chain fact-checking.
+  - **m-of-n over distinct verifiers.** `set_verifier_threshold` sets how
+    many *distinct* verifiers must approve before a type reads `Verified`;
+    re-attesting replaces a verifier's own prior record, so no single
+    verifier can reach the threshold alone. A live rejection dominates
+    approvals — one honest verifier can block a fraudulent invoice that
+    others waved through.
+  - **Status is derived per verification type**, with
+    `get_invoice_verification_status` returning the conjunction across all
+    three. `Verified` requires every type to have cleared its threshold.
+  - **Expiry is derived on read** (default 90 days, admin-configurable
+    within 1–365 days). Soroban has no scheduler, so an attestation past
+    `valid_until` reads as `Expired` whether or not anyone has called
+    anything; the permissionless `expire_verifications` poke persists that
+    outcome and emits `ver_exp` exactly once per attestation. Validity is
+    stamped at attest time and later admin changes are not retroactive.
+  - **The fee is charged on rejection as well as approval.** It pays for the
+    verification work, and refunding it on rejection would pay verifiers
+    only for approving — a direct incentive to rubber-stamp. Documented as a
+    deliberate answer to a case the issue left open.
+  - `fee = invoice_amount * verification_fee_bps / 10_000`, computed with
+    `checked_mul` and dividing last, transferred from the originator to the
+    verifier in the same transaction that stores the attestation, so there
+    is no charge without a record and no record without a charge.
+  - New admin entrypoints `add_verifier`, `remove_verifier`,
+    `set_verifier_threshold`, `set_verification_fee`,
+    `set_attestation_validity`, and `register_currency` (fee settlement
+    token), all pause-guarded and admin-only. **`verification_fee_bps`
+    defaults to 0, which disables the transfer entirely** — this change is
+    behaviourally inert until an admin enables it.
+  - 28 new tests covering all three verification types, the m-of-n
+    threshold, fee math and its overflow guard, fee-on-rejection, expiry and
+    re-attestation, non-retroactive validity changes, the removed-verifier
+    case, and the three events.
+
 - **Partial repayment with pro-rata interest (issue #176)** — originators
   can now make partial payments against an invoice, with interest calculated
   pro-rata on the remaining principal: `interest = remaining × rate_bps ×
