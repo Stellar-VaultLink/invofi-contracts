@@ -83,7 +83,7 @@ jobs:
         run: bash scripts/check-size.sh
 
       - name: Upload WASM artifacts
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: mainnet-wasm-${{ github.sha }}
           path: target/wasm32v1-none/release/invofi_*.wasm
