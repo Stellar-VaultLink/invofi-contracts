@@ -1,6 +1,6 @@
 #![no_std]
 
-use soroban_sdk::{contract, contractimpl, symbol_short, token, Address, Env, Symbol, Vec};
+use soroban_sdk::{contract, contractimpl, symbol_short, token, Address, Env, Map, Symbol, Vec};
 
 use invofi_common::{
     assert_not_paused, resolve_token, BatchItemResult, BatchRepayItem, BatchResult, ContractError,
@@ -363,6 +363,7 @@ impl RepaymentContract {
         assert_not_paused(&env);
         repayer.require_auth();
         Self::repay_invoice_internal(&env, invoice_id, offer_id, &repayer, amount)
+            .unwrap_or_else(|err| env.panic_with_error(err))
     }
 
     fn repay_invoice_internal(
@@ -371,78 +372,72 @@ impl RepaymentContract {
         offer_id: Symbol,
         repayer: &Address,
         amount: i128,
-    ) -> Invoice {
-        // Cross-contract: read invoice from registry
+    ) -> Result<Invoice, ContractError> {
         let registry_addr: Address = env
             .storage()
             .instance()
             .get(&symbol_short!("registry"))
             .unwrap_or_else(|| panic!("Not initialized"));
         let registry_client = RegistryClient::new(env, &registry_addr);
-        // CEI: Read-only cross-contract call. Repayment has no local state to mutate, so CEI is trivially satisfied.
-        let invoice: Invoice = registry_client.get_invoice(&invoice_id);
+        let invoice: Invoice = match registry_client.try_get_invoice(&invoice_id) {
+            Ok(Ok(inv)) => inv,
+            _ => return Err(ContractError::NotFound),
+        };
 
         if invoice.originator != *repayer {
-            env.panic_with_error(ContractError::Unauthorized);
+            return Err(ContractError::Unauthorized);
         }
         if invoice.status != InvoiceStatus::Financed {
-            env.panic_with_error(ContractError::InvalidTransition);
+            return Err(ContractError::InvalidTransition);
         }
 
-        // Cross-contract: read offer from financing
         let financing_addr: Address = env
             .storage()
             .instance()
             .get(&symbol_short!("financing"))
             .unwrap_or_else(|| panic!("Not initialized"));
         let financing_client = FinancingClient::new(env, &financing_addr);
-        // CEI: Read-only cross-contract call.
-        let mut offer: FinancingOffer = financing_client.get_offer(&offer_id);
+        let mut offer: FinancingOffer = match financing_client.try_get_offer(&offer_id) {
+            Ok(Ok(off)) => off,
+            _ => return Err(ContractError::NotFound),
+        };
 
         if offer.invoice_id != invoice_id {
-            env.panic_with_error(ContractError::InvalidInput);
+            return Err(ContractError::InvalidInput);
         }
         if offer.status != OfferStatus::Accepted && offer.status != OfferStatus::Financed {
-            env.panic_with_error(ContractError::InvalidTransition);
+            return Err(ContractError::InvalidTransition);
         }
-        assert!(amount > 0, "repayment amount must be greater than zero");
+        if amount <= 0 {
+            return Err(ContractError::InvalidInput);
+        }
 
         let token_id = resolve_token(env, &offer.currency);
         let token_client = token::TokenClient::new(env, &token_id);
 
-        // ── Pro-rata interest calculation (issue #176) ──────────────────────
-        // Load existing payment history to compute remaining principal.
         let payments = load_payments(env, &invoice_id);
         let principal_repaid_so_far = total_principal_repaid(&payments);
         let remaining_principal = (offer.amount - principal_repaid_so_far).max(0);
 
-        // Calculate pro-rata accrued interest on the remaining principal.
-        // interest = remaining * rate_bps * days_elapsed / 3_650_000
         let now = env.ledger().timestamp();
         let days_since_funded = ((now - offer.funded_at) / SECS_PER_DAY) as i128;
         let accrued_interest =
             pro_rata_interest(remaining_principal, offer.interest_rate, days_since_funded);
 
-        // Overdue penalty (ADR-0007). Accrues from the invoice due date, on a
-        // base frozen at principal + flat yield. Zero unless an admin has
-        // enabled it, and zero while the invoice is not yet past due.
         let yield_amount = offer.amount * (offer.interest_rate as i128) / 10_000;
         let frozen_base = offer.amount + yield_amount;
         let (penalty_bps, cap_bps) = load_penalty_config(env);
         let penalty = accrued_penalty(env, frozen_base, invoice.due_date, penalty_bps, cap_bps);
 
-        // Total obligation: remaining principal + accrued interest + penalty.
         let total_owed = remaining_principal + accrued_interest + penalty;
 
-        // Minimum partial payment check (1% of original principal).
-        // Final payments that settle the remaining balance are exempt.
         let min_payment = offer.amount * (MIN_PARTIAL_PAYMENT_BPS as i128) / 10_000;
         if amount < min_payment && amount < total_owed {
-            env.panic_with_error(ContractError::InvalidInput);
+            return Err(ContractError::InvalidInput);
         }
 
         if amount > total_owed {
-            env.panic_with_error(ContractError::InsufficientBalance);
+            return Err(ContractError::InsufficientBalance);
         }
 
         // Split the payment: interest first, then principal.
@@ -546,7 +541,7 @@ impl RepaymentContract {
             (symbol_short!("inv_rep"), invoice_id),
             (offer_id, amount, fully_repaid),
         );
-        updated_invoice
+        Ok(updated_invoice)
     }
 
     /// Repay multiple invoices in a single transaction (1-100 items).
@@ -567,33 +562,30 @@ impl RepaymentContract {
         let mut results = Vec::new(&env);
         let mut success_count: u32 = 0;
         let mut failure_count: u32 = 0;
-
-        let registry_addr: Address = env
-            .storage()
-            .instance()
-            .get(&symbol_short!("registry"))
-            .unwrap_or_else(|| panic!("Not initialized"));
-        let registry_client = RegistryClient::new(&env, &registry_addr);
-
-        let financing_addr: Address = env
-            .storage()
-            .instance()
-            .get(&symbol_short!("financing"))
-            .unwrap_or_else(|| panic!("Not initialized"));
-        let financing_client = FinancingClient::new(&env, &financing_addr);
+        let mut processed_ids = Map::<Symbol, bool>::new(&env);
 
         let limit = items.len().min(MAX_BATCH_SIZE);
         if !allow_partial {
             let mut i: u32 = 0;
             while i < limit {
-                let item = items.get(i).unwrap();
+                let item = items
+                    .get(i)
+                    .unwrap_or_else(|| env.panic_with_error(ContractError::InvalidInput));
+
+                if processed_ids.contains_key(item.invoice_id.clone()) {
+                    env.panic_with_error(ContractError::AlreadyExists);
+                }
+                processed_ids.set(item.invoice_id.clone(), true);
+
                 Self::repay_invoice_internal(
                     &env,
                     item.invoice_id.clone(),
                     item.offer_id.clone(),
                     &repayer,
                     item.amount,
-                );
+                )
+                .unwrap_or_else(|err| env.panic_with_error(err));
+
                 results.push_back(BatchItemResult {
                     id: item.invoice_id.clone(),
                     success: true,
@@ -609,38 +601,32 @@ impl RepaymentContract {
         } else {
             let mut i: u32 = 0;
             while i < limit {
-                let item = items.get(i).unwrap();
+                let item = items
+                    .get(i)
+                    .unwrap_or_else(|| env.panic_with_error(ContractError::InvalidInput));
                 let mut err_code: u32 = 0;
-                if item.amount <= 0 {
-                    err_code = ContractError::InvalidInput as u32;
+
+                if processed_ids.contains_key(item.invoice_id.clone()) {
+                    err_code = ContractError::AlreadyExists as u32;
                 } else {
-                    let invoice = registry_client.get_invoice(&item.invoice_id);
-                    if invoice.originator != repayer {
-                        err_code = ContractError::Unauthorized as u32;
-                    } else if invoice.status != InvoiceStatus::Financed {
-                        err_code = ContractError::InvalidTransition as u32;
-                    } else {
-                        let offer = financing_client.get_offer(&item.offer_id);
-                        if offer.invoice_id != item.invoice_id {
-                            err_code = ContractError::InvalidInput as u32;
-                        } else if offer.status != OfferStatus::Accepted
-                            && offer.status != OfferStatus::Financed
-                        {
-                            err_code = ContractError::InvalidTransition as u32;
-                        } else {
-                            Self::repay_invoice_internal(
-                                &env,
-                                item.invoice_id.clone(),
-                                item.offer_id.clone(),
-                                &repayer,
-                                item.amount,
-                            );
+                    processed_ids.set(item.invoice_id.clone(), true);
+                    match Self::repay_invoice_internal(
+                        &env,
+                        item.invoice_id.clone(),
+                        item.offer_id.clone(),
+                        &repayer,
+                        item.amount,
+                    ) {
+                        Ok(_) => {
                             success_count += 1;
                             results.push_back(BatchItemResult {
                                 id: item.invoice_id.clone(),
                                 success: true,
                                 error_code: 0,
                             });
+                        }
+                        Err(err) => {
+                            err_code = err as u32;
                         }
                     }
                 }

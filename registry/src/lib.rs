@@ -461,13 +461,22 @@ impl RegistryContract {
         let mut results = Vec::new(&env);
         let mut success_count: u32 = 0;
         let mut failure_count: u32 = 0;
+        let mut processed_ids = Map::<Symbol, bool>::new(&env);
 
         let limit = invoices_input.len().min(MAX_BATCH_SIZE);
         if !allow_partial {
             // Atomic mode: all items must be valid upfront or entire transaction reverts
             let mut i: u32 = 0;
             while i < limit {
-                let item = invoices_input.get(i).unwrap();
+                let item = invoices_input
+                    .get(i)
+                    .unwrap_or_else(|| env.panic_with_error(ContractError::InvalidInput));
+
+                if processed_ids.contains_key(item.id.clone()) {
+                    env.panic_with_error(ContractError::AlreadyExists);
+                }
+                processed_ids.set(item.id.clone(), true);
+
                 if item.amount < MIN_INVOICE_AMOUNT || item.due_date <= now {
                     env.panic_with_error(ContractError::InvalidInput);
                 }
@@ -510,12 +519,20 @@ impl RegistryContract {
             let mut added_this_batch = 0u32;
             let mut i: u32 = 0;
             while i < limit {
-                let item = invoices_input.get(i).unwrap();
+                let item = invoices_input
+                    .get(i)
+                    .unwrap_or_else(|| env.panic_with_error(ContractError::InvalidInput));
                 let mut err_code: u32 = 0;
-                if item.amount < MIN_INVOICE_AMOUNT || item.due_date <= now {
-                    err_code = ContractError::InvalidInput as u32;
-                } else if invoices_map.contains_key(item.id.clone()) {
+
+                if processed_ids.contains_key(item.id.clone()) {
                     err_code = ContractError::AlreadyExists as u32;
+                } else {
+                    processed_ids.set(item.id.clone(), true);
+                    if item.amount < MIN_INVOICE_AMOUNT || item.due_date <= now {
+                        err_code = ContractError::InvalidInput as u32;
+                    } else if invoices_map.contains_key(item.id.clone()) {
+                        err_code = ContractError::AlreadyExists as u32;
+                    }
                 }
 
                 if err_code == 0 {
