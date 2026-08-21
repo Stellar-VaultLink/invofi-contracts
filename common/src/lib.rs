@@ -77,6 +77,9 @@ pub const VERIFICATION_TYPES: [VerificationType; 3] = [
     VerificationType::TaxCompliance,
 ];
 
+/// Maximum number of items allowed in a single batch transaction.
+pub const MAX_BATCH_SIZE: u32 = 100;
+
 // ─── Shared Error Enum ────────────────────────────────────────────────────────
 
 /// Structured error type shared across all InvoFi contracts.
@@ -129,6 +132,44 @@ pub enum ContractError {
 }
 
 // ─── Types ───────────────────────────────────────────────────────────────────
+
+/// Input parameters for batch invoice registration.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct BatchRegisterInvoiceInput {
+    pub id: Symbol,
+    pub amount: i128,
+    pub currency: Symbol,
+    pub due_date: u64,
+}
+
+/// Result of processing a single item within a batch operation.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct BatchItemResult {
+    pub id: Symbol,
+    pub success: bool,
+    pub error_code: u32,
+}
+
+/// Structured result summary for a batch operation.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct BatchResult {
+    pub total_processed: u32,
+    pub success_count: u32,
+    pub failure_count: u32,
+    pub results: Vec<BatchItemResult>,
+}
+
+/// Input parameters for batch repayment item.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct BatchRepayItem {
+    pub invoice_id: Symbol,
+    pub offer_id: Symbol,
+    pub amount: i128,
+}
 
 /// Risk tier for yield-rate lookups. A = low risk, C = high risk.
 #[contracttype]
@@ -634,12 +675,7 @@ pub trait InsuranceInterface {
     /// Claim a partial payout from the insurance pool for a specific offer.
     /// The claim amount is bounded by the reserved amount for this offer and
     /// the pool's available balance. Returns (paid, remaining_reserved).
-    fn claim_payout(
-        env: Env,
-        offer_id: Symbol,
-        lender: Address,
-        amount: i128,
-    ) -> (i128, i128);
+    fn claim_payout(env: Env, offer_id: Symbol, lender: Address, amount: i128) -> (i128, i128);
 }
 
 // ─── Reputation Cross-Contract Interface ─────────────────────────────────────
@@ -666,13 +702,13 @@ pub trait ReputationInterface {
 
 use soroban_sdk::Vec;
 
-/// Validates and executes an invoice state transition. Emits a structured 
+/// Validates and executes an invoice state transition. Emits a structured
 /// transition event and records the transition in the history log.
-/// 
+///
 /// This is the single point of authority for all invoice status changes across
 /// the protocol. All entry points (registry, financing, repayment) must route
 /// through this function.
-/// 
+///
 /// # Panics
 /// - If the transition is invalid for the current state
 /// - If the transition would violate business rules (e.g., due_date check for Overdue)
@@ -697,7 +733,7 @@ pub fn assert_transition(
 }
 
 /// Validates that a transition from `from_status` to `to_status` is allowed.
-/// 
+///
 /// Valid transitions:
 /// - Pending -> Cancelled (originator cancellation)
 /// - Pending -> Financed (offer acceptance)

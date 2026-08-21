@@ -2,7 +2,7 @@
 extern crate std;
 
 use super::RepaymentContract;
-use invofi_common::{InvoiceStatus, OfferStatus};
+use invofi_common::{BatchRepayItem, InvoiceStatus, OfferStatus};
 use invofi_financing::FinancingContract;
 use invofi_insurance::InsuranceContract;
 use invofi_registry::RegistryContract;
@@ -10,7 +10,7 @@ use invofi_reputation::ReputationContract;
 use soroban_sdk::{
     symbol_short,
     testutils::{Address as _, Ledger as _},
-    token, Address, Env,
+    token, Address, Env, Symbol,
 };
 
 /// Deploy all three contracts (registry, financing, repayment) and return
@@ -29,8 +29,10 @@ fn setup_contracts<'a>(
     let reg = invofi_registry::RegistryContractClient::new(env, &registry_id);
 
     // Financing
-    let financing_id =
-        env.register(FinancingContract, (admin.clone(), registry_id.clone(), token.clone()));
+    let financing_id = env.register(
+        FinancingContract,
+        (admin.clone(), registry_id.clone(), token.clone()),
+    );
     let fin = invofi_financing::FinancingContractClient::new(env, &financing_id);
 
     // Repayment
@@ -65,13 +67,7 @@ fn create_token(env: &Env) -> Address {
 
 /// Mint `amount` to `who` and approve `spender` to move those funds (the same
 /// flow a real lender runs on-chain before `accept_offer`).
-fn mint_and_approve(
-    env: &Env,
-    token_id: &Address,
-    spender: &Address,
-    who: &Address,
-    amount: i128,
-) {
+fn mint_and_approve(env: &Env, token_id: &Address, spender: &Address, who: &Address, amount: i128) {
     let asset_client = token::StellarAssetClient::new(env, token_id);
     asset_client.mint(who, &amount);
 
@@ -831,7 +827,10 @@ fn test_pause_blocks_all_repayment_state_changes() {
     rep.pause(&admin);
     fn assert_paused<F: FnOnce()>(f: F) {
         let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(f));
-        assert!(result.is_err(), "state-changing function should panic while paused");
+        assert!(
+            result.is_err(),
+            "state-changing function should panic while paused"
+        );
     }
 
     assert_paused(|| {
@@ -862,7 +861,10 @@ fn test_pause_blocks_all_repayment_state_changes() {
         rep.transfer_admin(&admin, &new_admin);
     });
 
-    assert_eq!(rep.get_duration_limits().0, invofi_common::MIN_OFFER_DURATION_SECS);
+    assert_eq!(
+        rep.get_duration_limits().0,
+        invofi_common::MIN_OFFER_DURATION_SECS
+    );
 }
 
 // ─── Default-flow integration tests (Task 10 + 11) ───────────────────────────
@@ -1137,8 +1139,8 @@ fn test_repayment_get_installment_due_zero_after_full_repay() {
     let originator = Address::generate(&env);
     let lender = Address::generate(&env);
     let amount: i128 = 1_050_000_000; // 12 × 87_500_000 principal
-    // 500 bps interest → per-installment: 87_500_000 + 4_375_000 = 91_875_000
-    // 12 installments × 91_875_000 = 1_102_500_000 total due
+                                      // 500 bps interest → per-installment: 87_500_000 + 4_375_000 = 91_875_000
+                                      // 12 installments × 91_875_000 = 1_102_500_000 total due
 
     let token_id = create_token(&env);
     let (reg, fin, rep) = setup_contracts(&env, &admin, &token_id);
@@ -1678,4 +1680,143 @@ fn test_set_penalty_blocked_while_paused() {
 
     c.rep.pause(&c.admin);
     c.rep.set_penalty(&c.admin, &PEN_BPS, &PEN_CAP_BPS);
+}
+
+// ─── Batch Repayment Tests ────────────────────────────────────────────────
+
+fn run_batch_repay_test(batch_size: u32) {
+    let env = Env::default();
+    env.mock_all_auths();
+    env.ledger().set_timestamp(1_000_000);
+
+    let admin = Address::generate(&env);
+    let originator = Address::generate(&env);
+    let lender = Address::generate(&env);
+    let token_id = create_token(&env);
+
+    let (reg, fin, rep) = setup_contracts(&env, &admin, &token_id);
+
+    let mut repay_items = soroban_sdk::Vec::new(&env);
+    let amount = 10_000_000i128;
+    let interest_rate = 500u32;
+    let total_due = amount + (amount * (interest_rate as i128) / 10_000);
+
+    for i in 0..batch_size {
+        let inv_id = Symbol::new(&env, &std::format!("rpi_{}_{}", batch_size, i));
+        let off_id = Symbol::new(&env, &std::format!("rpo_{}_{}", batch_size, i));
+
+        reg.register_invoice(
+            &inv_id,
+            &originator,
+            &amount,
+            &symbol_short!("USDC"),
+            &2_000_000u64,
+        );
+        fin.create_offer(
+            &off_id,
+            &inv_id,
+            &lender,
+            &amount,
+            &symbol_short!("USDC"),
+            &interest_rate,
+            &86_400u64,
+        );
+        mint_and_approve(&env, &token_id, &fin.address, &lender, amount);
+        fin.accept_offer(&off_id, &originator);
+
+        // Mint token to originator for repayment
+        mint_and_approve(&env, &token_id, &rep.address, &originator, total_due);
+
+        repay_items.push_back(BatchRepayItem {
+            invoice_id: inv_id,
+            offer_id: off_id,
+            amount: total_due,
+        });
+    }
+
+    let res = rep.batch_repay_invoices(&originator, &repay_items, &false);
+    assert_eq!(res.total_processed, batch_size);
+    assert_eq!(res.success_count, batch_size);
+    assert_eq!(res.failure_count, 0);
+
+    for item in repay_items.iter() {
+        let inv = reg.get_invoice(&item.invoice_id);
+        assert_eq!(inv.status, InvoiceStatus::Repaid);
+    }
+}
+
+#[test]
+fn test_batch_repay_invoices_size_1() {
+    run_batch_repay_test(1);
+}
+
+#[test]
+fn test_batch_repay_invoices_size_10() {
+    run_batch_repay_test(10);
+}
+
+#[test]
+fn test_batch_repay_invoices_size_25() {
+    run_batch_repay_test(25);
+}
+
+#[test]
+fn test_batch_repay_invoices_partial_mode() {
+    let env = Env::default();
+    env.mock_all_auths();
+    env.ledger().set_timestamp(1_000_000);
+
+    let admin = Address::generate(&env);
+    let originator = Address::generate(&env);
+    let lender = Address::generate(&env);
+    let token_id = create_token(&env);
+
+    let (reg, fin, rep) = setup_contracts(&env, &admin, &token_id);
+
+    let inv_id = symbol_short!("partrpy");
+    let off_id = symbol_short!("partoff");
+    let amount = 10_000_000i128;
+    let total_due = amount + (amount * 500 / 10_000);
+
+    reg.register_invoice(
+        &inv_id,
+        &originator,
+        &amount,
+        &symbol_short!("USDC"),
+        &2_000_000u64,
+    );
+    fin.create_offer(
+        &off_id,
+        &inv_id,
+        &lender,
+        &amount,
+        &symbol_short!("USDC"),
+        &500u32,
+        &86_400u64,
+    );
+    mint_and_approve(&env, &token_id, &fin.address, &lender, amount);
+    fin.accept_offer(&off_id, &originator);
+    mint_and_approve(&env, &token_id, &rep.address, &originator, total_due);
+
+    let mut batch = soroban_sdk::Vec::new(&env);
+    // Valid item
+    batch.push_back(BatchRepayItem {
+        invoice_id: inv_id.clone(),
+        offer_id: off_id.clone(),
+        amount: total_due,
+    });
+    // Invalid item (non-existent invoice)
+    batch.push_back(BatchRepayItem {
+        invoice_id: symbol_short!("noinv"),
+        offer_id: off_id,
+        amount: total_due,
+    });
+
+    let res = rep.batch_repay_invoices(&originator, &batch, &true);
+    assert_eq!(res.total_processed, 2);
+    assert_eq!(res.success_count, 1);
+    assert_eq!(res.failure_count, 1);
+
+    let inv = reg.get_invoice(&inv_id);
+    assert_eq!(inv.status, InvoiceStatus::Repaid);
 }
