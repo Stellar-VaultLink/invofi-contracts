@@ -80,7 +80,9 @@ and are enforced by commitlint in CI.
     would not revoke anything, which is the whole point of removing a
     compromised key. Their records stay readable through
     `get_verifications`: the history of who said what is preserved, it just
-    no longer votes.
+    no longer votes — until the invoice reaches its attestation cap, where
+    departed verifiers' records are the first slots reclaimed. Retention is
+    best-effort against a bounded store, not a permanent guarantee.
   - **Status is derived per verification type**, with
     `get_invoice_verification_status` returning the conjunction across all
     three. `Verified` requires every type to have cleared its threshold.

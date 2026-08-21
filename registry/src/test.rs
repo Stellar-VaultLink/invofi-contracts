@@ -2476,6 +2476,218 @@ fn test_eviction_cannot_disturb_another_types_status() {
     );
 }
 
+#[test]
+fn test_eviction_preserves_every_status_it_can_reach() {
+    let env = Env::default();
+    env.mock_all_auths();
+    env.ledger().set_timestamp(1_000_000);
+
+    // The exact boundary of the eviction invariant. Verified and Rejected rest
+    // on live records from current verifiers and survive eviction. Expired
+    // rests on a *lapsed* record, which is evictable, so a type holding only
+    // one of those can fall back to Pending. Both are non-verified states that
+    // gate financing identically -- see ADR-0009 decision 8.
+    let invoice_id = symbol_short!("vinv28");
+    let (client, admin, _originator, anchor_v) = setup_oracle(&env, &invoice_id, 1_000_000_000);
+
+    // A current verifier's BusinessRegistration attestation, left to lapse.
+    client.attest(
+        &invoice_id,
+        &anchor_v,
+        &VerificationType::BusinessRegistration,
+        &evidence_hash(&env, 1),
+        &true,
+    );
+    env.ledger().set_timestamp(1_000_000 + 7_776_000 + 1);
+    assert_eq!(
+        client.get_verification_status(&invoice_id, &VerificationType::BusinessRegistration),
+        VerificationStatus::Expired
+    );
+
+    // A live rejection on another type, from a verifier who stays in the set.
+    client.attest(
+        &invoice_id,
+        &anchor_v,
+        &VerificationType::TaxCompliance,
+        &evidence_hash(&env, 2),
+        &false,
+    );
+    assert_eq!(
+        client.get_verification_status(&invoice_id, &VerificationType::TaxCompliance),
+        VerificationStatus::Rejected
+    );
+
+    // Fill the remaining capacity so the next attestation must evict.
+    let types = [
+        VerificationType::DocumentHash,
+        VerificationType::BusinessRegistration,
+        VerificationType::TaxCompliance,
+    ];
+    for round in 0..19u8 {
+        let rotating = Address::generate(&env);
+        client.add_verifier(&admin, &rotating);
+        for (offset, v_type) in types.iter().enumerate() {
+            client.attest(
+                &invoice_id,
+                &rotating,
+                v_type,
+                &evidence_hash(&env, 10 + round * 3 + offset as u8),
+                &true,
+            );
+        }
+        client.remove_verifier(&admin, &rotating);
+    }
+    assert_eq!(client.get_verifications(&invoice_id).len(), 59);
+
+    // DocumentHash verified by a verifier who remains trusted and live.
+    let active = Address::generate(&env);
+    client.add_verifier(&admin, &active);
+    client.attest(
+        &invoice_id,
+        &active,
+        &VerificationType::DocumentHash,
+        &evidence_hash(&env, 100),
+        &true,
+    );
+    assert_eq!(client.get_verifications(&invoice_id).len(), 60);
+    assert_eq!(
+        client.get_verification_status(&invoice_id, &VerificationType::DocumentHash),
+        VerificationStatus::Verified
+    );
+
+    // Now force evictions. Departed verifiers' records go first -- 57 of them
+    // are available -- so the live statements are untouched throughout.
+    for n in 0..3u8 {
+        let extra = Address::generate(&env);
+        client.add_verifier(&admin, &extra);
+        client.attest(
+            &invoice_id,
+            &extra,
+            &VerificationType::DocumentHash,
+            &evidence_hash(&env, 200 + n),
+            &true,
+        );
+        client.remove_verifier(&admin, &extra);
+    }
+
+    // The guaranteed half: neither Verified nor Rejected moved.
+    assert_eq!(
+        client.get_verification_status(&invoice_id, &VerificationType::DocumentHash),
+        VerificationStatus::Verified,
+        "eviction must never move a type off Verified"
+    );
+    assert_eq!(
+        client.get_verification_status(&invoice_id, &VerificationType::TaxCompliance),
+        VerificationStatus::Rejected,
+        "eviction must never move a type off Rejected"
+    );
+
+    // And Expired is preserved too. Eviction only ever reached departed
+    // records here -- which is not a quirk of this fixture but the general
+    // case, since eviction cannot fire unless a departed record exists (see
+    // the test below). So the lapsed BusinessRegistration record is untouched.
+    assert_eq!(
+        client.get_verification_status(&invoice_id, &VerificationType::BusinessRegistration),
+        VerificationStatus::Expired,
+        "a lapsed record is never reached while departed records remain"
+    );
+}
+
+#[test]
+fn test_eviction_cannot_fire_without_a_departed_record_to_take() {
+    let env = Env::default();
+    env.mock_all_auths();
+    env.ledger().set_timestamp(1_000_000);
+
+    // Why the lapsed-eviction pass is unreachable, demonstrated rather than
+    // asserted in prose. A full invoice whose records all belong to current
+    // verifiers means every one of them already holds every type -- so an
+    // incoming attestation replaces its own record and frees a slot, and
+    // eviction is never reached. Nothing can be evicted because nothing needs
+    // to be.
+    let invoice_id = symbol_short!("vinv29");
+    let (client, admin, _originator, first) = setup_oracle(&env, &invoice_id, 1_000_000_000);
+
+    let types = [
+        VerificationType::DocumentHash,
+        VerificationType::BusinessRegistration,
+        VerificationType::TaxCompliance,
+    ];
+
+    // The seeded verifier states BusinessRegistration first, and is then left
+    // to lapse while the rest of the set fills the invoice.
+    client.attest(
+        &invoice_id,
+        &first,
+        &VerificationType::BusinessRegistration,
+        &evidence_hash(&env, 1),
+        &true,
+    );
+    env.ledger().set_timestamp(1_000_000 + 7_776_000 + 1);
+
+    // Its other two types, plus 19 more verifiers on all three: 60 records,
+    // every one of them held by a verifier still in the set.
+    for v_type in [
+        VerificationType::DocumentHash,
+        VerificationType::TaxCompliance,
+    ] {
+        client.attest(&invoice_id, &first, &v_type, &evidence_hash(&env, 2), &true);
+    }
+    for round in 0..19u8 {
+        let v = Address::generate(&env);
+        client.add_verifier(&admin, &v);
+        for (offset, v_type) in types.iter().enumerate() {
+            client.attest(
+                &invoice_id,
+                &v,
+                v_type,
+                &evidence_hash(&env, 10 + round * 3 + offset as u8),
+                &true,
+            );
+        }
+    }
+    assert_eq!(client.get_verifications(&invoice_id).len(), 60);
+    assert_eq!(client.get_verifiers().len(), 20);
+
+    // Note what a full all-trusted invoice implies: every verifier holds every
+    // type, so no type is ever down to a lone lapsed record here. The lapsed
+    // record is tracked directly instead of through a status.
+    let lapsed_present = |c: &super::RegistryContractClient| {
+        let mut found = 0u32;
+        for a in c.get_verifications(&invoice_id).iter() {
+            if a.verifier == first && a.v_type == VerificationType::BusinessRegistration {
+                assert!(a.valid_until < env.ledger().timestamp(), "record must be lapsed");
+                found += 1;
+            }
+        }
+        found
+    };
+    assert_eq!(lapsed_present(&client), 1);
+
+    // The set is at MAX_VERIFIERS, so no new verifier can be admitted to
+    // attest -- every possible caller already holds every type.
+    let outsider = Address::generate(&env);
+    assert!(!client.is_verifier(&outsider));
+
+    // A trusted verifier attesting again replaces its own record, freeing the
+    // slot it needs. The count holds at 60 and the lapsed record is still
+    // there, which is the observable proof that eviction never ran: had it
+    // run, this record was the only thing pass two could have taken.
+    client.attest(
+        &invoice_id,
+        &first,
+        &VerificationType::DocumentHash,
+        &evidence_hash(&env, 200),
+        &true,
+    );
+    assert_eq!(client.get_verifications(&invoice_id).len(), 60);
+    assert_eq!(
+        lapsed_present(&client),
+        1,
+        "replacement frees its own slot, so the lapsed record is never taken"
+    );
+}
+
 // ── Events ───────────────────────────────────────────────────────────────────
 
 #[test]

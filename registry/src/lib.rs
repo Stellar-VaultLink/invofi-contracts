@@ -134,8 +134,10 @@ fn type_status(
     // how the admin withdraws trust -- usually because the key is compromised
     // or the verifier was found negligent -- so their statements must stop
     // counting the moment they leave, or removal would not actually revoke
-    // anything. The records stay readable through `get_verifications`: the
-    // history of who said what is preserved, it just no longer votes.
+    // anything. The records stay readable through `get_verifications` -- the
+    // history of who said what is preserved, it just no longer votes -- until
+    // the invoice hits its cap, where departed verifiers' records are the
+    // first thing `evict_one_slot` reclaims.
     let trusted = load_verifiers(env);
 
     for attestation in attestations.iter() {
@@ -182,21 +184,34 @@ fn type_status(
 /// have since been removed keep occupying slots, so a rotated-through set can
 /// fill the list and permanently block admission. History yields to liveness
 /// in a defined order: the oldest record from a verifier that is no longer
-/// trusted goes first, then the oldest lapsed record. Neither can affect any
-/// status -- `type_status` counts only the current verifier set, and lapsed
-/// records count nowhere -- so eviction can never move a verification type
-/// from `Verified` or `Rejected` as a side effect of an unrelated
-/// attestation.
+/// trusted goes first, then the oldest lapsed record.
 ///
-/// The final `None` arm cannot trigger under the current constants, and the
-/// arithmetic is worth stating because it is what makes the cap safe. A list
-/// with nothing evictable is 60 live records held by trusted verifiers, which
-/// at `MAX_VERIFIERS = 20` and three types means every trusted verifier
-/// already holds a record for every type. An incoming attestation therefore
-/// always replaces one of them, freeing its own slot before this is reached.
-/// The arm is kept as the correct behaviour — refuse rather than drop a live
-/// statement from an active verifier — if those constants are ever changed
-/// out of that relationship.
+/// Under the current constants only the first pass can ever run, and that
+/// makes eviction **fully status-preserving**. The arithmetic: eviction is
+/// reached only when the list still holds `MAX_ATTESTATIONS_PER_INVOICE`
+/// records after excluding the incoming verifier's own record for this type.
+/// Were every one of those 60 from a current verifier, then with at most
+/// `MAX_VERIFIERS` (20) of them, one record per (verifier, type) and three
+/// types, the list would have to be exactly 20 x 3 -- meaning the incoming
+/// verifier already holds this type, its record is the one excluded, and the
+/// count is 59, so eviction is never reached at all. So whenever eviction
+/// *does* run, at least one record belongs to a departed verifier, and pass
+/// one finds it. Departed records are filtered out of `type_status`, so
+/// dropping one cannot move any status.
+///
+/// The lapsed pass and the refusal below are therefore unreachable today.
+/// They are kept because they are the correct behaviour if
+/// `MAX_VERIFIERS x 3` and `MAX_ATTESTATIONS_PER_INVOICE` are ever moved out
+/// of that equality, and because the ordering states the intent: a lapsed
+/// record is the next-least-valuable thing to drop. If the lapsed pass ever
+/// did run it could take a type whose only remaining record is a lapsed one
+/// from `Expired` to `Pending` -- both non-verified states that gate
+/// financing identically -- but it can never touch `Verified` or `Rejected`,
+/// which rest on live records from current verifiers.
+///
+/// The final `None` arm is unreachable for the same reason, and is likewise
+/// kept as the correct behaviour: refuse the attestation rather than drop a
+/// live statement from an active verifier.
 fn evict_one_slot(env: &Env, list: &Vec<Attestation>, now: u64) -> Vec<Attestation> {
     let trusted = load_verifiers(env);
     let is_trusted = |who: &Address| trusted.iter().any(|entry| entry == *who);

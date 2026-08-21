@@ -126,7 +126,10 @@ verifier leaves. Both halves matter, and they answer different questions.
 
 **Why the records stay:** who said what, when, is the point of storing them,
 and deleting history on removal would make the record unauditable exactly when
-an audit matters. `get_verifications` still returns them.
+an audit matters. `get_verifications` still returns them — subject to the cap
+in decision 8, which reclaims departed verifiers' slots first when an invoice
+runs out of room. Retention is best-effort against a bounded store, not a
+permanent guarantee.
 
 **Why they stop counting:** removal is how an admin withdraws trust, and the
 reason is normally that the key is compromised or the verifier was found
@@ -148,11 +151,33 @@ capacity: it rewrites a record's status, it does not remove it.
 
 When the list is full, one slot is therefore freed in a defined order: the
 oldest record from a verifier no longer in the set, then the oldest lapsed
-record. Both classes are precisely the records that decision 7 already
-excludes from status, so eviction can never move a verification type off
-`Verified` or `Rejected` as a side effect of an unrelated attestation. Live
-records from active verifiers are never dropped; if nothing is evictable the
-attestation is refused instead.
+record. Live records from active verifiers are never dropped; if nothing is
+evictable the attestation is refused instead.
+
+**Under the current constants eviction is fully status-preserving,** because
+only the first pass can ever run. The arithmetic is worth writing down, since
+it is what the guarantee rests on.
+
+Eviction is reached only when the list still holds 60 records *after*
+excluding the incoming verifier's own record for the type being attested. Were
+all 60 from current verifiers, then with at most `MAX_VERIFIERS` (20) of them,
+one record per (verifier, type), and three types, the list would have to be
+exactly 20 × 3 — which means the incoming verifier already holds this type, its
+record is the one excluded, the count is 59, and eviction is never reached.
+So whenever eviction *does* run, at least one record belongs to a departed
+verifier and the first pass finds it. Decision 7 excludes those from status
+entirely, so dropping one cannot move anything.
+
+The lapsed pass and the refusal are unreachable today. They are kept as the
+correct behaviour if `MAX_VERIFIERS × 3` and `MAX_ATTESTATIONS_PER_INVOICE` are
+ever moved out of that equality, and because the ordering records the intent —
+a lapsed record is the next-least-valuable thing to drop. Anyone changing those
+two constants should note what becomes reachable: the lapsed pass could take a
+type whose only remaining record is a lapsed one from `Expired` to `Pending`.
+Both are non-verified states that gate financing identically, so it would be an
+acceptable loss of nuance rather than a correctness break — but `Verified` and
+`Rejected` stay untouchable either way, since both rest on live records from
+current verifiers and neither evictable class qualifies.
 
 ## Consequences
 
