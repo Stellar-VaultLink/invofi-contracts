@@ -496,7 +496,7 @@ pub fn resolve_token(env: &Env, currency: &Symbol) -> Address {
 ///     transfer_admin.
 ///   - exceptions: pause, unpause, contract_is_paused, getters.
 /// - Reputation:
-///   - state-changing: record_outcome, set_recorder.
+///   - state-changing: record_outcome, resolve_dispute, set_recorder.
 ///   - exceptions: pause, unpause, contract_is_paused, getters.
 pub fn assert_not_paused(env: &Env) {
     let paused: bool = env

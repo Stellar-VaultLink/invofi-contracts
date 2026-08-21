@@ -104,6 +104,24 @@ and are enforced by commitlint in CI.
     threshold, fee math and its overflow guard, fee-on-rejection, expiry and
     re-attestation, non-retroactive validity changes, the removed-verifier
     case, and the three events.
+- **Dispute-aware reputation adjustment (issue #134)** — a default that a
+  dispute later overturns no longer keeps punishing the originator.
+  `reputation` gains an admin-only `resolve_dispute(admin, originator,
+  originator_favourable)` mirroring the registry's admin-only
+  `resolve_dispute`: when the resolution is in the originator's favour, one
+  previously-recorded default is **neutralized** (`defaults` decrements by
+  one, floored at 0) so the `-2` penalty stops counting against them. A
+  resolution against the originator leaves the recorded outcome unchanged.
+  - The documented rule lives in ADR-0004 §7. The scoring formula itself is
+    untouched — `get_score` stays `repayments − 2×defaults`, floored at 0,
+    public and read-only, and non-disputed outcomes are unaffected.
+  - The adjustment emits a `ReputationChanged` event (topic `rep_chg`, new
+    to the canonical events table) carrying the corrected score.
+  - The recorder restriction is unchanged: only the repayment contract can
+    record new outcomes; only the admin can adjust them after a dispute.
+  - 6 new tests: favourable neutralization, favourable no-op with no
+    recorded default, unfavourable no-op, non-admin rejection
+    (`E_UNAUTHORIZED`), pause guard, and the emitted event payload.
 
 - **Partial repayment with pro-rata interest (issue #176)** — originators
   can now make partial payments against an invoice, with interest calculated
