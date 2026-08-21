@@ -115,7 +115,7 @@ jobs:
         run: cargo install --locked stellar-cli
 
       - name: Download WASM artifacts from dry-run
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           name: mainnet-wasm-${{ github.sha }}
           path: target/wasm32v1-none/release/
