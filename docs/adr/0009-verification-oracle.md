@@ -126,7 +126,10 @@ verifier leaves. Both halves matter, and they answer different questions.
 
 **Why the records stay:** who said what, when, is the point of storing them,
 and deleting history on removal would make the record unauditable exactly when
-an audit matters. `get_verifications` still returns them.
+an audit matters. `get_verifications` still returns them — subject to the cap
+in decision 8, which reclaims departed verifiers' slots first when an invoice
+runs out of room. Retention is best-effort against a bounded store, not a
+permanent guarantee.
 
 **Why they stop counting:** removal is how an admin withdraws trust, and the
 reason is normally that the key is compromised or the verifier was found
@@ -148,11 +151,24 @@ capacity: it rewrites a record's status, it does not remove it.
 
 When the list is full, one slot is therefore freed in a defined order: the
 oldest record from a verifier no longer in the set, then the oldest lapsed
-record. Both classes are precisely the records that decision 7 already
-excludes from status, so eviction can never move a verification type off
-`Verified` or `Rejected` as a side effect of an unrelated attestation. Live
-records from active verifiers are never dropped; if nothing is evictable the
-attestation is refused instead.
+record. Live records from active verifiers are never dropped; if nothing is
+evictable the attestation is refused instead.
+
+The invariant this buys, stated exactly: **eviction can never move a
+verification type off `Verified` or `Rejected`.** Both rest on live records
+from current verifiers, and neither evictable class qualifies — departed
+verifiers are excluded from status by decision 7, and a lapsed record is
+neither an approval nor a live rejection.
+
+It is not fully status-neutral, and the gap is worth naming. A type whose only
+remaining record is a lapsed one from a current verifier reads `Expired`;
+evicting that record leaves it reading `Pending`. We accept this. Both are
+non-verified states that gate financing identically — the difference is only
+whether a client says "evidence went stale" or "no evidence yet". Preserving
+it would require checking every type's status before committing to a
+candidate, and could refuse an attestation while evictable slots remain,
+spending the liveness this policy exists to protect on a distinction that
+changes no decision.
 
 ## Consequences
 

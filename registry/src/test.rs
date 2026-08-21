@@ -2476,6 +2476,121 @@ fn test_eviction_cannot_disturb_another_types_status() {
     );
 }
 
+#[test]
+fn test_eviction_holds_verified_but_may_collapse_expired_to_pending() {
+    let env = Env::default();
+    env.mock_all_auths();
+    env.ledger().set_timestamp(1_000_000);
+
+    // The exact boundary of the eviction invariant. Verified and Rejected rest
+    // on live records from current verifiers and survive eviction. Expired
+    // rests on a *lapsed* record, which is evictable, so a type holding only
+    // one of those can fall back to Pending. Both are non-verified states that
+    // gate financing identically -- see ADR-0009 decision 8.
+    let invoice_id = symbol_short!("vinv28");
+    let (client, admin, _originator, anchor_v) = setup_oracle(&env, &invoice_id, 1_000_000_000);
+
+    // A current verifier's BusinessRegistration attestation, left to lapse.
+    client.attest(
+        &invoice_id,
+        &anchor_v,
+        &VerificationType::BusinessRegistration,
+        &evidence_hash(&env, 1),
+        &true,
+    );
+    env.ledger().set_timestamp(1_000_000 + 7_776_000 + 1);
+    assert_eq!(
+        client.get_verification_status(&invoice_id, &VerificationType::BusinessRegistration),
+        VerificationStatus::Expired
+    );
+
+    // A live rejection on another type, from a verifier who stays in the set.
+    client.attest(
+        &invoice_id,
+        &anchor_v,
+        &VerificationType::TaxCompliance,
+        &evidence_hash(&env, 2),
+        &false,
+    );
+    assert_eq!(
+        client.get_verification_status(&invoice_id, &VerificationType::TaxCompliance),
+        VerificationStatus::Rejected
+    );
+
+    // Fill the remaining capacity so the next attestation must evict.
+    let types = [
+        VerificationType::DocumentHash,
+        VerificationType::BusinessRegistration,
+        VerificationType::TaxCompliance,
+    ];
+    for round in 0..19u8 {
+        let rotating = Address::generate(&env);
+        client.add_verifier(&admin, &rotating);
+        for (offset, v_type) in types.iter().enumerate() {
+            client.attest(
+                &invoice_id,
+                &rotating,
+                v_type,
+                &evidence_hash(&env, 10 + round * 3 + offset as u8),
+                &true,
+            );
+        }
+        client.remove_verifier(&admin, &rotating);
+    }
+    assert_eq!(client.get_verifications(&invoice_id).len(), 59);
+
+    // DocumentHash verified by a verifier who remains trusted and live.
+    let active = Address::generate(&env);
+    client.add_verifier(&admin, &active);
+    client.attest(
+        &invoice_id,
+        &active,
+        &VerificationType::DocumentHash,
+        &evidence_hash(&env, 100),
+        &true,
+    );
+    assert_eq!(client.get_verifications(&invoice_id).len(), 60);
+    assert_eq!(
+        client.get_verification_status(&invoice_id, &VerificationType::DocumentHash),
+        VerificationStatus::Verified
+    );
+
+    // Now force evictions. Departed verifiers' records go first -- 57 of them
+    // are available -- so the live statements are untouched throughout.
+    for n in 0..3u8 {
+        let extra = Address::generate(&env);
+        client.add_verifier(&admin, &extra);
+        client.attest(
+            &invoice_id,
+            &extra,
+            &VerificationType::DocumentHash,
+            &evidence_hash(&env, 200 + n),
+            &true,
+        );
+        client.remove_verifier(&admin, &extra);
+    }
+
+    // The guaranteed half: neither Verified nor Rejected moved.
+    assert_eq!(
+        client.get_verification_status(&invoice_id, &VerificationType::DocumentHash),
+        VerificationStatus::Verified,
+        "eviction must never move a type off Verified"
+    );
+    assert_eq!(
+        client.get_verification_status(&invoice_id, &VerificationType::TaxCompliance),
+        VerificationStatus::Rejected,
+        "eviction must never move a type off Rejected"
+    );
+
+    // The accepted half: BusinessRegistration rests on a lapsed record, which
+    // is evictable, so it reads Expired or Pending -- never anything stronger.
+    let br = client.get_verification_status(&invoice_id, &VerificationType::BusinessRegistration);
+    assert!(
+        br == VerificationStatus::Expired || br == VerificationStatus::Pending,
+        "a lapsed-only type may collapse to Pending, but never past it"
+    );
+}
+
 // ── Events ───────────────────────────────────────────────────────────────────
 
 #[test]

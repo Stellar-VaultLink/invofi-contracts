@@ -134,8 +134,10 @@ fn type_status(
     // how the admin withdraws trust -- usually because the key is compromised
     // or the verifier was found negligent -- so their statements must stop
     // counting the moment they leave, or removal would not actually revoke
-    // anything. The records stay readable through `get_verifications`: the
-    // history of who said what is preserved, it just no longer votes.
+    // anything. The records stay readable through `get_verifications` -- the
+    // history of who said what is preserved, it just no longer votes -- until
+    // the invoice hits its cap, where departed verifiers' records are the
+    // first thing `evict_one_slot` reclaims.
     let trusted = load_verifiers(env);
 
     for attestation in attestations.iter() {
@@ -182,11 +184,23 @@ fn type_status(
 /// have since been removed keep occupying slots, so a rotated-through set can
 /// fill the list and permanently block admission. History yields to liveness
 /// in a defined order: the oldest record from a verifier that is no longer
-/// trusted goes first, then the oldest lapsed record. Neither can affect any
-/// status -- `type_status` counts only the current verifier set, and lapsed
-/// records count nowhere -- so eviction can never move a verification type
-/// from `Verified` or `Rejected` as a side effect of an unrelated
-/// attestation.
+/// trusted goes first, then the oldest lapsed record.
+///
+/// What eviction guarantees, precisely: it can never move a verification type
+/// off `Verified` or `Rejected`. Both of those rest on *live* records from
+/// *current* verifiers, and neither evictable class qualifies -- departed
+/// verifiers are filtered out of `type_status` entirely, and a lapsed record
+/// counts as neither an approval nor a live rejection.
+///
+/// What it does not guarantee: a type whose only remaining record is a lapsed
+/// one from a current verifier reads `Expired`, and evicting that record
+/// leaves it reading `Pending`. That is a deliberate trade. Both are
+/// non-verified states that gate financing identically; the difference is
+/// only whether a client says "evidence went stale" or "no evidence yet". A
+/// status-preserving eviction rule would have to check every type before
+/// committing to a candidate and could end up refusing an attestation with
+/// evictable slots available -- spending the liveness this exists to protect
+/// on a distinction between two states that already mean the same thing.
 ///
 /// The final `None` arm cannot trigger under the current constants, and the
 /// arithmetic is worth stating because it is what makes the cap safe. A list
