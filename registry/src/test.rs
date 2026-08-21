@@ -2330,6 +2330,150 @@ fn test_removed_verifier_cannot_attest_but_keeps_its_history() {
     // storing it.
     assert_eq!(client.get_verifications(&invoice_id).len(), 1);
     assert!(!client.is_verifier(&verifier));
+
+    // But it no longer votes. Removal is how trust is withdrawn, normally
+    // because the key is compromised; if the approval kept standing, removal
+    // would revoke nothing.
+    assert_eq!(
+        client.get_verification_status(&invoice_id, &VerificationType::DocumentHash),
+        VerificationStatus::Pending,
+        "a removed verifier's approval must stop satisfying the threshold"
+    );
+}
+
+#[test]
+fn test_removal_revokes_a_contributing_approval_and_a_rejection() {
+    let env = Env::default();
+    env.mock_all_auths();
+    env.ledger().set_timestamp(1_000_000);
+
+    let invoice_id = symbol_short!("vinv26");
+    let (client, admin, _originator, first) = setup_oracle(&env, &invoice_id, 1_000_000_000);
+    let second = Address::generate(&env);
+    client.add_verifier(&admin, &second);
+    client.set_verifier_threshold(&admin, &2u32);
+
+    // Two approvals clear the threshold.
+    client.attest(
+        &invoice_id,
+        &first,
+        &VerificationType::DocumentHash,
+        &evidence_hash(&env, 1),
+        &true,
+    );
+    client.attest(
+        &invoice_id,
+        &second,
+        &VerificationType::DocumentHash,
+        &evidence_hash(&env, 2),
+        &true,
+    );
+    assert_eq!(
+        client.get_verification_status(&invoice_id, &VerificationType::DocumentHash),
+        VerificationStatus::Verified
+    );
+
+    // Removing one of them drops the live approval count below the threshold.
+    client.remove_verifier(&admin, &second);
+    assert_eq!(
+        client.get_verification_status(&invoice_id, &VerificationType::DocumentHash),
+        VerificationStatus::Pending,
+        "removal must withdraw the approval that was carrying the threshold"
+    );
+
+    // The same holds for a rejection: a disowned verifier should not keep an
+    // invoice blocked forever.
+    client.attest(
+        &invoice_id,
+        &first,
+        &VerificationType::TaxCompliance,
+        &evidence_hash(&env, 3),
+        &false,
+    );
+    assert_eq!(
+        client.get_verification_status(&invoice_id, &VerificationType::TaxCompliance),
+        VerificationStatus::Rejected
+    );
+    client.remove_verifier(&admin, &first);
+    assert_eq!(
+        client.get_verification_status(&invoice_id, &VerificationType::TaxCompliance),
+        VerificationStatus::Pending,
+        "removal must withdraw a rejection too"
+    );
+
+    // History is untouched by any of it.
+    assert_eq!(client.get_verifications(&invoice_id).len(), 3);
+}
+
+#[test]
+fn test_eviction_cannot_disturb_another_types_status() {
+    let env = Env::default();
+    env.mock_all_auths();
+    env.ledger().set_timestamp(1_000_000);
+
+    // The cross-type hazard: making room for a new attestation evicts a record
+    // belonging to a different verification type. That is only safe because
+    // evictable records never counted toward status in the first place.
+    let invoice_id = symbol_short!("vinv27");
+    let (client, admin, _originator, _seed) = setup_oracle(&env, &invoice_id, 1_000_000_000);
+
+    let types = [
+        VerificationType::DocumentHash,
+        VerificationType::BusinessRegistration,
+        VerificationType::TaxCompliance,
+    ];
+
+    // Fill the invoice to its cap with departed verifiers.
+    for round in 0..20u8 {
+        let rotating = Address::generate(&env);
+        client.add_verifier(&admin, &rotating);
+        for (offset, v_type) in types.iter().enumerate() {
+            client.attest(
+                &invoice_id,
+                &rotating,
+                v_type,
+                &evidence_hash(&env, round * 3 + offset as u8),
+                &true,
+            );
+        }
+        client.remove_verifier(&admin, &rotating);
+    }
+    assert_eq!(client.get_verifications(&invoice_id).len(), 60);
+
+    // An active verifier vouches for one type, then another, forcing evictions.
+    let active = Address::generate(&env);
+    client.add_verifier(&admin, &active);
+    client.attest(
+        &invoice_id,
+        &active,
+        &VerificationType::DocumentHash,
+        &evidence_hash(&env, 100),
+        &true,
+    );
+    assert_eq!(
+        client.get_verification_status(&invoice_id, &VerificationType::DocumentHash),
+        VerificationStatus::Verified
+    );
+
+    client.attest(
+        &invoice_id,
+        &active,
+        &VerificationType::TaxCompliance,
+        &evidence_hash(&env, 101),
+        &true,
+    );
+
+    // Attesting to TaxCompliance evicted a record, but DocumentHash must be
+    // exactly where it was left.
+    assert_eq!(
+        client.get_verification_status(&invoice_id, &VerificationType::DocumentHash),
+        VerificationStatus::Verified,
+        "an unrelated attestation must not move another type's status"
+    );
+    assert_eq!(
+        client.get_verification_status(&invoice_id, &VerificationType::TaxCompliance),
+        VerificationStatus::Verified
+    );
 }
 
 // ── Events ───────────────────────────────────────────────────────────────────

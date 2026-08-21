@@ -118,14 +118,41 @@ currency, no per-currency branch, and a fee on a EUR invoice is paid in EUR.
 Attesting on an invoice in an unregistered currency with a non-zero fee fails
 loudly rather than silently skipping the charge.
 
-### 7. Removed verifiers keep their history
+### 7. Removal revokes a verifier's vote but keeps their history
 
-`remove_verifier` drops an address from the set but leaves its attestations in
-place. Who said what, when, is the point of storing them, and deleting history
-on removal would make the record unauditable exactly when an audit matters. An
-admin who needs a compromised verifier's statements discounted immediately
-raises the threshold — the lever the key-compromise runbook (#145) already
-describes.
+`remove_verifier` drops an address from the set and leaves its attestations in
+storage, but those records stop counting toward any status the moment the
+verifier leaves. Both halves matter, and they answer different questions.
+
+**Why the records stay:** who said what, when, is the point of storing them,
+and deleting history on removal would make the record unauditable exactly when
+an audit matters. `get_verifications` still returns them.
+
+**Why they stop counting:** removal is how an admin withdraws trust, and the
+reason is normally that the key is compromised or the verifier was found
+negligent. If their prior approvals kept satisfying a threshold, removal would
+revoke nothing — the invoice would still read `Verified` on the word of a
+verifier the protocol has just disowned. `type_status` therefore evaluates
+only the current verifier set.
+
+This is also what makes the eviction policy in decision 8 safe.
+
+### 8. History yields to liveness when an invoice hits its cap
+
+An invoice retains at most `MAX_ATTESTATIONS_PER_INVOICE` (60) attestations —
+`MAX_VERIFIERS x 3`, exactly enough for the whole active set to speak on all
+three types. But records from departed verifiers keep occupying slots, so an
+invoice that rotates through twenty verifiers fills the list and would
+otherwise lock out every future verifier permanently. Expiry does not recover
+capacity: it rewrites a record's status, it does not remove it.
+
+When the list is full, one slot is therefore freed in a defined order: the
+oldest record from a verifier no longer in the set, then the oldest lapsed
+record. Both classes are precisely the records that decision 7 already
+excludes from status, so eviction can never move a verification type off
+`Verified` or `Rejected` as a side effect of an unrelated attestation. Live
+records from active verifiers are never dropped; if nothing is evictable the
+attestation is refused instead.
 
 ## Consequences
 

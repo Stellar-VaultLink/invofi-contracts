@@ -119,6 +119,7 @@ fn effective_status(attestation: &Attestation, now: u64) -> VerificationStatus {
 /// affirmative attestations *is* counting distinct verifiers — no verifier can
 /// reach the threshold alone by attesting repeatedly.
 fn type_status(
+    env: &Env,
     attestations: &Vec<Attestation>,
     v_type: VerificationType,
     threshold: u32,
@@ -129,8 +130,18 @@ fn type_status(
     let mut expired = false;
     let mut seen = false;
 
+    // Only the current verifier set speaks to status. Removing a verifier is
+    // how the admin withdraws trust -- usually because the key is compromised
+    // or the verifier was found negligent -- so their statements must stop
+    // counting the moment they leave, or removal would not actually revoke
+    // anything. The records stay readable through `get_verifications`: the
+    // history of who said what is preserved, it just no longer votes.
+    let trusted = load_verifiers(env);
+
     for attestation in attestations.iter() {
-        if attestation.v_type != v_type {
+        if attestation.v_type != v_type
+            || !trusted.iter().any(|entry| entry == attestation.verifier)
+        {
             continue;
         }
         seen = true;
@@ -171,8 +182,11 @@ fn type_status(
 /// have since been removed keep occupying slots, so a rotated-through set can
 /// fill the list and permanently block admission. History yields to liveness
 /// in a defined order: the oldest record from a verifier that is no longer
-/// trusted goes first (it can no longer count toward any threshold), then the
-/// oldest lapsed record.
+/// trusted goes first, then the oldest lapsed record. Neither can affect any
+/// status -- `type_status` counts only the current verifier set, and lapsed
+/// records count nowhere -- so eviction can never move a verification type
+/// from `Verified` or `Rejected` as a side effect of an unrelated
+/// attestation.
 ///
 /// The final `None` arm cannot trigger under the current constants, and the
 /// arithmetic is worth stating because it is what makes the cap safe. A list
@@ -1095,7 +1109,7 @@ impl RegistryContract {
         let now = env.ledger().timestamp();
         let threshold = Self::get_verifier_threshold(env.clone());
         let attestations = load_verifications(&env, &invoice_id);
-        let status_before = type_status(&attestations, v_type, threshold, now);
+        let status_before = type_status(&env, &attestations, v_type, threshold, now);
 
         // Charge before writing, so a verifier the originator cannot pay never
         // gets an attestation recorded. CEI: the token is a standard SEP-41
@@ -1145,7 +1159,7 @@ impl RegistryContract {
             (verifier, v_type, hash, attestation.valid_until, fee),
         );
 
-        let status_after = type_status(&updated, v_type, threshold, now);
+        let status_after = type_status(&env, &updated, v_type, threshold, now);
         if status_after != status_before
             && (status_after == VerificationStatus::Verified
                 || status_after == VerificationStatus::Rejected)
@@ -1173,7 +1187,7 @@ impl RegistryContract {
     ) -> VerificationStatus {
         let attestations = load_verifications(&env, &invoice_id);
         let threshold = Self::get_verifier_threshold(env.clone());
-        type_status(&attestations, v_type, threshold, env.ledger().timestamp())
+        type_status(&env, &attestations, v_type, threshold, env.ledger().timestamp())
     }
 
     /// Verification status of the invoice as a whole.
@@ -1190,7 +1204,7 @@ impl RegistryContract {
         let mut all_verified = true;
         let mut any_expired = false;
         for v_type in VERIFICATION_TYPES.iter() {
-            match type_status(&attestations, *v_type, threshold, now) {
+            match type_status(&env, &attestations, *v_type, threshold, now) {
                 VerificationStatus::Rejected => return VerificationStatus::Rejected,
                 VerificationStatus::Verified => {}
                 VerificationStatus::Expired => {
