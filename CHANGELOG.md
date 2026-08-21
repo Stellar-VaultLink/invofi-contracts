@@ -59,8 +59,9 @@ and are enforced by commitlint in CI.
   - **The trust boundary is verifier authentication, not fact verification.**
     A contract cannot check that a PDF hash corresponds to a real invoice or
     that a tax filing is current. `attest` authenticates that a verifier in
-    the admin-governed set signed a claim and stores it immutably; the truth
-    of the claim rests on verifier honesty, bounded by the m-of-n threshold.
+    the admin-governed set signed a claim and stores that verifier's current
+    attestation tamper-evidently; the truth of the claim rests on verifier
+    honesty, bounded by the m-of-n threshold.
     The ADR states this explicitly so "trust-minimised" is not read as
     on-chain fact-checking.
   - **m-of-n over distinct verifiers.** `set_verifier_threshold` sets how
@@ -69,6 +70,13 @@ and are enforced by commitlint in CI.
     verifier can reach the threshold alone. A live rejection dominates
     approvals — one honest verifier can block a fraudulent invoice that
     others waved through.
+  - **Removing a verifier revokes their statements.** Only the current
+    verifier set is counted when deriving status, so a removed verifier's
+    approvals stop satisfying a threshold immediately — otherwise removal
+    would not revoke anything, which is the whole point of removing a
+    compromised key. Their records stay readable through
+    `get_verifications`: the history of who said what is preserved, it just
+    no longer votes.
   - **Status is derived per verification type**, with
     `get_invoice_verification_status` returning the conjunction across all
     three. `Verified` requires every type to have cleared its threshold.
