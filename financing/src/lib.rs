@@ -657,8 +657,11 @@ impl FinancingContract {
         let mut success_count: u32 = 0;
         let mut failure_count: u32 = 0;
 
+        let limit = offer_ids.len().min(MAX_BATCH_SIZE);
         if !allow_partial {
-            for offer_id in offer_ids.iter() {
+            let mut i: u32 = 0;
+            while i < limit {
+                let offer_id = offer_ids.get(i).unwrap();
                 let offer = offers
                     .get(offer_id.clone())
                     .unwrap_or_else(|| env.panic_with_error(ContractError::NotFound));
@@ -672,9 +675,12 @@ impl FinancingContract {
                 if invoice.status != InvoiceStatus::Pending {
                     env.panic_with_error(ContractError::InvalidTransition);
                 }
+                i += 1;
             }
 
-            for offer_id in offer_ids.iter() {
+            let mut j: u32 = 0;
+            while j < limit {
+                let offer_id = offer_ids.get(j).unwrap();
                 let offer = offers.get(offer_id.clone()).unwrap();
                 let invoice = registry_client.get_invoice(&offer.invoice_id);
                 Self::settle_acceptance(
@@ -690,6 +696,7 @@ impl FinancingContract {
                     success: true,
                     error_code: 0,
                 });
+                j += 1;
             }
             success_count = total_count;
             env.events().publish(
@@ -697,14 +704,13 @@ impl FinancingContract {
                 (success_count, 0u32),
             );
         } else {
-            for offer_id in offer_ids.iter() {
+            let mut i: u32 = 0;
+            while i < limit {
+                let offer_id = offer_ids.get(i).unwrap();
                 let mut err_code: u32 = 0;
                 let offer_opt = offers.get(offer_id.clone());
 
-                if offer_opt.is_none() {
-                    err_code = ContractError::NotFound as u32;
-                } else {
-                    let offer = offer_opt.unwrap();
+                if let Some(offer) = offer_opt {
                     if offer.status != OfferStatus::Pending {
                         err_code = ContractError::InvalidTransition as u32;
                     } else {
@@ -730,6 +736,8 @@ impl FinancingContract {
                             });
                         }
                     }
+                } else {
+                    err_code = ContractError::NotFound as u32;
                 }
 
                 if err_code != 0 {
@@ -740,6 +748,7 @@ impl FinancingContract {
                         error_code: err_code,
                     });
                 }
+                i += 1;
             }
             env.events().publish(
                 (symbol_short!("btch_acc"), invoice_originator.clone()),
@@ -782,8 +791,11 @@ impl FinancingContract {
         let mut success_count: u32 = 0;
         let mut failure_count: u32 = 0;
 
+        let limit = offer_ids.len().min(MAX_BATCH_SIZE);
         if !allow_partial {
-            for offer_id in offer_ids.iter() {
+            let mut i: u32 = 0;
+            while i < limit {
+                let offer_id = offer_ids.get(i).unwrap();
                 let offer = offers
                     .get(offer_id.clone())
                     .unwrap_or_else(|| env.panic_with_error(ContractError::NotFound));
@@ -794,9 +806,12 @@ impl FinancingContract {
                 if invoice.originator != invoice_originator {
                     env.panic_with_error(ContractError::Unauthorized);
                 }
+                i += 1;
             }
 
-            for offer_id in offer_ids.iter() {
+            let mut j: u32 = 0;
+            while j < limit {
+                let offer_id = offer_ids.get(j).unwrap();
                 let mut offer = offers.get(offer_id.clone()).unwrap();
                 offer.status = OfferStatus::Rejected;
                 offers.set(offer_id.clone(), offer.clone());
@@ -811,6 +826,7 @@ impl FinancingContract {
                     success: true,
                     error_code: 0,
                 });
+                j += 1;
             }
             save_offers(&env, &offers);
             success_count = total_count;
@@ -820,14 +836,13 @@ impl FinancingContract {
             );
         } else {
             let mut rejected_any = false;
-            for offer_id in offer_ids.iter() {
+            let mut i: u32 = 0;
+            while i < limit {
+                let offer_id = offer_ids.get(i).unwrap();
                 let mut err_code: u32 = 0;
                 let offer_opt = offers.get(offer_id.clone());
 
-                if offer_opt.is_none() {
-                    err_code = ContractError::NotFound as u32;
-                } else {
-                    let mut offer = offer_opt.unwrap();
+                if let Some(mut offer) = offer_opt {
                     if offer.status != OfferStatus::Pending {
                         err_code = ContractError::InvalidTransition as u32;
                     } else {
@@ -866,6 +881,7 @@ impl FinancingContract {
                         error_code: err_code,
                     });
                 }
+                i += 1;
             }
 
             if rejected_any {

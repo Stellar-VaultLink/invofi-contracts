@@ -582,8 +582,11 @@ impl RepaymentContract {
             .unwrap_or_else(|| panic!("Not initialized"));
         let financing_client = FinancingClient::new(&env, &financing_addr);
 
+        let limit = items.len().min(MAX_BATCH_SIZE);
         if !allow_partial {
-            for item in items.iter() {
+            let mut i: u32 = 0;
+            while i < limit {
+                let item = items.get(i).unwrap();
                 Self::repay_invoice_internal(
                     &env,
                     item.invoice_id.clone(),
@@ -596,6 +599,7 @@ impl RepaymentContract {
                     success: true,
                     error_code: 0,
                 });
+                i += 1;
             }
             success_count = total_count;
             env.events().publish(
@@ -603,7 +607,9 @@ impl RepaymentContract {
                 (success_count, 0u32),
             );
         } else {
-            for item in items.iter() {
+            let mut i: u32 = 0;
+            while i < limit {
+                let item = items.get(i).unwrap();
                 let mut err_code: u32 = 0;
                 if item.amount <= 0 {
                     err_code = ContractError::InvalidInput as u32;
@@ -647,6 +653,7 @@ impl RepaymentContract {
                         error_code: err_code,
                     });
                 }
+                i += 1;
             }
             env.events().publish(
                 (symbol_short!("btch_rpy"), repayer.clone()),

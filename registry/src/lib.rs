@@ -462,9 +462,12 @@ impl RegistryContract {
         let mut success_count: u32 = 0;
         let mut failure_count: u32 = 0;
 
+        let limit = invoices_input.len().min(MAX_BATCH_SIZE);
         if !allow_partial {
             // Atomic mode: all items must be valid upfront or entire transaction reverts
-            for item in invoices_input.iter() {
+            let mut i: u32 = 0;
+            while i < limit {
+                let item = invoices_input.get(i).unwrap();
                 if item.amount < MIN_INVOICE_AMOUNT || item.due_date <= now {
                     env.panic_with_error(ContractError::InvalidInput);
                 }
@@ -489,6 +492,7 @@ impl RegistryContract {
                     (symbol_short!("inv_reg"), item.id.clone()),
                     (originator.clone(), item.amount, item.due_date),
                 );
+                i += 1;
             }
             success_count = total_count;
             save_invoices(&env, &invoices_map);
@@ -504,7 +508,9 @@ impl RegistryContract {
         } else {
             // Partial mode: process each item individually
             let mut added_this_batch = 0u32;
-            for item in invoices_input.iter() {
+            let mut i: u32 = 0;
+            while i < limit {
+                let item = invoices_input.get(i).unwrap();
                 let mut err_code: u32 = 0;
                 if item.amount < MIN_INVOICE_AMOUNT || item.due_date <= now {
                     err_code = ContractError::InvalidInput as u32;
@@ -541,6 +547,7 @@ impl RegistryContract {
                         error_code: err_code,
                     });
                 }
+                i += 1;
             }
 
             if added_this_batch > 0 {
@@ -565,7 +572,8 @@ impl RegistryContract {
     }
 
     /// Gas estimation helper for batch invoice registration.
-    pub fn estimate_batch_register_gas(_env: Env, count: u32) -> u64 {
+    pub fn estimate_batch_register_gas(env: Env, count: u32) -> u64 {
+        let _ = &env;
         if count == 0 || count > MAX_BATCH_SIZE {
             0
         } else {
