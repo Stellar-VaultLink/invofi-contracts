@@ -460,8 +460,9 @@ impl RegistryContract {
             .unwrap_or_else(|| env.panic_with_error(ContractError::NotFound))
     }
 
-    /// Manually update the status of a Pending invoice. Only the invoice
-    /// originator can call this.
+    /// Manually cancel a Pending invoice. Only the invoice originator can call
+    /// this. Restricted to `Pending → Cancelled`; for all other lifecycle
+    /// transitions use the dedicated entry points.
     pub fn update_invoice_status(
         env: Env,
         id: Symbol,
@@ -477,7 +478,6 @@ impl RegistryContract {
         if invoice.originator != originator {
             env.panic_with_error(ContractError::Unauthorized);
         }
-        
         let old_status = invoice.status;
         assert_transition(&env, id.clone(), old_status, new_status, originator.clone());
         
@@ -736,6 +736,7 @@ impl RegistryContract {
     }
 
     /// Resolve a Disputed invoice. Admin only.
+    /// Allowed targets: Financed, Repaid, Cancelled, Defaulted.
     pub fn resolve_dispute(
         env: Env,
         admin: Address,

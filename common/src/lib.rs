@@ -509,6 +509,8 @@ pub fn assert_not_paused(env: &Env) {
     }
 }
 
+// ─── Invoice State Machine ────────────────────────────────────────────────────
+
 // ─── Cross-Contract Interface ────────────────────────────────────────────────
 // Financing calls these methods on the Registry contract.
 
@@ -662,6 +664,118 @@ pub trait ReputationInterface {
     fn get_score(env: Env, originator: Address) -> i128;
 }
 
+// ─── assert_transition unit tests ────────────────────────────────────────────
+
+#[cfg(test)]
+mod transition_tests {
+    extern crate std;
+
+    use super::{validate_transition, InvoiceStatus};
+    use soroban_sdk::Env;
+
+    // ── Legal transitions ────────────────────────────────────────────────────
+    //
+    // Each row: (from, to) — must succeed without panic.
+    //
+    // Adding a new status to the state machine later means adding rows here;
+    // all illegal combinations are covered by the matrix below.
+
+    macro_rules! legal {
+        ($name:ident, $from:expr, $to:expr) => {
+            #[test]
+            fn $name() {
+                let env = Env::default();
+                validate_transition(&env, $from, $to); // must not panic
+            }
+        };
+    }
+
+    // Pending exits
+    legal!(pending_to_financed,  InvoiceStatus::Pending,  InvoiceStatus::Financed);
+    legal!(pending_to_cancelled, InvoiceStatus::Pending,  InvoiceStatus::Cancelled);
+
+    // Financed exits
+    legal!(financed_to_financed, InvoiceStatus::Financed, InvoiceStatus::Financed); // partial repayment
+    legal!(financed_to_repaid,   InvoiceStatus::Financed, InvoiceStatus::Repaid);
+    legal!(financed_to_overdue,  InvoiceStatus::Financed, InvoiceStatus::Overdue);
+    legal!(financed_to_disputed, InvoiceStatus::Financed, InvoiceStatus::Disputed);
+
+    // Overdue exits
+    legal!(overdue_to_defaulted, InvoiceStatus::Overdue,  InvoiceStatus::Defaulted);
+
+    // Disputed exits (resolve_dispute)
+    legal!(disputed_to_pending,   InvoiceStatus::Disputed, InvoiceStatus::Pending);
+    legal!(disputed_to_financed,  InvoiceStatus::Disputed, InvoiceStatus::Financed);
+    legal!(disputed_to_repaid,    InvoiceStatus::Disputed, InvoiceStatus::Repaid);
+    legal!(disputed_to_cancelled, InvoiceStatus::Disputed, InvoiceStatus::Cancelled);
+    legal!(disputed_to_defaulted, InvoiceStatus::Disputed, InvoiceStatus::Defaulted);
+
+    // ── Illegal transitions ───────────────────────────────────────────────────
+    //
+    // Every (from, to) pair NOT in the legal set must panic with InvalidTransition
+    // (ContractError discriminant 3 → "Error(Contract, #3)").
+
+    macro_rules! illegal {
+        ($name:ident, $from:expr, $to:expr) => {
+            #[test]
+            #[should_panic(expected = "Error(Contract, #3)")]
+            fn $name() {
+                let env = Env::default();
+                validate_transition(&env, $from, $to);
+            }
+        };
+    }
+
+    // Pending — illegal targets
+    illegal!(pending_to_pending,   InvoiceStatus::Pending, InvoiceStatus::Pending);
+    illegal!(pending_to_repaid,    InvoiceStatus::Pending, InvoiceStatus::Repaid);   // the motivating example
+    illegal!(pending_to_overdue,   InvoiceStatus::Pending, InvoiceStatus::Overdue);
+    illegal!(pending_to_disputed,  InvoiceStatus::Pending, InvoiceStatus::Disputed);
+    illegal!(pending_to_defaulted, InvoiceStatus::Pending, InvoiceStatus::Defaulted);
+
+    // Financed — illegal targets
+    illegal!(financed_to_pending,    InvoiceStatus::Financed, InvoiceStatus::Pending);
+    illegal!(financed_to_cancelled,  InvoiceStatus::Financed, InvoiceStatus::Cancelled);
+    illegal!(financed_to_defaulted,  InvoiceStatus::Financed, InvoiceStatus::Defaulted);
+
+    // Overdue — illegal targets
+    illegal!(overdue_to_pending,   InvoiceStatus::Overdue, InvoiceStatus::Pending);
+    illegal!(overdue_to_financed,  InvoiceStatus::Overdue, InvoiceStatus::Financed);
+    illegal!(overdue_to_repaid,    InvoiceStatus::Overdue, InvoiceStatus::Repaid);
+    illegal!(overdue_to_overdue,   InvoiceStatus::Overdue, InvoiceStatus::Overdue);
+    illegal!(overdue_to_cancelled, InvoiceStatus::Overdue, InvoiceStatus::Cancelled);
+    illegal!(overdue_to_disputed,  InvoiceStatus::Overdue, InvoiceStatus::Disputed);
+
+    // Disputed — illegal targets (anything not in the five allowed)
+    illegal!(disputed_to_overdue,  InvoiceStatus::Disputed, InvoiceStatus::Overdue);
+    illegal!(disputed_to_disputed, InvoiceStatus::Disputed, InvoiceStatus::Disputed);
+
+    // Terminal states — nothing may leave them
+    illegal!(repaid_to_pending,    InvoiceStatus::Repaid,    InvoiceStatus::Pending);
+    illegal!(repaid_to_financed,   InvoiceStatus::Repaid,    InvoiceStatus::Financed);
+    illegal!(repaid_to_repaid,     InvoiceStatus::Repaid,    InvoiceStatus::Repaid);
+    illegal!(repaid_to_overdue,    InvoiceStatus::Repaid,    InvoiceStatus::Overdue);
+    illegal!(repaid_to_cancelled,  InvoiceStatus::Repaid,    InvoiceStatus::Cancelled);
+    illegal!(repaid_to_disputed,   InvoiceStatus::Repaid,    InvoiceStatus::Disputed);
+    illegal!(repaid_to_defaulted,  InvoiceStatus::Repaid,    InvoiceStatus::Defaulted);
+
+    illegal!(cancelled_to_pending,   InvoiceStatus::Cancelled, InvoiceStatus::Pending);
+    illegal!(cancelled_to_financed,  InvoiceStatus::Cancelled, InvoiceStatus::Financed);
+    illegal!(cancelled_to_repaid,    InvoiceStatus::Cancelled, InvoiceStatus::Repaid);
+    illegal!(cancelled_to_overdue,   InvoiceStatus::Cancelled, InvoiceStatus::Overdue);
+    illegal!(cancelled_to_cancelled, InvoiceStatus::Cancelled, InvoiceStatus::Cancelled);
+    illegal!(cancelled_to_disputed,  InvoiceStatus::Cancelled, InvoiceStatus::Disputed);
+    illegal!(cancelled_to_defaulted, InvoiceStatus::Cancelled, InvoiceStatus::Defaulted);
+
+    illegal!(defaulted_to_pending,   InvoiceStatus::Defaulted, InvoiceStatus::Pending);
+    illegal!(defaulted_to_financed,  InvoiceStatus::Defaulted, InvoiceStatus::Financed);
+    illegal!(defaulted_to_repaid,    InvoiceStatus::Defaulted, InvoiceStatus::Repaid);
+    illegal!(defaulted_to_overdue,   InvoiceStatus::Defaulted, InvoiceStatus::Overdue);
+    illegal!(defaulted_to_cancelled, InvoiceStatus::Defaulted, InvoiceStatus::Cancelled);
+    illegal!(defaulted_to_disputed,  InvoiceStatus::Defaulted, InvoiceStatus::Disputed);
+    illegal!(defaulted_to_defaulted, InvoiceStatus::Defaulted, InvoiceStatus::Defaulted);
+} // end mod transition_tests
+
 // ─── State Machine State Validation and Enforcement ──────────────────────────
 
 use soroban_sdk::Vec;
@@ -684,7 +798,7 @@ pub fn assert_transition(
     actor: Address,
 ) {
     // Validate that this transition is in the allowed table
-    validate_transition(from_status, to_status);
+    validate_transition(env, from_status, to_status);
 
     // Emit structured transition event
     env.events().publish(
@@ -711,7 +825,7 @@ pub fn assert_transition(
 /// - Disputed -> Repaid (admin resolution to Repaid)
 /// - Disputed -> Cancelled (admin resolution to Cancelled)
 /// - Disputed -> Defaulted (admin resolution to Defaulted)
-fn validate_transition(from_status: InvoiceStatus, to_status: InvoiceStatus) {
+pub(crate) fn validate_transition(env: &Env, from_status: InvoiceStatus, to_status: InvoiceStatus) {
     let valid = matches!(
         (from_status, to_status),
         // Pending exits
@@ -733,7 +847,7 @@ fn validate_transition(from_status: InvoiceStatus, to_status: InvoiceStatus) {
     );
 
     if !valid {
-        panic!("Invalid state transition");
+        env.panic_with_error(ContractError::InvalidTransition);
     }
 }
 
