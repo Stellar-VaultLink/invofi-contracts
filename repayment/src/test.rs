@@ -29,8 +29,10 @@ fn setup_contracts<'a>(
     let reg = invofi_registry::RegistryContractClient::new(env, &registry_id);
 
     // Financing
-    let financing_id =
-        env.register(FinancingContract, (admin.clone(), registry_id.clone(), token.clone()));
+    let financing_id = env.register(
+        FinancingContract,
+        (admin.clone(), registry_id.clone(), token.clone()),
+    );
     let fin = invofi_financing::FinancingContractClient::new(env, &financing_id);
 
     // Repayment
@@ -65,13 +67,7 @@ fn create_token(env: &Env) -> Address {
 
 /// Mint `amount` to `who` and approve `spender` to move those funds (the same
 /// flow a real lender runs on-chain before `accept_offer`).
-fn mint_and_approve(
-    env: &Env,
-    token_id: &Address,
-    spender: &Address,
-    who: &Address,
-    amount: i128,
-) {
+fn mint_and_approve(env: &Env, token_id: &Address, spender: &Address, who: &Address, amount: i128) {
     let asset_client = token::StellarAssetClient::new(env, token_id);
     asset_client.mint(who, &amount);
 
@@ -831,7 +827,10 @@ fn test_pause_blocks_all_repayment_state_changes() {
     rep.pause(&admin);
     fn assert_paused<F: FnOnce()>(f: F) {
         let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(f));
-        assert!(result.is_err(), "state-changing function should panic while paused");
+        assert!(
+            result.is_err(),
+            "state-changing function should panic while paused"
+        );
     }
 
     assert_paused(|| {
@@ -862,7 +861,10 @@ fn test_pause_blocks_all_repayment_state_changes() {
         rep.transfer_admin(&admin, &new_admin);
     });
 
-    assert_eq!(rep.get_duration_limits().0, invofi_common::MIN_OFFER_DURATION_SECS);
+    assert_eq!(
+        rep.get_duration_limits().0,
+        invofi_common::MIN_OFFER_DURATION_SECS
+    );
 }
 
 // ─── Default-flow integration tests (Task 10 + 11) ───────────────────────────
@@ -1137,8 +1139,8 @@ fn test_repayment_get_installment_due_zero_after_full_repay() {
     let originator = Address::generate(&env);
     let lender = Address::generate(&env);
     let amount: i128 = 1_050_000_000; // 12 × 87_500_000 principal
-    // 500 bps interest → per-installment: 87_500_000 + 4_375_000 = 91_875_000
-    // 12 installments × 91_875_000 = 1_102_500_000 total due
+                                      // 500 bps interest → per-installment: 87_500_000 + 4_375_000 = 91_875_000
+                                      // 12 installments × 91_875_000 = 1_102_500_000 total due
 
     let token_id = create_token(&env);
     let (reg, fin, rep) = setup_contracts(&env, &admin, &token_id);

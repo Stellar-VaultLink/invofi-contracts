@@ -262,3 +262,6 @@ impl ReputationContract {
 
 #[cfg(test)]
 mod test;
+
+#[cfg(test)]
+mod proptest;

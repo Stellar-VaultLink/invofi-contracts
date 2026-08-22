@@ -641,12 +641,7 @@ pub trait InsuranceInterface {
     /// Claim a partial payout from the insurance pool for a specific offer.
     /// The claim amount is bounded by the reserved amount for this offer and
     /// the pool's available balance. Returns (paid, remaining_reserved).
-    fn claim_payout(
-        env: Env,
-        offer_id: Symbol,
-        lender: Address,
-        amount: i128,
-    ) -> (i128, i128);
+    fn claim_payout(env: Env, offer_id: Symbol, lender: Address, amount: i128) -> (i128, i128);
 }
 
 // ─── Reputation Cross-Contract Interface ─────────────────────────────────────
@@ -696,24 +691,72 @@ mod transition_tests {
     }
 
     // Pending exits
-    legal!(pending_to_financed,  InvoiceStatus::Pending,  InvoiceStatus::Financed);
-    legal!(pending_to_cancelled, InvoiceStatus::Pending,  InvoiceStatus::Cancelled);
+    legal!(
+        pending_to_financed,
+        InvoiceStatus::Pending,
+        InvoiceStatus::Financed
+    );
+    legal!(
+        pending_to_cancelled,
+        InvoiceStatus::Pending,
+        InvoiceStatus::Cancelled
+    );
 
     // Financed exits
-    legal!(financed_to_financed, InvoiceStatus::Financed, InvoiceStatus::Financed); // partial repayment
-    legal!(financed_to_repaid,   InvoiceStatus::Financed, InvoiceStatus::Repaid);
-    legal!(financed_to_overdue,  InvoiceStatus::Financed, InvoiceStatus::Overdue);
-    legal!(financed_to_disputed, InvoiceStatus::Financed, InvoiceStatus::Disputed);
+    legal!(
+        financed_to_financed,
+        InvoiceStatus::Financed,
+        InvoiceStatus::Financed
+    ); // partial repayment
+    legal!(
+        financed_to_repaid,
+        InvoiceStatus::Financed,
+        InvoiceStatus::Repaid
+    );
+    legal!(
+        financed_to_overdue,
+        InvoiceStatus::Financed,
+        InvoiceStatus::Overdue
+    );
+    legal!(
+        financed_to_disputed,
+        InvoiceStatus::Financed,
+        InvoiceStatus::Disputed
+    );
 
     // Overdue exits
-    legal!(overdue_to_defaulted, InvoiceStatus::Overdue,  InvoiceStatus::Defaulted);
+    legal!(
+        overdue_to_defaulted,
+        InvoiceStatus::Overdue,
+        InvoiceStatus::Defaulted
+    );
 
     // Disputed exits (resolve_dispute)
-    legal!(disputed_to_pending,   InvoiceStatus::Disputed, InvoiceStatus::Pending);
-    legal!(disputed_to_financed,  InvoiceStatus::Disputed, InvoiceStatus::Financed);
-    legal!(disputed_to_repaid,    InvoiceStatus::Disputed, InvoiceStatus::Repaid);
-    legal!(disputed_to_cancelled, InvoiceStatus::Disputed, InvoiceStatus::Cancelled);
-    legal!(disputed_to_defaulted, InvoiceStatus::Disputed, InvoiceStatus::Defaulted);
+    legal!(
+        disputed_to_pending,
+        InvoiceStatus::Disputed,
+        InvoiceStatus::Pending
+    );
+    legal!(
+        disputed_to_financed,
+        InvoiceStatus::Disputed,
+        InvoiceStatus::Financed
+    );
+    legal!(
+        disputed_to_repaid,
+        InvoiceStatus::Disputed,
+        InvoiceStatus::Repaid
+    );
+    legal!(
+        disputed_to_cancelled,
+        InvoiceStatus::Disputed,
+        InvoiceStatus::Cancelled
+    );
+    legal!(
+        disputed_to_defaulted,
+        InvoiceStatus::Disputed,
+        InvoiceStatus::Defaulted
+    );
 
     // ── Illegal transitions ───────────────────────────────────────────────────
     //
@@ -732,66 +775,214 @@ mod transition_tests {
     }
 
     // Pending — illegal targets
-    illegal!(pending_to_pending,   InvoiceStatus::Pending, InvoiceStatus::Pending);
-    illegal!(pending_to_repaid,    InvoiceStatus::Pending, InvoiceStatus::Repaid);   // the motivating example
-    illegal!(pending_to_overdue,   InvoiceStatus::Pending, InvoiceStatus::Overdue);
-    illegal!(pending_to_disputed,  InvoiceStatus::Pending, InvoiceStatus::Disputed);
-    illegal!(pending_to_defaulted, InvoiceStatus::Pending, InvoiceStatus::Defaulted);
+    illegal!(
+        pending_to_pending,
+        InvoiceStatus::Pending,
+        InvoiceStatus::Pending
+    );
+    illegal!(
+        pending_to_repaid,
+        InvoiceStatus::Pending,
+        InvoiceStatus::Repaid
+    ); // the motivating example
+    illegal!(
+        pending_to_overdue,
+        InvoiceStatus::Pending,
+        InvoiceStatus::Overdue
+    );
+    illegal!(
+        pending_to_disputed,
+        InvoiceStatus::Pending,
+        InvoiceStatus::Disputed
+    );
+    illegal!(
+        pending_to_defaulted,
+        InvoiceStatus::Pending,
+        InvoiceStatus::Defaulted
+    );
 
     // Financed — illegal targets
-    illegal!(financed_to_pending,    InvoiceStatus::Financed, InvoiceStatus::Pending);
-    illegal!(financed_to_cancelled,  InvoiceStatus::Financed, InvoiceStatus::Cancelled);
-    illegal!(financed_to_defaulted,  InvoiceStatus::Financed, InvoiceStatus::Defaulted);
+    illegal!(
+        financed_to_pending,
+        InvoiceStatus::Financed,
+        InvoiceStatus::Pending
+    );
+    illegal!(
+        financed_to_cancelled,
+        InvoiceStatus::Financed,
+        InvoiceStatus::Cancelled
+    );
+    illegal!(
+        financed_to_defaulted,
+        InvoiceStatus::Financed,
+        InvoiceStatus::Defaulted
+    );
 
     // Overdue — illegal targets
-    illegal!(overdue_to_pending,   InvoiceStatus::Overdue, InvoiceStatus::Pending);
-    illegal!(overdue_to_financed,  InvoiceStatus::Overdue, InvoiceStatus::Financed);
-    illegal!(overdue_to_repaid,    InvoiceStatus::Overdue, InvoiceStatus::Repaid);
-    illegal!(overdue_to_overdue,   InvoiceStatus::Overdue, InvoiceStatus::Overdue);
-    illegal!(overdue_to_cancelled, InvoiceStatus::Overdue, InvoiceStatus::Cancelled);
-    illegal!(overdue_to_disputed,  InvoiceStatus::Overdue, InvoiceStatus::Disputed);
+    illegal!(
+        overdue_to_pending,
+        InvoiceStatus::Overdue,
+        InvoiceStatus::Pending
+    );
+    illegal!(
+        overdue_to_financed,
+        InvoiceStatus::Overdue,
+        InvoiceStatus::Financed
+    );
+    illegal!(
+        overdue_to_repaid,
+        InvoiceStatus::Overdue,
+        InvoiceStatus::Repaid
+    );
+    illegal!(
+        overdue_to_overdue,
+        InvoiceStatus::Overdue,
+        InvoiceStatus::Overdue
+    );
+    illegal!(
+        overdue_to_cancelled,
+        InvoiceStatus::Overdue,
+        InvoiceStatus::Cancelled
+    );
+    illegal!(
+        overdue_to_disputed,
+        InvoiceStatus::Overdue,
+        InvoiceStatus::Disputed
+    );
 
     // Disputed — illegal targets (anything not in the five allowed)
-    illegal!(disputed_to_overdue,  InvoiceStatus::Disputed, InvoiceStatus::Overdue);
-    illegal!(disputed_to_disputed, InvoiceStatus::Disputed, InvoiceStatus::Disputed);
+    illegal!(
+        disputed_to_overdue,
+        InvoiceStatus::Disputed,
+        InvoiceStatus::Overdue
+    );
+    illegal!(
+        disputed_to_disputed,
+        InvoiceStatus::Disputed,
+        InvoiceStatus::Disputed
+    );
 
     // Terminal states — nothing may leave them
-    illegal!(repaid_to_pending,    InvoiceStatus::Repaid,    InvoiceStatus::Pending);
-    illegal!(repaid_to_financed,   InvoiceStatus::Repaid,    InvoiceStatus::Financed);
-    illegal!(repaid_to_repaid,     InvoiceStatus::Repaid,    InvoiceStatus::Repaid);
-    illegal!(repaid_to_overdue,    InvoiceStatus::Repaid,    InvoiceStatus::Overdue);
-    illegal!(repaid_to_cancelled,  InvoiceStatus::Repaid,    InvoiceStatus::Cancelled);
-    illegal!(repaid_to_disputed,   InvoiceStatus::Repaid,    InvoiceStatus::Disputed);
-    illegal!(repaid_to_defaulted,  InvoiceStatus::Repaid,    InvoiceStatus::Defaulted);
+    illegal!(
+        repaid_to_pending,
+        InvoiceStatus::Repaid,
+        InvoiceStatus::Pending
+    );
+    illegal!(
+        repaid_to_financed,
+        InvoiceStatus::Repaid,
+        InvoiceStatus::Financed
+    );
+    illegal!(
+        repaid_to_repaid,
+        InvoiceStatus::Repaid,
+        InvoiceStatus::Repaid
+    );
+    illegal!(
+        repaid_to_overdue,
+        InvoiceStatus::Repaid,
+        InvoiceStatus::Overdue
+    );
+    illegal!(
+        repaid_to_cancelled,
+        InvoiceStatus::Repaid,
+        InvoiceStatus::Cancelled
+    );
+    illegal!(
+        repaid_to_disputed,
+        InvoiceStatus::Repaid,
+        InvoiceStatus::Disputed
+    );
+    illegal!(
+        repaid_to_defaulted,
+        InvoiceStatus::Repaid,
+        InvoiceStatus::Defaulted
+    );
 
-    illegal!(cancelled_to_pending,   InvoiceStatus::Cancelled, InvoiceStatus::Pending);
-    illegal!(cancelled_to_financed,  InvoiceStatus::Cancelled, InvoiceStatus::Financed);
-    illegal!(cancelled_to_repaid,    InvoiceStatus::Cancelled, InvoiceStatus::Repaid);
-    illegal!(cancelled_to_overdue,   InvoiceStatus::Cancelled, InvoiceStatus::Overdue);
-    illegal!(cancelled_to_cancelled, InvoiceStatus::Cancelled, InvoiceStatus::Cancelled);
-    illegal!(cancelled_to_disputed,  InvoiceStatus::Cancelled, InvoiceStatus::Disputed);
-    illegal!(cancelled_to_defaulted, InvoiceStatus::Cancelled, InvoiceStatus::Defaulted);
+    illegal!(
+        cancelled_to_pending,
+        InvoiceStatus::Cancelled,
+        InvoiceStatus::Pending
+    );
+    illegal!(
+        cancelled_to_financed,
+        InvoiceStatus::Cancelled,
+        InvoiceStatus::Financed
+    );
+    illegal!(
+        cancelled_to_repaid,
+        InvoiceStatus::Cancelled,
+        InvoiceStatus::Repaid
+    );
+    illegal!(
+        cancelled_to_overdue,
+        InvoiceStatus::Cancelled,
+        InvoiceStatus::Overdue
+    );
+    illegal!(
+        cancelled_to_cancelled,
+        InvoiceStatus::Cancelled,
+        InvoiceStatus::Cancelled
+    );
+    illegal!(
+        cancelled_to_disputed,
+        InvoiceStatus::Cancelled,
+        InvoiceStatus::Disputed
+    );
+    illegal!(
+        cancelled_to_defaulted,
+        InvoiceStatus::Cancelled,
+        InvoiceStatus::Defaulted
+    );
 
-    illegal!(defaulted_to_pending,   InvoiceStatus::Defaulted, InvoiceStatus::Pending);
-    illegal!(defaulted_to_financed,  InvoiceStatus::Defaulted, InvoiceStatus::Financed);
-    illegal!(defaulted_to_repaid,    InvoiceStatus::Defaulted, InvoiceStatus::Repaid);
-    illegal!(defaulted_to_overdue,   InvoiceStatus::Defaulted, InvoiceStatus::Overdue);
-    illegal!(defaulted_to_cancelled, InvoiceStatus::Defaulted, InvoiceStatus::Cancelled);
-    illegal!(defaulted_to_disputed,  InvoiceStatus::Defaulted, InvoiceStatus::Disputed);
-    illegal!(defaulted_to_defaulted, InvoiceStatus::Defaulted, InvoiceStatus::Defaulted);
+    illegal!(
+        defaulted_to_pending,
+        InvoiceStatus::Defaulted,
+        InvoiceStatus::Pending
+    );
+    illegal!(
+        defaulted_to_financed,
+        InvoiceStatus::Defaulted,
+        InvoiceStatus::Financed
+    );
+    illegal!(
+        defaulted_to_repaid,
+        InvoiceStatus::Defaulted,
+        InvoiceStatus::Repaid
+    );
+    illegal!(
+        defaulted_to_overdue,
+        InvoiceStatus::Defaulted,
+        InvoiceStatus::Overdue
+    );
+    illegal!(
+        defaulted_to_cancelled,
+        InvoiceStatus::Defaulted,
+        InvoiceStatus::Cancelled
+    );
+    illegal!(
+        defaulted_to_disputed,
+        InvoiceStatus::Defaulted,
+        InvoiceStatus::Disputed
+    );
+    illegal!(
+        defaulted_to_defaulted,
+        InvoiceStatus::Defaulted,
+        InvoiceStatus::Defaulted
+    );
 } // end mod transition_tests
 
 // ─── State Machine State Validation and Enforcement ──────────────────────────
 
 use soroban_sdk::Vec;
 
-/// Validates and executes an invoice state transition. Emits a structured 
+/// Validates and executes an invoice state transition. Emits a structured
 /// transition event and records the transition in the history log.
-/// 
+///
 /// This is the single point of authority for all invoice status changes across
 /// the protocol. All entry points (registry, financing, repayment) must route
 /// through this function.
-/// 
+///
 /// # Panics
 /// - If the transition is invalid for the current state
 /// - If the transition would violate business rules (e.g., due_date check for Overdue)
@@ -816,7 +1007,7 @@ pub fn assert_transition(
 }
 
 /// Validates that a transition from `from_status` to `to_status` is allowed.
-/// 
+///
 /// Valid transitions:
 /// - Pending -> Cancelled (originator cancellation)
 /// - Pending -> Financed (offer acceptance)

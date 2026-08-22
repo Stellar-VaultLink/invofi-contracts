@@ -385,6 +385,11 @@ impl FinancingContract {
             "lender cannot finance their own invoice"
         );
 
+        assert!(
+            amount <= invoice.amount,
+            "offer amount cannot exceed invoice amount"
+        );
+
         let mut offers = load_offers(&env);
         if offers.contains_key(offer_id.clone()) {
             env.panic_with_error(ContractError::AlreadyExists);
@@ -1300,8 +1305,7 @@ impl FinancingContract {
         // installment but the helper only reports whole installments — that
         // is explicitly in-scope per the issue.
         let installment_principal = offer.amount / (count as i128);
-        let installment_yield =
-            installment_principal * (offer.interest_rate as i128) / 10_000;
+        let installment_yield = installment_principal * (offer.interest_rate as i128) / 10_000;
         let installment_amount = installment_principal + installment_yield;
 
         assert!(

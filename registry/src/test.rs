@@ -599,7 +599,10 @@ fn test_constructor_cannot_be_reinvoked() {
         &soroban_sdk::Symbol::new(&env, "__constructor"),
         args,
     );
-    assert!(result.is_err(), "constructor must not be re-invokable post-deploy");
+    assert!(
+        result.is_err(),
+        "constructor must not be re-invokable post-deploy"
+    );
 }
 
 #[test]
@@ -713,7 +716,10 @@ fn test_pause_blocks_all_registry_state_changes() {
 
     fn assert_paused<F: FnOnce()>(f: F) {
         let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(f));
-        assert!(result.is_err(), "state-changing function should panic while paused");
+        assert!(
+            result.is_err(),
+            "state-changing function should panic while paused"
+        );
     }
 
     assert_paused(|| {
@@ -757,7 +763,11 @@ fn test_pause_blocks_all_registry_state_changes() {
         client.raise_dispute(&invoice_id, &originator);
     });
     assert_paused(|| {
-        client.resolve_dispute(&admin, &invoice_id, &invofi_common::InvoiceStatus::Cancelled);
+        client.resolve_dispute(
+            &admin,
+            &invoice_id,
+            &invofi_common::InvoiceStatus::Cancelled,
+        );
     });
     assert_paused(|| {
         client.blacklist_address(&admin, &other);
@@ -1460,7 +1470,10 @@ fn test_transition_history_recorded() {
 
     // Query transition history
     let history = client.get_transition_history(&invoice_id);
-    assert!(!history.is_empty(), "Transition history should not be empty");
+    assert!(
+        !history.is_empty(),
+        "Transition history should not be empty"
+    );
     assert_eq!(history.len(), 1, "Should have one transition recorded");
 
     let first = history.first().unwrap();
@@ -1580,10 +1593,7 @@ fn test_transition_events_emitted() {
 
     let events = env.events().all();
     // Should have transition events
-    assert!(
-        !events.is_empty(),
-        "Should emit events on state transition"
-    );
+    assert!(!events.is_empty(), "Should emit events on state transition");
 }
 
 // ─── Verification oracle (issue #181) ────────────────────────────────────────
@@ -2656,7 +2666,10 @@ fn test_eviction_cannot_fire_without_a_departed_record_to_take() {
         let mut found = 0u32;
         for a in c.get_verifications(&invoice_id).iter() {
             if a.verifier == first && a.v_type == VerificationType::BusinessRegistration {
-                assert!(a.valid_until < env.ledger().timestamp(), "record must be lapsed");
+                assert!(
+                    a.valid_until < env.ledger().timestamp(),
+                    "record must be lapsed"
+                );
                 found += 1;
             }
         }
@@ -2773,7 +2786,6 @@ fn count_events(env: &Env, name: Symbol) -> u32 {
     count
 }
 
-
 #[test]
 fn test_live_approval_below_threshold_reads_pending_not_expired() {
     let env = Env::default();
@@ -2794,8 +2806,7 @@ fn test_live_approval_below_threshold_reads_pending_not_expired() {
         &evidence_hash(&env, 1),
         &true,
     );
-    env.ledger()
-        .set_timestamp(1_000_000 + 7_776_000 + 1);
+    env.ledger().set_timestamp(1_000_000 + 7_776_000 + 1);
 
     // Verifier two now attests, so the type holds one live approval against a
     // threshold of two.
@@ -2848,8 +2859,7 @@ fn test_expired_reads_only_when_no_live_statement_remains() {
         &evidence_hash(&env, 1),
         &true,
     );
-    env.ledger()
-        .set_timestamp(1_000_000 + 7_776_000 + 1);
+    env.ledger().set_timestamp(1_000_000 + 7_776_000 + 1);
 
     assert_eq!(
         client.get_verification_status(&invoice_id, &VerificationType::TaxCompliance),
@@ -2914,4 +2924,3 @@ fn test_rotated_out_verifiers_cannot_lock_an_invoice() {
         VerificationStatus::Verified
     );
 }
-
