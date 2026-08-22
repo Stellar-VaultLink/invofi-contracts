@@ -182,4 +182,109 @@ proptest! {
         let total_repaid = stats.total_repaid;
         assert!(total_repaid >= partial_repay_amount);
     }
+
+        /// repay_invoice already rejects amount > total_owed on-chain (line
+    /// ~433 of repayment/src/lib.rs) — this proves that boundary holds under
+    /// fuzzing rather than just at the one hand-picked value in unit tests.
+    #[test]
+    fn test_repay_never_exceeds_total_owed(
+        principal in 10_000_000i128..100_000_000_000i128,
+        interest_rate in 1u32..=10_000u32,
+        days_elapsed in 1u64..365u64,
+        overshoot in 1i128..1_000_000_000i128,
+    ) {
+        let env = Env::default();
+        env.mock_all_auths();
+        let funded_at: u64 = 1_000_000;
+        env.ledger().set_timestamp(funded_at);
+
+        let admin = Address::generate(&env);
+        let originator = Address::generate(&env);
+        let lender = Address::generate(&env);
+        let invoice_id = symbol_short!("inv_ex");
+        let offer_id = symbol_short!("off_ex");
+        let token_admin = Address::generate(&env);
+        let sac = env.register_stellar_asset_contract_v2(token_admin);
+        let token_id = sac.address();
+        let asset_client = token::StellarAssetClient::new(&env, &token_id);
+        let token_client = token::TokenClient::new(&env, &token_id);
+
+        let registry_id = env.register(RegistryContract, (admin.clone(),));
+        let reg = invofi_registry::RegistryContractClient::new(&env, &registry_id);
+        let financing_id = env.register(FinancingContract, (admin.clone(), registry_id.clone(), token_id.clone()));
+        let fin = invofi_financing::FinancingContractClient::new(&env, &financing_id);
+        let repayment_id = env.register(RepaymentContract, (admin.clone(), registry_id.clone(), financing_id.clone(), token_id.clone()));
+        let rep = crate::RepaymentContractClient::new(&env, &repayment_id);
+        fin.set_repayment_contract(&admin, &repayment_id);
+        reg.set_repayment_contract(&admin, &repayment_id);
+        reg.set_financing_contract(&admin, &financing_id);
+
+        reg.register_invoice(&invoice_id, &originator, &principal, &symbol_short!("USD"), &2_000_000u64);
+        fin.create_offer(&offer_id, &invoice_id, &lender, &principal, &symbol_short!("USD"), &interest_rate, &2_592_000u64);
+        asset_client.mint(&lender, &principal);
+        token_client.approve(&lender, &financing_id, &principal, &(env.ledger().sequence() + 1000));
+        fin.accept_offer(&offer_id, &originator);
+
+        env.ledger().set_timestamp(funded_at + days_elapsed * 86_400);
+        let total_owed = rep.calculate_total_due(&offer_id);
+
+        asset_client.mint(&originator, &(total_owed + overshoot));
+        token_client.approve(&originator, &repayment_id, &(total_owed + overshoot), &(env.ledger().sequence() + 1000));
+
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            rep.repay_invoice(&invoice_id, &offer_id, &originator, &(total_owed + overshoot))
+        }));
+        prop_assert!(result.is_err(), "repayment above total_owed must be rejected");
+    }
+
+    /// Interest accrues linearly with elapsed time and must never decrease
+    /// for a fixed remaining principal — pro_rata_interest is a pure
+    /// function of (remaining, rate, days), monotonic in days by formula.
+    #[test]
+    fn test_interest_monotonic_with_time(
+        principal in 10_000_000i128..100_000_000_000i128,
+        interest_rate in 1u32..=10_000u32,
+        t1_days in 1u64..180u64,
+        t2_extra_days in 1u64..180u64,
+    ) {
+        let env = Env::default();
+        env.mock_all_auths();
+        let funded_at: u64 = 1_000_000;
+        env.ledger().set_timestamp(funded_at);
+
+        let admin = Address::generate(&env);
+        let originator = Address::generate(&env);
+        let lender = Address::generate(&env);
+        let invoice_id = symbol_short!("inv_mt");
+        let offer_id = symbol_short!("off_mt");
+        let token_admin = Address::generate(&env);
+        let sac = env.register_stellar_asset_contract_v2(token_admin);
+        let token_id = sac.address();
+        let asset_client = token::StellarAssetClient::new(&env, &token_id);
+        let token_client = token::TokenClient::new(&env, &token_id);
+
+        let registry_id = env.register(RegistryContract, (admin.clone(),));
+        let reg = invofi_registry::RegistryContractClient::new(&env, &registry_id);
+        let financing_id = env.register(FinancingContract, (admin.clone(), registry_id.clone(), token_id.clone()));
+        let fin = invofi_financing::FinancingContractClient::new(&env, &financing_id);
+        let repayment_id = env.register(RepaymentContract, (admin.clone(), registry_id.clone(), financing_id.clone(), token_id.clone()));
+        let rep = crate::RepaymentContractClient::new(&env, &repayment_id);
+        fin.set_repayment_contract(&admin, &repayment_id);
+        reg.set_repayment_contract(&admin, &repayment_id);
+        reg.set_financing_contract(&admin, &financing_id);
+
+        reg.register_invoice(&invoice_id, &originator, &principal, &symbol_short!("USD"), &2_000_000u64);
+        fin.create_offer(&offer_id, &invoice_id, &lender, &principal, &symbol_short!("USD"), &interest_rate, &31_536_000u64);
+        asset_client.mint(&lender, &principal);
+        token_client.approve(&lender, &financing_id, &principal, &(env.ledger().sequence() + 1000));
+        fin.accept_offer(&offer_id, &originator);
+
+        env.ledger().set_timestamp(funded_at + t1_days * 86_400);
+        let interest_t1 = rep.calculate_accrued_interest(&offer_id);
+
+        env.ledger().set_timestamp(funded_at + (t1_days + t2_extra_days) * 86_400);
+        let interest_t2 = rep.calculate_accrued_interest(&offer_id);
+
+        prop_assert!(interest_t2 >= interest_t1, "accrued interest must never decrease as time passes with no repayment");
+    }
 }

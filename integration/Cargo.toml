@@ -13,3 +13,4 @@ invofi-financing = { path = "../financing", features = ["testutils"] }
 invofi-repayment = { path = "../repayment", features = ["testutils"] }
 invofi-insurance = { path = "../insurance", features = ["testutils"] }
 invofi-reputation = { path = "../reputation", features = ["testutils"] }
+proptest = "1.11.0"

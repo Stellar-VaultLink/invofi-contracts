@@ -16,6 +16,7 @@ invofi-common = { path = "../common" }
 soroban-sdk = { workspace = true, features = ["testutils"] }
 invofi-common = { path = "../common", features = ["testutils"] }
 invofi-registry = { path = "../registry", features = ["testutils"] }
+proptest = "1.11.0"
 
 [features]
 testutils = ["soroban-sdk/testutils", "invofi-common/testutils"]
