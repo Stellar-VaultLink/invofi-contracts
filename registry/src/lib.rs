@@ -478,7 +478,7 @@ impl RegistryContract {
         if invoice.originator != originator {
             env.panic_with_error(ContractError::Unauthorized);
         }
-        let old_status = invoice.status.clone();
+        let old_status = invoice.status;
         assert_transition(&env, id.clone(), old_status, new_status, originator.clone());
         
         invoice.status = new_status;
