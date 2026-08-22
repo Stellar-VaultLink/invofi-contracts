@@ -511,62 +511,6 @@ pub fn assert_not_paused(env: &Env) {
 
 // ─── Invoice State Machine ────────────────────────────────────────────────────
 
-/// Assert that the given invoice status transition is legal according to the
-/// InvoFi lifecycle graph, panicking with a consistent message if not.
-///
-/// ## Allowed transitions
-///
-/// | From      | To                                         | Triggered by                    |
-/// |-----------|--------------------------------------------|---------------------------------|
-/// | Pending   | Financed                                   | financing_marks_invoice_financed|
-/// | Pending   | Cancelled                                  | cancel_invoice,                 |
-/// |           |                                            | update_invoice_status           |
-/// | Financed  | Financed  *(self — partial repayment)*     | repayment_marks_invoice_repaid, |
-/// |           |                                            | set_invoice_repaid_status       |
-/// | Financed  | Repaid                                     | repayment_marks_invoice_repaid, |
-/// |           |                                            | set_invoice_repaid_status       |
-/// | Financed  | Overdue                                    | mark_invoice_overdue            |
-/// | Financed  | Disputed                                   | raise_dispute                   |
-/// | Overdue   | Defaulted                                  | repayment_marks_defaulted       |
-/// | Disputed  | Financed \| Repaid \| Cancelled \| Defaulted | resolve_dispute              |
-///
-/// Every other `(from, to)` pair panics with:
-/// `"illegal invoice status transition: {from:?} -> {to:?}"`
-///
-/// ## Usage pattern
-///
-/// Call `assert_transition(invoice.status.clone(), new_status.clone())` before
-/// writing the new status to storage, then remove the ad-hoc per-function
-/// `if invoice.status != InvoiceStatus::X` checks that it replaces.
-pub fn assert_transition(env: &Env, from: InvoiceStatus, to: InvoiceStatus) {
-    let allowed = match from {
-        InvoiceStatus::Pending => matches!(to, InvoiceStatus::Financed | InvoiceStatus::Cancelled),
-        InvoiceStatus::Financed => matches!(
-            to,
-            InvoiceStatus::Financed    // partial repayment — balance not cleared
-                | InvoiceStatus::Repaid
-                | InvoiceStatus::Overdue
-                | InvoiceStatus::Disputed
-        ),
-        InvoiceStatus::Overdue => matches!(to, InvoiceStatus::Defaulted),
-        InvoiceStatus::Disputed => matches!(
-            to,
-            InvoiceStatus::Financed
-                | InvoiceStatus::Repaid
-                | InvoiceStatus::Cancelled
-                | InvoiceStatus::Defaulted
-        ),
-        // Terminal states — no transitions out.
-        InvoiceStatus::Repaid
-        | InvoiceStatus::Cancelled
-        | InvoiceStatus::Defaulted => false,
-    };
-
-    if !allowed {
-        env.panic_with_error(ContractError::InvalidTransition);
-    }
-}
-
 // ─── Cross-Contract Interface ────────────────────────────────────────────────
 // Financing calls these methods on the Registry contract.
 
@@ -726,7 +670,7 @@ pub trait ReputationInterface {
 mod transition_tests {
     extern crate std;
 
-    use super::{assert_transition, InvoiceStatus};
+    use super::{validate_transition, InvoiceStatus};
     use soroban_sdk::Env;
 
     // ── Legal transitions ────────────────────────────────────────────────────
@@ -741,7 +685,7 @@ mod transition_tests {
             #[test]
             fn $name() {
                 let env = Env::default();
-                assert_transition(&env, $from, $to); // must not panic
+                validate_transition(&env, $from, $to); // must not panic
             }
         };
     }
@@ -760,6 +704,7 @@ mod transition_tests {
     legal!(overdue_to_defaulted, InvoiceStatus::Overdue,  InvoiceStatus::Defaulted);
 
     // Disputed exits (resolve_dispute)
+    legal!(disputed_to_pending,   InvoiceStatus::Disputed, InvoiceStatus::Pending);
     legal!(disputed_to_financed,  InvoiceStatus::Disputed, InvoiceStatus::Financed);
     legal!(disputed_to_repaid,    InvoiceStatus::Disputed, InvoiceStatus::Repaid);
     legal!(disputed_to_cancelled, InvoiceStatus::Disputed, InvoiceStatus::Cancelled);
@@ -776,7 +721,7 @@ mod transition_tests {
             #[should_panic(expected = "Error(Contract, #3)")]
             fn $name() {
                 let env = Env::default();
-                assert_transition(&env, $from, $to);
+                validate_transition(&env, $from, $to);
             }
         };
     }
@@ -801,8 +746,7 @@ mod transition_tests {
     illegal!(overdue_to_cancelled, InvoiceStatus::Overdue, InvoiceStatus::Cancelled);
     illegal!(overdue_to_disputed,  InvoiceStatus::Overdue, InvoiceStatus::Disputed);
 
-    // Disputed — illegal targets (anything not in the four allowed)
-    illegal!(disputed_to_pending,  InvoiceStatus::Disputed, InvoiceStatus::Pending);
+    // Disputed — illegal targets (anything not in the five allowed)
     illegal!(disputed_to_overdue,  InvoiceStatus::Disputed, InvoiceStatus::Overdue);
     illegal!(disputed_to_disputed, InvoiceStatus::Disputed, InvoiceStatus::Disputed);
 
@@ -830,6 +774,8 @@ mod transition_tests {
     illegal!(defaulted_to_cancelled, InvoiceStatus::Defaulted, InvoiceStatus::Cancelled);
     illegal!(defaulted_to_disputed,  InvoiceStatus::Defaulted, InvoiceStatus::Disputed);
     illegal!(defaulted_to_defaulted, InvoiceStatus::Defaulted, InvoiceStatus::Defaulted);
+} // end mod transition_tests
+
 // ─── State Machine State Validation and Enforcement ──────────────────────────
 
 use soroban_sdk::Vec;
@@ -852,7 +798,7 @@ pub fn assert_transition(
     actor: Address,
 ) {
     // Validate that this transition is in the allowed table
-    validate_transition(from_status, to_status);
+    validate_transition(env, from_status, to_status);
 
     // Emit structured transition event
     env.events().publish(
@@ -879,7 +825,7 @@ pub fn assert_transition(
 /// - Disputed -> Repaid (admin resolution to Repaid)
 /// - Disputed -> Cancelled (admin resolution to Cancelled)
 /// - Disputed -> Defaulted (admin resolution to Defaulted)
-fn validate_transition(from_status: InvoiceStatus, to_status: InvoiceStatus) {
+pub(crate) fn validate_transition(env: &Env, from_status: InvoiceStatus, to_status: InvoiceStatus) {
     let valid = matches!(
         (from_status, to_status),
         // Pending exits
@@ -901,7 +847,7 @@ fn validate_transition(from_status: InvoiceStatus, to_status: InvoiceStatus) {
     );
 
     if !valid {
-        panic!("Invalid state transition");
+        env.panic_with_error(ContractError::InvalidTransition);
     }
 }
 
