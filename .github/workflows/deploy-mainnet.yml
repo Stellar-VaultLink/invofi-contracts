@@ -227,25 +227,31 @@ jobs:
             --asset USDC:GA5ZSEJYB37JRC5AVCIA5MOP4RHTM335X2KGX3IHOJAPP5RE34K4KZVN \
             --network "$NETWORK")
 
-          stellar contract invoke --id "$REGISTRY_ID" --source invofi-deployer \
-            --network "$NETWORK" \
-            -- set_financing_contract --admin "$ADMIN_PUBLIC" --financing "$FINANCING_ID"
+          # Every admin-gated entry point now takes --signers, a JSON array of
+          # signer addresses (ADR-0010). A freshly deployed contract is in
+          # single-admin bootstrap mode, so a one-element array containing the
+          # constructor's admin is both necessary and sufficient here.
+          SIGNERS="[\"$ADMIN_PUBLIC\"]"
 
           stellar contract invoke --id "$REGISTRY_ID" --source invofi-deployer \
             --network "$NETWORK" \
-            -- set_repayment_contract --admin "$ADMIN_PUBLIC" --repayment "$REPAYMENT_ID"
+            -- set_financing_contract --signers "$SIGNERS" --financing "$FINANCING_ID"
+
+          stellar contract invoke --id "$REGISTRY_ID" --source invofi-deployer \
+            --network "$NETWORK" \
+            -- set_repayment_contract --signers "$SIGNERS" --repayment "$REPAYMENT_ID"
 
           stellar contract invoke --id "$FINANCING_ID" --source invofi-deployer \
             --network "$NETWORK" \
-            -- set_repayment_contract --admin "$ADMIN_PUBLIC" --repayment "$REPAYMENT_ID"
+            -- set_repayment_contract --signers "$SIGNERS" --repayment "$REPAYMENT_ID"
 
           stellar contract invoke --id "$FINANCING_ID" --source invofi-deployer \
             --network "$NETWORK" \
-            -- register_currency --admin "$ADMIN_PUBLIC" --currency XLM --token_addr "$XLM_TOKEN"
+            -- register_currency --signers "$SIGNERS" --currency XLM --token_addr "$XLM_TOKEN"
 
           stellar contract invoke --id "$FINANCING_ID" --source invofi-deployer \
             --network "$NETWORK" \
-            -- register_currency --admin "$ADMIN_PUBLIC" --currency USDC --token_addr "$USDC_TOKEN"
+            -- register_currency --signers "$SIGNERS" --currency USDC --token_addr "$USDC_TOKEN"
 
           # Position token (POS): deploy SAC if absent, then hand admin to financing.
           POS_ID=$(stellar contract id asset \
@@ -260,21 +266,21 @@ jobs:
             -- set_admin --new_admin "$FINANCING_ID"
           stellar contract invoke --id "$FINANCING_ID" --source invofi-deployer \
             --network "$NETWORK" \
-            -- set_position_token --admin "$ADMIN_PUBLIC" --token "$POS_ID"
+            -- set_position_token --signers "$SIGNERS" --token "$POS_ID"
 
           # Insurance payout caller + reputation recorder
           stellar contract invoke --id "$REPAYMENT_ID" --source invofi-deployer \
             --network "$NETWORK" \
-            -- set_insurance --admin "$ADMIN_PUBLIC" --insurance "$INSURANCE_ID"
+            -- set_insurance --signers "$SIGNERS" --insurance "$INSURANCE_ID"
           stellar contract invoke --id "$REPAYMENT_ID" --source invofi-deployer \
             --network "$NETWORK" \
-            -- set_reputation --admin "$ADMIN_PUBLIC" --reputation "$REPUTATION_ID"
+            -- set_reputation --signers "$SIGNERS" --reputation "$REPUTATION_ID"
           stellar contract invoke --id "$INSURANCE_ID" --source invofi-deployer \
             --network "$NETWORK" \
-            -- set_payout_caller --admin "$ADMIN_PUBLIC" --payout_caller "$REPAYMENT_ID"
+            -- set_payout_caller --signers "$SIGNERS" --payout_caller "$REPAYMENT_ID"
           stellar contract invoke --id "$REPUTATION_ID" --source invofi-deployer \
             --network "$NETWORK" \
-            -- set_recorder --admin "$ADMIN_PUBLIC" --recorder "$REPAYMENT_ID"
+            -- set_recorder --signers "$SIGNERS" --recorder "$REPAYMENT_ID"
 
           echo "position_token_id=$POS_ID" >> "$GITHUB_OUTPUT"
 

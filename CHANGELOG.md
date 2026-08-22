@@ -8,6 +8,26 @@ and are enforced by commitlint in CI.
 ## [Unreleased]
 
 ### Added
+- **M-of-N admin governance / multisig (issue #50)** — every contract's admin
+  surface (`set_*`, `pause`/`unpause`, `resolve_dispute`, `transfer_admin`) is
+  now gated by a threshold over a configurable set of signer addresses
+  (`AdminConfig { signers, threshold }` in `invofi_common`) instead of a
+  single stored `Address`. A call is authorized once `threshold` distinct
+  configured signers each `require_auth` within the same transaction — no
+  on-chain proposal queue, same "same-block" philosophy as the pause
+  mechanism (ADR-0001). Every constructor still takes one `admin: Address`
+  and boots into single-admin mode (`signers: [admin], threshold: 1`), which
+  behaves identically to the old single-admin check; a deployment opts into
+  true M-of-N post-deploy via the new `set_signers`. Design, alternatives,
+  and the redeploy-based migration path for already-deployed instances are in
+  `docs/adr/0010-multisig-admin-governance.md`.
+  - **Breaking ABI change**: every admin-gated function's first argument
+    changes from `admin: Address` to `signers: Vec<Address>`. CLI callers
+    (`deploy-contract.yml`, `scripts/deploy.sh`) pass a one-element JSON array
+    (`--signers '["G..."]'`) for bootstrap-mode deployments.
+  - New per-contract getters: `get_admin_config`, `get_signers`,
+    `get_threshold`. `get_admin` is kept for backward compatibility and now
+    returns the primary signer (`signers[0]`).
 - **CI: cargo-nextest + line coverage** — the Test job runs the full suite under
   [nextest](https://nexte.st/) (parallel, same assertions). A Coverage job uses
   `cargo llvm-cov nextest`, publishes LCOV/Codecov artifacts, and soft-checks
