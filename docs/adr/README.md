@@ -12,6 +12,8 @@ get the next number; append, never rewrite (status updates go in the file).
 | 0005 | [Deployer-bound initialization (constructors)](./0005-deployer-bound-initialization.md) | Accepted |
 | 0006 | [Fixed installment repayment schedules](./0006-repayment-schedules.md) | Accepted |
 | 0007 | [Overdue penalty interest](./0007-overdue-penalty-interest.md) | Proposed |
+| 0008 | [Offer amendment and counter-offer](./0008-offer-negotiation.md) | Proposed |
+| 0009 | [Invoice verification oracle](./0009-verification-oracle.md) | Proposed |
 
 App-layer decisions (wallet allowlist, indexer, SDK) live in the monorepo:
 [invofi/docs/adr](https://github.com/Stellar-VaultLink/invofi/tree/main/docs/adr).

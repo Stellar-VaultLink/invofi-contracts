@@ -7,7 +7,9 @@
 
 #![no_std]
 
-use soroban_sdk::{contractclient, contracterror, contracttype, symbol_short, Address, Env, Map, Symbol};
+use soroban_sdk::{
+    contractclient, contracterror, contracttype, symbol_short, Address, BytesN, Env, Map, Symbol,
+};
 
 // ─── Constants ───────────────────────────────────────────────────────────────
 
@@ -24,6 +26,56 @@ pub const MAX_OFFER_DURATION_SECS: u64 = 31_536_000;
 /// Minimum invoice amount in stroops (1 XLM = 10_000_000 stroops).
 /// Prevents dust invoices that would cost more in fees than they're worth.
 pub const MIN_INVOICE_AMOUNT: i128 = 10_000_000;
+
+/// Default negotiation window for offer amendment / counter-offer. 72 hours,
+/// in seconds. Admin-configurable per deployment via
+/// `set_negotiation_window`.
+pub const DEFAULT_NEGOTIATION_WINDOW_SECS: u64 = 259_200;
+
+/// Lower bound an admin may configure the negotiation window to. 1 hour.
+/// A window shorter than this makes a good-faith reply impractical.
+pub const MIN_NEGOTIATION_WINDOW_SECS: u64 = 3_600;
+
+/// Upper bound an admin may configure the negotiation window to. 30 days.
+/// The window bounds how long a recorded counter-offer stays executable, so
+/// it must not be settable to an effectively unbounded value.
+pub const MAX_NEGOTIATION_WINDOW_SECS: u64 = 2_592_000;
+
+/// Hard cap on negotiation rounds per offer. Every round appends a
+/// `NegotiationRecord` to a single persistent `Vec`, so the cap is what keeps
+/// that entry's size — and the cost of reading it — bounded.
+pub const MAX_NEGOTIATION_ROUNDS: u32 = 20;
+/// Default validity period for a verification attestation. 90 days, in
+/// seconds. Admin-configurable per deployment via `set_attestation_validity`.
+pub const DEFAULT_ATTESTATION_VALIDITY_SECS: u64 = 7_776_000;
+
+/// Lower bound an admin may configure attestation validity to. 1 day.
+pub const MIN_ATTESTATION_VALIDITY_SECS: u64 = 86_400;
+
+/// Upper bound an admin may configure attestation validity to. 365 days.
+/// An attestation is a snapshot of an off-chain fact that can change without
+/// anyone telling the chain, so it must not be settable to never expire.
+pub const MAX_ATTESTATION_VALIDITY_SECS: u64 = 31_536_000;
+
+/// Maximum verification fee an admin may configure, in basis points (5%) —
+/// the same ceiling `set_fee` applies to the protocol fee.
+pub const MAX_VERIFICATION_FEE_BPS: u32 = 500;
+
+/// Maximum size of the trusted verifier set.
+pub const MAX_VERIFIERS: u32 = 20;
+
+/// Maximum attestations retained per invoice. One per (verifier, type) keeps
+/// this at `MAX_VERIFIERS x 3` for the current verifier set; the cap also
+/// bounds the residue left behind by verifiers who have since been removed.
+pub const MAX_ATTESTATIONS_PER_INVOICE: u32 = 60;
+
+/// The off-chain facts the verification oracle attests to. Used to decide
+/// whether an invoice is fully verified — every type must clear the threshold.
+pub const VERIFICATION_TYPES: [VerificationType; 3] = [
+    VerificationType::DocumentHash,
+    VerificationType::BusinessRegistration,
+    VerificationType::TaxCompliance,
+];
 
 // ─── Shared Error Enum ────────────────────────────────────────────────────────
 
@@ -102,7 +154,7 @@ pub struct Invoice {
 
 /// Lifecycle status of an invoice.
 #[contracttype]
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 #[repr(u32)]
 pub enum InvoiceStatus {
     Pending = 0,
@@ -112,6 +164,16 @@ pub enum InvoiceStatus {
     Cancelled = 4,
     Disputed = 5,
     Defaulted = 6,
+}
+
+/// A record of a single invoice state transition.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct TransitionRecord {
+    pub from_status: InvoiceStatus,
+    pub to_status: InvoiceStatus,
+    pub actor: Address,
+    pub timestamp: u64,
 }
 
 /// A financing offer submitted by a lender against an invoice.
@@ -219,6 +281,141 @@ pub struct RepaymentSchedule {
     pub first_due: u64,
 }
 
+/// A single payment record stored on-chain as part of the payment history
+/// for an invoice. Each partial or full repayment creates one record.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct PaymentRecord {
+    /// Sequential payment identifier (1-based).
+    pub payment_id: u32,
+    /// Total payment amount (principal + interest combined).
+    pub amount: i128,
+    /// Portion of the payment applied to accrued interest.
+    pub interest_paid: i128,
+    /// Portion of the payment applied to outstanding principal.
+    pub principal_paid: i128,
+    /// Unix timestamp of the payment.
+    pub timestamp: u64,
+    /// Address that made the payment.
+    pub payer: Address,
+}
+
+/// Which side of a financing negotiation proposed a set of terms.
+#[contracttype]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[repr(u32)]
+pub enum NegotiationParty {
+    /// The lender who created the offer, via `amend_offer`.
+    Lender = 0,
+    /// The invoice originator, via `counter_offer`.
+    Originator = 1,
+}
+
+/// One round of an offer negotiation: the terms one party put on the table,
+/// and when. The full `Vec<NegotiationRecord>` for an offer is the on-chain
+/// negotiation history.
+///
+/// `(amount, interest_rate, duration)` is the **canonical term tuple**.
+/// Agreement is exact equality of that tuple — there is no rounding or
+/// tolerance, so "these are the same terms" is never a judgement call.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct NegotiationRecord {
+    /// Which side proposed these terms.
+    pub party: NegotiationParty,
+    /// Proposed principal.
+    pub amount: i128,
+    /// Proposed interest rate in basis points.
+    pub interest_rate: u32,
+    /// Proposed financing duration in seconds.
+    pub duration: u64,
+    /// Ledger timestamp at which the round was recorded.
+    pub timestamp: u64,
+}
+
+/// Lifecycle status of an offer negotiation.
+///
+/// `Expired` is **derived on read** from the window deadline: Soroban has no
+/// scheduler, so nothing flips a negotiation to expired on its own. `Closed`
+/// and `Accepted` are persisted, because both are the result of an actual
+/// call.
+#[contracttype]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[repr(u32)]
+pub enum NegotiationStatus {
+    /// No negotiation has been opened on this offer.
+    None = 0,
+    /// Open: within the window, still accepting rounds.
+    Open = 1,
+    /// The window elapsed without agreement. Terminal.
+    Expired = 2,
+    /// A party ended the negotiation early. Terminal.
+    Closed = 3,
+    /// The two sides converged on identical terms and the offer executed.
+    /// Terminal.
+    Accepted = 4,
+}
+
+/// The class of off-chain fact an attestation speaks to.
+#[contracttype]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[repr(u32)]
+pub enum VerificationType {
+    /// The hash of the invoice document itself matches what the originator
+    /// registered off-chain.
+    DocumentHash = 0,
+    /// The originator is a registered business in good standing.
+    BusinessRegistration = 1,
+    /// The originator is current on its tax obligations.
+    TaxCompliance = 2,
+}
+
+/// Verification state of an invoice, or of one verification type on it.
+///
+/// `Expired` is **derived on read** from `valid_until`: Soroban has no
+/// scheduler, so nothing flips an attestation to expired on its own.
+#[contracttype]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[repr(u32)]
+pub enum VerificationStatus {
+    /// No attestation yet, or not enough of them to clear the threshold.
+    Pending = 0,
+    /// Enough distinct verifiers attested affirmatively, none of them
+    /// expired, and no verifier rejected.
+    Verified = 1,
+    /// A verifier attested negatively. A live rejection outranks any number
+    /// of approvals.
+    Rejected = 2,
+    /// Every attestation that existed has passed its `valid_until`.
+    Expired = 3,
+}
+
+/// A verifier's signed statement about one off-chain fact, stored on-chain.
+///
+/// The contract cannot check that `hash` corresponds to a real invoice
+/// document, or that a business registration is genuine. What it does is
+/// authenticate that a *trusted verifier* said so and keep the statement
+/// tamper-evident and timestamped — see ADR-0009 for that trust boundary.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct Attestation {
+    /// The verifier who submitted it.
+    pub verifier: Address,
+    /// Which off-chain fact it speaks to.
+    pub v_type: VerificationType,
+    /// Hash of the off-chain evidence (document, registration record, filing).
+    pub hash: BytesN<32>,
+    /// Ledger timestamp at which it was submitted.
+    pub timestamp: u64,
+    /// Ledger timestamp after which it no longer counts.
+    pub valid_until: u64,
+    /// `Verified` or `Rejected` as submitted; flipped to `Expired` once
+    /// `expire_verifications` observes the lapse. Reads derive expiry from
+    /// `valid_until` regardless, so this field lagging never makes a read
+    /// wrong.
+    pub status: VerificationStatus,
+}
+
 // ─── Currency Registry ───────────────────────────────────────────────────────
 
 /// Load the currency registry (an empty map if none has been configured).
@@ -285,6 +482,7 @@ pub fn resolve_token(env: &Env, currency: &Symbol) -> Address {
 ///   - exceptions: pause, unpause, contract_is_paused, getters.
 /// - Financing:
 ///   - state-changing: create_offer, withdraw_offer, accept_offer, reject_offer,
+///     amend_offer, counter_offer, close_negotiation, set_negotiation_window,
 ///     update_offer_status, update_offer_amount_repaid, update_lender_stats_repaid,
 ///     update_stats_repaid, register_currency, set_position_token, set_repayment_contract,
 ///     transfer_admin.
@@ -298,7 +496,7 @@ pub fn resolve_token(env: &Env, currency: &Symbol) -> Address {
 ///     transfer_admin.
 ///   - exceptions: pause, unpause, contract_is_paused, getters.
 /// - Reputation:
-///   - state-changing: record_outcome, set_recorder.
+///   - state-changing: record_outcome, resolve_dispute, set_recorder.
 ///   - exceptions: pause, unpause, contract_is_paused, getters.
 pub fn assert_not_paused(env: &Env) {
     let paused: bool = env
@@ -490,6 +688,16 @@ pub trait InsuranceInterface {
     /// is in `Defaulted` status before moving any funds. Returns the amount
     /// actually paid.
     fn pay_out(env: Env, invoice_id: Symbol, beneficiary: Address, amount: i128) -> i128;
+
+    /// Claim a partial payout from the insurance pool for a specific offer.
+    /// The claim amount is bounded by the reserved amount for this offer and
+    /// the pool's available balance. Returns (paid, remaining_reserved).
+    fn claim_payout(
+        env: Env,
+        offer_id: Symbol,
+        lender: Address,
+        amount: i128,
+    ) -> (i128, i128);
 }
 
 // ─── Reputation Cross-Contract Interface ─────────────────────────────────────
@@ -622,4 +830,119 @@ mod transition_tests {
     illegal!(defaulted_to_cancelled, InvoiceStatus::Defaulted, InvoiceStatus::Cancelled);
     illegal!(defaulted_to_disputed,  InvoiceStatus::Defaulted, InvoiceStatus::Disputed);
     illegal!(defaulted_to_defaulted, InvoiceStatus::Defaulted, InvoiceStatus::Defaulted);
+// ─── State Machine State Validation and Enforcement ──────────────────────────
+
+use soroban_sdk::Vec;
+
+/// Validates and executes an invoice state transition. Emits a structured 
+/// transition event and records the transition in the history log.
+/// 
+/// This is the single point of authority for all invoice status changes across
+/// the protocol. All entry points (registry, financing, repayment) must route
+/// through this function.
+/// 
+/// # Panics
+/// - If the transition is invalid for the current state
+/// - If the transition would violate business rules (e.g., due_date check for Overdue)
+pub fn assert_transition(
+    env: &Env,
+    invoice_id: Symbol,
+    from_status: InvoiceStatus,
+    to_status: InvoiceStatus,
+    actor: Address,
+) {
+    // Validate that this transition is in the allowed table
+    validate_transition(from_status, to_status);
+
+    // Emit structured transition event
+    env.events().publish(
+        (symbol_short!("inv_trx"), invoice_id.clone()),
+        (from_status, to_status, actor.clone()),
+    );
+
+    // Record transition in bounded history (max 20 entries)
+    record_transition(env, invoice_id, from_status, to_status, actor);
+}
+
+/// Validates that a transition from `from_status` to `to_status` is allowed.
+/// 
+/// Valid transitions:
+/// - Pending -> Cancelled (originator cancellation)
+/// - Pending -> Financed (offer acceptance)
+/// - Financed -> Repaid (full repayment)
+/// - Financed -> Financed (partial repayment, no-op state-wise)
+/// - Financed -> Overdue (time-based, after due_date)
+/// - Financed -> Disputed (originator dispute)
+/// - Overdue -> Defaulted (lender reclaim after grace period)
+/// - Disputed -> Pending (admin resolution to Pending)
+/// - Disputed -> Financed (admin resolution to Financed)
+/// - Disputed -> Repaid (admin resolution to Repaid)
+/// - Disputed -> Cancelled (admin resolution to Cancelled)
+/// - Disputed -> Defaulted (admin resolution to Defaulted)
+fn validate_transition(from_status: InvoiceStatus, to_status: InvoiceStatus) {
+    let valid = matches!(
+        (from_status, to_status),
+        // Pending exits
+        (InvoiceStatus::Pending, InvoiceStatus::Cancelled)
+        | (InvoiceStatus::Pending, InvoiceStatus::Financed)
+        // Financed exits
+        | (InvoiceStatus::Financed, InvoiceStatus::Repaid)
+        | (InvoiceStatus::Financed, InvoiceStatus::Financed)
+        | (InvoiceStatus::Financed, InvoiceStatus::Overdue)
+        | (InvoiceStatus::Financed, InvoiceStatus::Disputed)
+        // Overdue exits
+        | (InvoiceStatus::Overdue, InvoiceStatus::Defaulted)
+        // Disputed exits (admin-controlled)
+        | (InvoiceStatus::Disputed, InvoiceStatus::Pending)
+        | (InvoiceStatus::Disputed, InvoiceStatus::Financed)
+        | (InvoiceStatus::Disputed, InvoiceStatus::Repaid)
+        | (InvoiceStatus::Disputed, InvoiceStatus::Cancelled)
+        | (InvoiceStatus::Disputed, InvoiceStatus::Defaulted)
+    );
+
+    if !valid {
+        panic!("Invalid state transition");
+    }
+}
+
+/// Records a transition in the bounded history log (max 20 entries, FIFO eviction).
+fn record_transition(
+    env: &Env,
+    invoice_id: Symbol,
+    from_status: InvoiceStatus,
+    to_status: InvoiceStatus,
+    actor: Address,
+) {
+    let storage_key = symbol_short!("trn_log");
+    let mut history: Vec<TransitionRecord> = env
+        .storage()
+        .persistent()
+        .get(&(storage_key.clone(), invoice_id.clone()))
+        .unwrap_or_else(|| Vec::new(env));
+
+    let record = TransitionRecord {
+        from_status,
+        to_status,
+        actor,
+        timestamp: env.ledger().timestamp(),
+    };
+
+    history.push_back(record);
+
+    // Evict oldest entry if we exceed max 20
+    if history.len() > 20 {
+        history.pop_front();
+    }
+
+    env.storage()
+        .persistent()
+        .set(&(storage_key, invoice_id), &history);
+}
+
+/// Query the full transition history for an invoice.
+pub fn get_transition_history(env: &Env, invoice_id: Symbol) -> Vec<TransitionRecord> {
+    env.storage()
+        .persistent()
+        .get(&(symbol_short!("trn_log"), invoice_id))
+        .unwrap_or_else(|| Vec::new(env))
 }

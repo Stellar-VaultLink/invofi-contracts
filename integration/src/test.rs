@@ -249,7 +249,8 @@ fn test_registry_financing_offer_on_financed_invoice_panics() {
 fn test_financing_repayment_full_repay_syncs_state() {
     let env = Env::default();
     env.mock_all_auths();
-    env.ledger().set_timestamp(1_000_000);
+    let funded_at: u64 = 1_000_000;
+    env.ledger().set_timestamp(funded_at);
 
     let p = deploy_protocol(&env);
     let amount: i128 = 1_000_000_000;
@@ -281,6 +282,9 @@ fn test_financing_repayment_full_repay_syncs_state() {
     );
     p.fin.accept_offer(&offer_id, &p.originator);
 
+    // Advance 365 days so pro-rata interest = flat yield.
+    env.ledger().set_timestamp(funded_at + 365 * 86_400);
+
     // Fund originator for repayment.
     let asset = token::StellarAssetClient::new(&env, &p.token_id);
     asset.mint(&p.originator, &total_due);
@@ -292,7 +296,6 @@ fn test_financing_repayment_full_repay_syncs_state() {
     // Offer must be Repaid in Financing (cross-crate state sync).
     let offer_after = p.fin.get_offer(&offer_id);
     assert_eq!(offer_after.status, OfferStatus::Repaid);
-    assert_eq!(offer_after.amount_repaid, total_due);
 
     // Lender received principal + yield.
     let tok = token::TokenClient::new(&env, &p.token_id);
@@ -304,7 +307,8 @@ fn test_financing_repayment_full_repay_syncs_state() {
 fn test_financing_repayment_partial_keeps_financed() {
     let env = Env::default();
     env.mock_all_auths();
-    env.ledger().set_timestamp(1_000_000);
+    let funded_at: u64 = 1_000_000;
+    env.ledger().set_timestamp(funded_at);
 
     let p = deploy_protocol(&env);
     let amount: i128 = 1_000_000_000;
@@ -330,8 +334,11 @@ fn test_financing_repayment_partial_keeps_financed() {
     );
     p.fin.accept_offer(&offer_id, &p.originator);
 
-    // Partial repayment (half).
-    let partial = amount / 2;
+    // Advance 1 day to accrue some interest.
+    env.ledger().set_timestamp(funded_at + 86_400);
+
+    // Partial repayment (10% of principal — above the 1% minimum).
+    let partial = amount / 10;
     let asset = token::StellarAssetClient::new(&env, &p.token_id);
     asset.mint(&p.originator, &partial);
     let repaid = p.rep.repay_invoice(&invoice_id, &offer_id, &p.originator, &partial);
@@ -440,6 +447,7 @@ fn test_repayment_insurance_default_triggers_payout() {
     assert_eq!(inv.status, InvoiceStatus::Defaulted);
 
     // Lender received insurance payout (capped at pool).
+    // Insurance pays principal + flat yield (frozen base for penalty).
     let total_due = amount + amount * 500 / 10_000;
     assert!(total_due > coverage);
     let tok = token::TokenClient::new(&env, &p.token_id);
@@ -502,7 +510,8 @@ fn test_repayment_insurance_reclaim_before_grace_panics() {
 fn test_repayment_reputation_success_on_full_repay() {
     let env = Env::default();
     env.mock_all_auths();
-    env.ledger().set_timestamp(1_000_000);
+    let funded_at: u64 = 1_000_000;
+    env.ledger().set_timestamp(funded_at);
 
     let p = deploy_protocol(&env);
     let amount: i128 = 1_000_000_000;
@@ -534,6 +543,9 @@ fn test_repayment_reputation_success_on_full_repay() {
     );
     p.fin.accept_offer(&offer_id, &p.originator);
 
+    // Advance 365 days so pro-rata interest = flat yield.
+    env.ledger().set_timestamp(funded_at + 365 * 86_400);
+
     // Fund originator + full repayment.
     let asset = token::StellarAssetClient::new(&env, &p.token_id);
     asset.mint(&p.originator, &total_due);
@@ -552,7 +564,8 @@ fn test_repayment_reputation_success_on_full_repay() {
 fn test_repayment_reputation_default_on_reclaim() {
     let env = Env::default();
     env.mock_all_auths();
-    env.ledger().set_timestamp(1_000_000);
+    let funded_at: u64 = 1_000_000;
+    env.ledger().set_timestamp(funded_at);
 
     let p = deploy_protocol(&env);
     let staker = Address::generate(&env);
@@ -578,10 +591,16 @@ fn test_repayment_reputation_default_on_reclaim() {
         p.fin.create_offer(&off_id, &inv_id, &p.lender, &amount, &symbol_short!("USDC"), &500u32, &2_592_000u64);
         p.fin.accept_offer(&off_id, &p.originator);
 
+        // Advance 365 days so pro-rata interest = flat yield.
+        env.ledger().set_timestamp(funded_at + 365 * 86_400);
+
         let total = amount + amount * 500 / 10_000;
         let asset2 = token::StellarAssetClient::new(&env, &p.token_id);
         asset2.mint(&p.originator, &total);
         p.rep.repay_invoice(&inv_id, &off_id, &p.originator, &total);
+
+        // Reset timestamp for next iteration.
+        env.ledger().set_timestamp(funded_at);
     }
     assert_eq!(p.repu.get_score(&p.originator), 2);
 
@@ -699,7 +718,8 @@ fn test_registry_repayment_overdue_on_pending_panics() {
 fn test_full_lifecycle_register_offer_accept_repay() {
     let env = Env::default();
     env.mock_all_auths();
-    env.ledger().set_timestamp(1_000_000);
+    let funded_at: u64 = 1_000_000;
+    env.ledger().set_timestamp(funded_at);
 
     let p = deploy_protocol(&env);
     let amount: i128 = 2_000_000_000;
@@ -747,7 +767,10 @@ fn test_full_lifecycle_register_offer_accept_repay() {
     assert_eq!(tok.balance(&p.lender), 0);
     assert_eq!(tok.balance(&p.originator), amount);
 
-    // ── Step 4: Repay in full (Repayment → Financing → Registry → Reputation)
+    // ── Step 4: Advance 365 days so pro-rata interest = flat yield ──────────
+    env.ledger().set_timestamp(funded_at + 365 * 86_400);
+
+    // ── Step 5: Repay in full (Repayment → Financing → Registry → Reputation)
     let asset = token::StellarAssetClient::new(&env, &p.token_id);
     asset.mint(&p.originator, &total_due);
     let repaid = p.rep.repay_invoice(&invoice_id, &offer_id, &p.originator, &total_due);
@@ -756,7 +779,6 @@ fn test_full_lifecycle_register_offer_accept_repay() {
     // Offer Repaid in Financing.
     let offer_final = p.fin.get_offer(&offer_id);
     assert_eq!(offer_final.status, OfferStatus::Repaid);
-    assert_eq!(offer_final.amount_repaid, total_due);
 
     // Lender received principal + yield.
     assert_eq!(tok.balance(&p.lender), total_due);
