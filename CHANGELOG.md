@@ -13,6 +13,10 @@ and are enforced by commitlint in CI.
   `cargo llvm-cov nextest`, publishes LCOV/Codecov artifacts, and soft-checks
   touched crates against `coverage/baseline.json` (PR comment + annotations, no
   hard fail yet). README badge + CONTRIBUTING document local test/coverage flows.
+- **`MAX_INTEREST_BPS` constant (10 000 bps = 100%)** — `create_offer` now
+  rejects interest rates above the cap with a clear panic message, bounding
+  `yield_amount = amount * rate / 10_000` so pathological rates cannot grow
+  the yield arbitrarily large (issue #39).
 - **Offer amendment and counter-offer protocol (issue #180)** — financing
   offers are no longer take-it-or-leave-it. A lender can revise their own terms
   with `amend_offer`, an originator can name theirs with `counter_offer`, and

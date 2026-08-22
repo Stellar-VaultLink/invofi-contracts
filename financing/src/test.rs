@@ -166,6 +166,37 @@ fn test_create_offer_interest_rate_too_high_panics() {
 }
 
 #[test]
+fn test_create_offer_interest_rate_at_cap_passes() {
+    let env = Env::default();
+    env.mock_all_auths();
+    env.ledger().set_timestamp(1_000_000);
+
+    let admin = Address::generate(&env);
+    let token = Address::generate(&env);
+    let (reg, fin) = setup_contracts(&env, &admin, &token);
+
+    let originator = Address::generate(&env);
+    let lender = Address::generate(&env);
+    reg.register_invoice(
+        &symbol_short!("inv_v4"),
+        &originator,
+        &10_000_000i128,
+        &symbol_short!("USDC"),
+        &3_000_000u64,
+    );
+    let offer = fin.create_offer(
+        &symbol_short!("off_v2"),
+        &symbol_short!("inv_v4"),
+        &lender,
+        &1_000i128,
+        &symbol_short!("USDC"),
+        &invofi_common::MAX_INTEREST_BPS,
+        &86_400u64,
+    );
+    assert_eq!(offer.interest_rate, invofi_common::MAX_INTEREST_BPS);
+}
+
+#[test]
 #[should_panic(expected = "duration must be at least 1 day (86400 seconds)")]
 fn test_create_offer_short_duration_panics() {
     let env = Env::default();
