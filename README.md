@@ -5,6 +5,7 @@ Soroban smart contracts for the [InvoFi](https://github.com/Stellar-VaultLink/in
 [![CI](https://github.com/Stellar-VaultLink/invofi-contracts/actions/workflows/ci.yml/badge.svg)](https://github.com/Stellar-VaultLink/invofi-contracts/actions/workflows/ci.yml)
 [![Clippy](https://github.com/Stellar-VaultLink/invofi-contracts/actions/workflows/clippy.yml/badge.svg)](https://github.com/Stellar-VaultLink/invofi-contracts/actions/workflows/clippy.yml)
 [![Scout](https://github.com/Stellar-VaultLink/invofi-contracts/actions/workflows/scout-security-analysis.yml/badge.svg)](https://github.com/Stellar-VaultLink/invofi-contracts/actions/workflows/scout-security-analysis.yml)
+[![Coverage](https://img.shields.io/endpoint?url=https://raw.githubusercontent.com/Stellar-VaultLink/invofi-contracts/master/coverage/badge.json)](./coverage/README.md)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](./LICENSE)
 
 ---
@@ -226,8 +227,11 @@ All contracts emit machine-readable `E_*` error codes (see [docs/error-codes.md]
 # Build
 cargo build --target wasm32v1-none --release
 
-# Run tests (110 tests across registry / financing / repayment / insurance / reputation)
-cargo test
+# Run tests (nextest in CI; cargo test also works)
+cargo nextest run --target "$(rustc -vV | sed -n 's/^host: //p')"
+
+# Line coverage (HTML + LCOV under coverage/local/)
+bash scripts/coverage.sh
 
 # Check WASM size stays under 256 KB
 bash scripts/check-size.sh
@@ -235,6 +239,8 @@ bash scripts/check-size.sh
 # Deploy to Testnet (requires stellar-cli)
 bash scripts/deploy.sh
 ```
+
+Per-crate coverage floors and the soft “no regression on touched crates” policy are documented in [`coverage/README.md`](./coverage/README.md).
 
 Or trigger the **[Deploy Contract](https://github.com/Stellar-VaultLink/invofi-contracts/actions/workflows/deploy-contract.yml)** GitHub Actions workflow for a one-click Testnet deploy.
 

@@ -8,6 +8,11 @@ and are enforced by commitlint in CI.
 ## [Unreleased]
 
 ### Added
+- **CI: cargo-nextest + line coverage** — the Test job runs the full suite under
+  [nextest](https://nexte.st/) (parallel, same assertions). A Coverage job uses
+  `cargo llvm-cov nextest`, publishes LCOV/Codecov artifacts, and soft-checks
+  touched crates against `coverage/baseline.json` (PR comment + annotations, no
+  hard fail yet). README badge + CONTRIBUTING document local test/coverage flows.
 - **Offer amendment and counter-offer protocol (issue #180)** — financing
   offers are no longer take-it-or-leave-it. A lender can revise their own terms
   with `amend_offer`, an originator can name theirs with `counter_offer`, and
