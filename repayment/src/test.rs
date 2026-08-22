@@ -303,7 +303,7 @@ fn test_repay_unfinanced_invoice_panics() {
 }
 
 #[test]
-#[should_panic(expected = "repayment amount must be greater than zero")]
+#[should_panic(expected = "Error(Contract, #6)")]
 fn test_repay_zero_amount_panics() {
     let env = Env::default();
     env.mock_all_auths();
@@ -1725,7 +1725,13 @@ fn run_batch_repay_test(batch_size: u32) {
         fin.accept_offer(&off_id, &originator);
 
         // Mint token to originator for repayment
-        mint_and_approve(&env, &token_id, &rep.address, &originator, total_due);
+        mint_and_approve(
+            &env,
+            &token_id,
+            &rep.address,
+            &originator,
+            total_due * (batch_size as i128),
+        );
 
         repay_items.push_back(BatchRepayItem {
             invoice_id: inv_id,
@@ -1734,6 +1740,7 @@ fn run_batch_repay_test(batch_size: u32) {
         });
     }
 
+    env.ledger().set_timestamp(1_000_000 + 365 * 86_400);
     let res = rep.batch_repay_invoices(&originator, &repay_items, &false);
     assert_eq!(res.total_processed, batch_size);
     assert_eq!(res.success_count, batch_size);
@@ -1812,6 +1819,7 @@ fn test_batch_repay_invoices_partial_mode() {
         amount: total_due,
     });
 
+    env.ledger().set_timestamp(1_000_000 + 365 * 86_400);
     let res = rep.batch_repay_invoices(&originator, &batch, &true);
     assert_eq!(res.total_processed, 2);
     assert_eq!(res.success_count, 1);

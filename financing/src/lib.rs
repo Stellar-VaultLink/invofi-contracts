@@ -501,45 +501,27 @@ impl FinancingContract {
         )
     }
 
-    /// Move the money and flip every piece of state that an accepted offer
-    /// implies: principal to the business, invoice to Financed, position token
-    /// minted, stats updated, `off_acc` emitted.
-    ///
-    /// Split out of `accept_offer` so the auto-accept path in `amend_offer` /
-    /// `counter_offer` executes the *same* settlement rather than a parallel
-    /// copy that could drift from it. Every caller is responsible for its own
-    /// authorization and for checking that the offer is Pending and the
-    /// invoice is Pending before calling in.
-    fn settle_acceptance(
+    fn settle_acceptance_internal(
         env: &Env,
         offer_id: Symbol,
         offer: FinancingOffer,
         registry_client: &RegistryClient,
         invoice: &Invoice,
         closer: &Address,
+        offers: &mut Map<Symbol, FinancingOffer>,
     ) -> FinancingOffer {
-        let env = env.clone();
-        let mut offers = load_offers(&env);
         let mut offer = offer;
 
-        // Settlement ends any negotiation that was still running, whichever
-        // route reached it: term convergence in amend/counter, or the
-        // originator accepting the standing offer outright. Recording it here
-        // rather than in each caller is what keeps the two routes from
-        // diverging on the negotiation's final state.
-        if !load_negotiation(&env, &offer_id).is_empty() && load_outcome(&env, &offer_id).is_none()
-        {
-            save_outcome(&env, &offer_id, NegotiationStatus::Accepted);
+        if !load_negotiation(env, &offer_id).is_empty() && load_outcome(env, &offer_id).is_none() {
+            save_outcome(env, &offer_id, NegotiationStatus::Accepted);
             env.events().publish(
                 (symbol_short!("neg_clsd"), offer_id.clone()),
                 (NegotiationStatus::Accepted, closer.clone()),
             );
         }
 
-        // Pull the lender's principal and pay it straight to the business.
-        let token_id = resolve_token(&env, &offer.currency);
-        let token_client = token::TokenClient::new(&env, &token_id);
-        // CEI: External interaction before state writes. Safe because token is a standard Soroban token without reentrant hooks.
+        let token_id = resolve_token(env, &offer.currency);
+        let token_client = token::TokenClient::new(env, &token_id);
         token_client.transfer_from(
             &env.current_contract_address(),
             &offer.lender,
@@ -550,26 +532,11 @@ impl FinancingContract {
         offer.status = OfferStatus::Accepted;
         offer.funded_at = env.ledger().timestamp();
         offers.set(offer_id, offer.clone());
-        save_offers(&env, &offers);
 
-        // Cross-contract: mark the invoice Financed in the registry via the
-        // system transition (the financing contract is the authorized caller;
-        // user auth does not propagate across contract boundaries in Soroban).
-        // CEI: External interaction before local state writes (stats). Safe because registry is a trusted protocol contract.
         registry_client.financing_marks_invoice_financed(&offer.invoice_id);
 
-        // Mint the lender's position token representing their claim on this
-        // financed invoice (1:1 with the offer amount — see ADR-0002). The
-        // token's admin is this financing contract, so the mint resolves via
-        // implicit contract-invoker auth. If no position token is configured
-        // (legacy deployments), financing still works unchanged.
         if let Some(pos_token) = env.storage().instance().get(&symbol_short!("postok")) {
-            // SDK 22's StellarAssetInterface exposes mint(to, amount); the
-            // token contract authorizes its admin (this financing contract)
-            // internally via require_auth, which resolves through implicit
-            // contract-invoker auth when we call it cross-contract.
-            let pos_client = token::StellarAssetClient::new(&env, &pos_token);
-            // CEI: External interaction before local state writes. Safe because pos_token is a trusted admin-configured token.
+            let pos_client = token::StellarAssetClient::new(env, &pos_token);
             pos_client.mint(&offer.lender, &offer.amount);
             env.events().publish(
                 (symbol_short!("pos_mint"), offer.id.clone()),
@@ -577,13 +544,13 @@ impl FinancingContract {
             );
         }
 
-        let mut s = load_stats(&env);
+        let mut s = load_stats(env);
         s.total_financed += offer.amount;
-        save_stats(&env, &s);
+        save_stats(env, &s);
 
-        let mut lstats = load_lender_stats(&env, &offer.lender);
+        let mut lstats = load_lender_stats(env, &offer.lender);
         lstats.total_accepted += offer.amount;
-        save_lender_stats(&env, &offer.lender, &lstats);
+        save_lender_stats(env, &offer.lender, &lstats);
 
         env.events().publish(
             (symbol_short!("off_acc"), offer.id.clone()),
@@ -592,8 +559,34 @@ impl FinancingContract {
         offer
     }
 
+    fn settle_acceptance(
+        env: &Env,
+        offer_id: Symbol,
+        offer: FinancingOffer,
+        registry_client: &RegistryClient,
+        invoice: &Invoice,
+        closer: &Address,
+    ) -> FinancingOffer {
+        let mut offers = load_offers(env);
+        let res = Self::settle_acceptance_internal(
+            env,
+            offer_id,
+            offer,
+            registry_client,
+            invoice,
+            closer,
+            &mut offers,
+        );
+        save_offers(env, &offers);
+        res
+    }
+
     /// Reject a financing offer. Only the invoice originator.
-    pub fn reject_offer(env: Env, offer_id: Symbol, invoice_originator: Address) -> FinancingOffer {
+    pub fn reject_offer(
+        env: Env,
+        offer_id: Symbol,
+        invoice_originator: Address,
+    ) -> FinancingOffer {
         assert_not_paused(&env);
         invoice_originator.require_auth();
 
@@ -605,14 +598,12 @@ impl FinancingContract {
             env.panic_with_error(ContractError::InvalidTransition);
         }
 
-        // Cross-contract: verify invoice originator
         let registry_addr: Address = env
             .storage()
             .instance()
             .get(&symbol_short!("registry"))
             .unwrap_or_else(|| panic!("Not initialized"));
         let registry_client = RegistryClient::new(&env, &registry_addr);
-        // CEI: Read-only cross-contract call before state mutations.
         let invoice: Invoice = registry_client.get_invoice(&offer.invoice_id);
         if invoice.originator != invoice_originator {
             env.panic_with_error(ContractError::Unauthorized);
@@ -652,13 +643,25 @@ impl FinancingContract {
             .unwrap_or_else(|| panic!("Not initialized"));
         let registry_client = RegistryClient::new(&env, &registry_addr);
 
-        let offers = load_offers(&env);
+        let mut offers = load_offers(&env);
         let mut results = Vec::new(&env);
         let mut success_count: u32 = 0;
         let mut failure_count: u32 = 0;
+        let mut processed_ids = Map::<Symbol, bool>::new(&env);
 
+        let limit = offer_ids.len().min(MAX_BATCH_SIZE);
         if !allow_partial {
-            for offer_id in offer_ids.iter() {
+            let mut i: u32 = 0;
+            while i < limit {
+                let offer_id = offer_ids
+                    .get(i)
+                    .unwrap_or_else(|| env.panic_with_error(ContractError::InvalidInput));
+
+                if processed_ids.contains_key(offer_id.clone()) {
+                    env.panic_with_error(ContractError::AlreadyExists);
+                }
+                processed_ids.set(offer_id.clone(), true);
+
                 let offer = offers
                     .get(offer_id.clone())
                     .unwrap_or_else(|| env.panic_with_error(ContractError::NotFound));
@@ -672,63 +675,84 @@ impl FinancingContract {
                 if invoice.status != InvoiceStatus::Pending {
                     env.panic_with_error(ContractError::InvalidTransition);
                 }
+                i += 1;
             }
 
-            for offer_id in offer_ids.iter() {
-                let offer = offers.get(offer_id.clone()).unwrap();
+            let mut j: u32 = 0;
+            while j < limit {
+                let offer_id = offer_ids
+                    .get(j)
+                    .unwrap_or_else(|| env.panic_with_error(ContractError::InvalidInput));
+                let offer = offers
+                    .get(offer_id.clone())
+                    .unwrap_or_else(|| env.panic_with_error(ContractError::NotFound));
                 let invoice = registry_client.get_invoice(&offer.invoice_id);
-                Self::settle_acceptance(
+                Self::settle_acceptance_internal(
                     &env,
                     offer_id.clone(),
                     offer,
                     &registry_client,
                     &invoice,
                     &invoice_originator,
+                    &mut offers,
                 );
                 results.push_back(BatchItemResult {
                     id: offer_id.clone(),
                     success: true,
                     error_code: 0,
                 });
+                j += 1;
             }
+            save_offers(&env, &offers);
             success_count = total_count;
             env.events().publish(
                 (symbol_short!("btch_acc"), invoice_originator.clone()),
                 (success_count, 0u32),
             );
         } else {
-            for offer_id in offer_ids.iter() {
+            let mut accepted_any = false;
+            let mut i: u32 = 0;
+            while i < limit {
+                let offer_id = offer_ids
+                    .get(i)
+                    .unwrap_or_else(|| env.panic_with_error(ContractError::InvalidInput));
                 let mut err_code: u32 = 0;
-                let offer_opt = offers.get(offer_id.clone());
 
-                if offer_opt.is_none() {
-                    err_code = ContractError::NotFound as u32;
+                if processed_ids.contains_key(offer_id.clone()) {
+                    err_code = ContractError::AlreadyExists as u32;
                 } else {
-                    let offer = offer_opt.unwrap();
-                    if offer.status != OfferStatus::Pending {
-                        err_code = ContractError::InvalidTransition as u32;
-                    } else {
-                        let invoice = registry_client.get_invoice(&offer.invoice_id);
-                        if invoice.originator != invoice_originator {
-                            err_code = ContractError::Unauthorized as u32;
-                        } else if invoice.status != InvoiceStatus::Pending {
+                    processed_ids.set(offer_id.clone(), true);
+                    let offer_opt = offers.get(offer_id.clone());
+                    if let Some(offer) = offer_opt {
+                        if offer.status != OfferStatus::Pending {
                             err_code = ContractError::InvalidTransition as u32;
                         } else {
-                            Self::settle_acceptance(
-                                &env,
-                                offer_id.clone(),
-                                offer,
-                                &registry_client,
-                                &invoice,
-                                &invoice_originator,
-                            );
-                            success_count += 1;
-                            results.push_back(BatchItemResult {
-                                id: offer_id.clone(),
-                                success: true,
-                                error_code: 0,
-                            });
+                            let invoice = registry_client.get_invoice(&offer.invoice_id);
+                            if invoice.originator != invoice_originator {
+                                err_code = ContractError::Unauthorized as u32;
+                            } else if invoice.status != InvoiceStatus::Pending {
+                                err_code = ContractError::InvalidTransition as u32;
+                            } else {
+                                Self::settle_acceptance_internal(
+                                    &env,
+                                    offer_id.clone(),
+                                    offer,
+                                    &registry_client,
+                                    &invoice,
+                                    &invoice_originator,
+                                    &mut offers,
+                                );
+                                success_count += 1;
+                                accepted_any = true;
+                                results.push_back(BatchItemResult {
+                                    id: offer_id.clone(),
+                                    success: true,
+                                    error_code: 0,
+                                });
+                            }
                         }
+                    } else {
+                        err_code = ContractError::NotFound as u32;
                     }
                 }
 
@@ -740,6 +764,10 @@ impl FinancingContract {
                         error_code: err_code,
                     });
                 }
+                i += 1;
+            }
+            if accepted_any {
+                save_offers(&env, &offers);
             }
             env.events().publish(
                 (symbol_short!("btch_acc"), invoice_originator.clone()),
@@ -781,9 +809,21 @@ impl FinancingContract {
         let mut results = Vec::new(&env);
         let mut success_count: u32 = 0;
         let mut failure_count: u32 = 0;
+        let mut processed_ids = Map::<Symbol, bool>::new(&env);
 
+        let limit = offer_ids.len().min(MAX_BATCH_SIZE);
         if !allow_partial {
-            for offer_id in offer_ids.iter() {
+            let mut i: u32 = 0;
+            while i < limit {
+                let offer_id = offer_ids
+                    .get(i)
+                    .unwrap_or_else(|| env.panic_with_error(ContractError::InvalidInput));
+
+                if processed_ids.contains_key(offer_id.clone()) {
+                    env.panic_with_error(ContractError::AlreadyExists);
+                }
+                processed_ids.set(offer_id.clone(), true);
+
                 let offer = offers
                     .get(offer_id.clone())
                     .unwrap_or_else(|| env.panic_with_error(ContractError::NotFound));
@@ -794,10 +834,17 @@ impl FinancingContract {
                 if invoice.originator != invoice_originator {
                     env.panic_with_error(ContractError::Unauthorized);
                 }
+                i += 1;
             }
 
-            for offer_id in offer_ids.iter() {
-                let mut offer = offers.get(offer_id.clone()).unwrap();
+            let mut j: u32 = 0;
+            while j < limit {
+                let offer_id = offer_ids
+                    .get(j)
+                    .unwrap_or_else(|| env.panic_with_error(ContractError::InvalidInput));
+                let mut offer = offers
+                    .get(offer_id.clone())
+                    .unwrap_or_else(|| env.panic_with_error(ContractError::NotFound));
                 offer.status = OfferStatus::Rejected;
                 offers.set(offer_id.clone(), offer.clone());
                 Self::close_negotiation_on_offer_exit(&env, &offer_id, &invoice_originator);
@@ -811,6 +858,7 @@ impl FinancingContract {
                     success: true,
                     error_code: 0,
                 });
+                j += 1;
             }
             save_offers(&env, &offers);
             success_count = total_count;
@@ -820,14 +868,15 @@ impl FinancingContract {
             );
         } else {
             let mut rejected_any = false;
-            for offer_id in offer_ids.iter() {
+            let mut i: u32 = 0;
+            while i < limit {
+                let offer_id = offer_ids
+                    .get(i)
+                    .unwrap_or_else(|| env.panic_with_error(ContractError::InvalidInput));
                 let mut err_code: u32 = 0;
                 let offer_opt = offers.get(offer_id.clone());
 
-                if offer_opt.is_none() {
-                    err_code = ContractError::NotFound as u32;
-                } else {
-                    let mut offer = offer_opt.unwrap();
+                if let Some(mut offer) = offer_opt {
                     if offer.status != OfferStatus::Pending {
                         err_code = ContractError::InvalidTransition as u32;
                     } else {
@@ -866,6 +915,7 @@ impl FinancingContract {
                         error_code: err_code,
                     });
                 }
+                i += 1;
             }
 
             if rejected_any {
