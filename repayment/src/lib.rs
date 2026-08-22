@@ -1,11 +1,12 @@
 #![no_std]
 
-use soroban_sdk::{contract, contractimpl, symbol_short, token, Address, Env, Symbol, Vec};
+use soroban_sdk::{contract, contractimpl, symbol_short, token, Address, Env, Map, Symbol, Vec};
 
 use invofi_common::{
-    assert_not_paused, resolve_token, ContractError, FinancingClient, FinancingOffer,
-    InsuranceClient, Invoice, InvoiceStatus, OfferStatus, PaymentRecord, RegistryClient,
-    ReputationClient, GRACE_PERIOD_SECS, MAX_OFFER_DURATION_SECS, MIN_OFFER_DURATION_SECS,
+    assert_not_paused, resolve_token, BatchItemResult, BatchRepayItem, BatchResult, ContractError,
+    FinancingClient, FinancingOffer, InsuranceClient, Invoice, InvoiceStatus, OfferStatus,
+    PaymentRecord, RegistryClient, ReputationClient, GRACE_PERIOD_SECS, MAX_BATCH_SIZE,
+    MAX_OFFER_DURATION_SECS, MIN_OFFER_DURATION_SECS,
 };
 
 // ─── Overdue penalty (ADR-0007) ──────────────────────────────────────────────
@@ -345,7 +346,11 @@ impl RepaymentContract {
 
     // ── Repayment ────────────────────────────────────────────────────────────
 
-    /// Mark part or all of an invoice as repaid. Only the originator.
+    /// Repay a financed invoice. Originator transfers payment to lender.
+    /// Deducts protocol fee (if configured in financing) and forwards net.
+    /// Updates remaining balance. If balance reaches 0, marks invoice Repaid
+    /// and offer Repaid in financing contract.
+    ///
     /// Cross-contract: reads + updates invoice status in registry, reads
     /// + updates offer state in financing.
     pub fn repay_invoice(
@@ -357,81 +362,82 @@ impl RepaymentContract {
     ) -> Invoice {
         assert_not_paused(&env);
         repayer.require_auth();
+        Self::repay_invoice_internal(&env, invoice_id, offer_id, &repayer, amount)
+            .unwrap_or_else(|err| env.panic_with_error(err))
+    }
 
-        // Cross-contract: read invoice from registry
+    fn repay_invoice_internal(
+        env: &Env,
+        invoice_id: Symbol,
+        offer_id: Symbol,
+        repayer: &Address,
+        amount: i128,
+    ) -> Result<Invoice, ContractError> {
         let registry_addr: Address = env
             .storage()
             .instance()
             .get(&symbol_short!("registry"))
-            .unwrap_or_else(|| panic!("Not initialized"));
-        let registry_client = RegistryClient::new(&env, &registry_addr);
-        // CEI: Read-only cross-contract call. Repayment has no local state to mutate, so CEI is trivially satisfied.
-        let invoice: Invoice = registry_client.get_invoice(&invoice_id);
+.ok_or(ContractError::NotFound)?;
+        let registry_client = RegistryClient::new(env, &registry_addr);
+        let invoice: Invoice = match registry_client.try_get_invoice(&invoice_id) {
+            Ok(Ok(inv)) => inv,
+            _ => return Err(ContractError::NotFound),
+        };
 
-        if invoice.originator != repayer {
-            env.panic_with_error(ContractError::Unauthorized);
+        if invoice.originator != *repayer {
+            return Err(ContractError::Unauthorized);
         }
         if invoice.status != InvoiceStatus::Financed {
-            env.panic_with_error(ContractError::InvalidTransition);
+            return Err(ContractError::InvalidTransition);
         }
 
-        // Cross-contract: read offer from financing
         let financing_addr: Address = env
             .storage()
             .instance()
             .get(&symbol_short!("financing"))
-            .unwrap_or_else(|| panic!("Not initialized"));
-        let financing_client = FinancingClient::new(&env, &financing_addr);
-        // CEI: Read-only cross-contract call.
-        let mut offer: FinancingOffer = financing_client.get_offer(&offer_id);
+.ok_or(ContractError::NotFound)?;
+        let financing_client = FinancingClient::new(env, &financing_addr);
+        let mut offer: FinancingOffer = match financing_client.try_get_offer(&offer_id) {
+            Ok(Ok(off)) => off,
+            _ => return Err(ContractError::NotFound),
+        };
 
         if offer.invoice_id != invoice_id {
-            env.panic_with_error(ContractError::InvalidInput);
+            return Err(ContractError::InvalidInput);
         }
         if offer.status != OfferStatus::Accepted && offer.status != OfferStatus::Financed {
-            env.panic_with_error(ContractError::InvalidTransition);
+            return Err(ContractError::InvalidTransition);
         }
-        assert!(amount > 0, "repayment amount must be greater than zero");
+        if amount <= 0 {
+            return Err(ContractError::InvalidInput);
+        }
 
-        let token_id = resolve_token(&env, &offer.currency);
-        let token_client = token::TokenClient::new(&env, &token_id);
+        let token_id = resolve_token(env, &offer.currency);
+        let token_client = token::TokenClient::new(env, &token_id);
 
-        // ── Pro-rata interest calculation (issue #176) ──────────────────────
-        // Load existing payment history to compute remaining principal.
-        let payments = load_payments(&env, &invoice_id);
+        let payments = load_payments(env, &invoice_id);
         let principal_repaid_so_far = total_principal_repaid(&payments);
         let remaining_principal = (offer.amount - principal_repaid_so_far).max(0);
 
-        // Calculate pro-rata accrued interest on the remaining principal.
-        // interest = remaining * rate_bps * days_elapsed / 3_650_000
         let now = env.ledger().timestamp();
         let days_since_funded = ((now - offer.funded_at) / SECS_PER_DAY) as i128;
-        let accrued_interest = pro_rata_interest(
-            remaining_principal,
-            offer.interest_rate,
-            days_since_funded,
-        );
+        let accrued_interest =
+            pro_rata_interest(remaining_principal, offer.interest_rate, days_since_funded);
 
-        // Overdue penalty (ADR-0007). Accrues from the invoice due date, on a
-        // base frozen at principal + flat yield. Zero unless an admin has
-        // enabled it, and zero while the invoice is not yet past due.
         let yield_amount = offer.amount * (offer.interest_rate as i128) / 10_000;
         let frozen_base = offer.amount + yield_amount;
-        let (penalty_bps, cap_bps) = load_penalty_config(&env);
-        let penalty = accrued_penalty(&env, frozen_base, invoice.due_date, penalty_bps, cap_bps);
+        let (penalty_bps, cap_bps) = load_penalty_config(env);
+        let penalty = accrued_penalty(env, frozen_base, invoice.due_date, penalty_bps, cap_bps);
 
-        // Total obligation: remaining principal + accrued interest + penalty.
         let total_owed = remaining_principal + accrued_interest + penalty;
 
-        // Minimum partial payment check (1% of original principal).
-        // Final payments that settle the remaining balance are exempt.
         let min_payment = offer.amount * (MIN_PARTIAL_PAYMENT_BPS as i128) / 10_000;
         if amount < min_payment && amount < total_owed {
-            env.panic_with_error(ContractError::InvalidInput);
+            return Err(ContractError::InvalidInput);
         }
 
         if amount > total_owed {
-            env.panic_with_error(ContractError::InsufficientBalance);
+            return Err(ContractError::InsufficientBalance);
         }
 
         // Split the payment: interest first, then principal.
@@ -443,15 +449,15 @@ impl RepaymentContract {
         let fee_amount = amount * (fee_bps as i128) / 10_000;
         let lender_amount = amount - fee_amount;
         // CEI: External interaction. Safe because this contract has no local state to protect.
-        token_client.transfer(&repayer, &offer.lender, &lender_amount);
+        token_client.transfer(repayer, &offer.lender, &lender_amount);
         if fee_amount > 0 {
             let admin: Address = env
                 .storage()
                 .instance()
                 .get(&symbol_short!("admin"))
-                .unwrap_or_else(|| panic!("Not initialized"));
+                .ok_or(ContractError::NotFound)?;
             // CEI: External interaction. Safe because this contract has no local state to protect.
-            token_client.transfer(&repayer, &admin, &fee_amount);
+            token_client.transfer(repayer, &admin, &fee_amount);
         }
 
         // ── Store payment record ───────────────────────────────────────────
@@ -466,7 +472,7 @@ impl RepaymentContract {
         };
         let mut updated_payments = payments;
         updated_payments.push_back(record);
-        save_payments(&env, &invoice_id, &updated_payments);
+        save_payments(env, &invoice_id, &updated_payments);
 
         // Determine if fully repaid: remaining principal is zero after this payment.
         let new_remaining = remaining_principal - principal_portion;
@@ -500,7 +506,7 @@ impl RepaymentContract {
             let reputation_opt: Option<Address> =
                 env.storage().instance().get(&symbol_short!("repadd"));
             if let Some(reputation_addr) = reputation_opt {
-                let reputation_client = ReputationClient::new(&env, &reputation_addr);
+                let reputation_client = ReputationClient::new(env, &reputation_addr);
                 // CEI: External interaction. Safe because this contract has no local state to protect.
                 reputation_client.record_outcome(&invoice.originator, &0);
             }
@@ -510,7 +516,12 @@ impl RepaymentContract {
         if fully_repaid {
             env.events().publish(
                 (symbol_short!("inv_frp"), invoice_id.clone()),
-                (offer_id.clone(), amount, principal_portion, interest_portion),
+                (
+                    offer_id.clone(),
+                    amount,
+                    principal_portion,
+                    interest_portion,
+                ),
             );
         } else {
             env.events().publish(
@@ -530,7 +541,118 @@ impl RepaymentContract {
             (symbol_short!("inv_rep"), invoice_id),
             (offer_id, amount, fully_repaid),
         );
-        updated_invoice
+        Ok(updated_invoice)
+    }
+
+    /// Repay multiple invoices in a single transaction (1-100 items).
+    pub fn batch_repay_invoices(
+        env: Env,
+        repayer: Address,
+        items: Vec<BatchRepayItem>,
+        allow_partial: bool,
+    ) -> BatchResult {
+        assert_not_paused(&env);
+        repayer.require_auth();
+
+        let total_count = items.len();
+        if total_count == 0 || total_count > MAX_BATCH_SIZE {
+            env.panic_with_error(ContractError::InvalidInput);
+        }
+
+        let mut results = Vec::new(&env);
+        let mut success_count: u32 = 0;
+        let mut failure_count: u32 = 0;
+        let mut processed_ids = Map::<Symbol, bool>::new(&env);
+
+        let limit = items.len().min(MAX_BATCH_SIZE);
+        if !allow_partial {
+            let mut i: u32 = 0;
+            while i < limit {
+                let item = items
+                    .get(i)
+                    .unwrap_or_else(|| env.panic_with_error(ContractError::InvalidInput));
+
+                if processed_ids.contains_key(item.invoice_id.clone()) {
+                    env.panic_with_error(ContractError::AlreadyExists);
+                }
+                processed_ids.set(item.invoice_id.clone(), true);
+
+                Self::repay_invoice_internal(
+                    &env,
+                    item.invoice_id.clone(),
+                    item.offer_id.clone(),
+                    &repayer,
+                    item.amount,
+                )
+                .unwrap_or_else(|err| env.panic_with_error(err));
+
+                results.push_back(BatchItemResult {
+                    id: item.invoice_id.clone(),
+                    success: true,
+                    error_code: 0,
+                });
+                i += 1;
+            }
+            success_count = total_count;
+            env.events().publish(
+                (symbol_short!("btch_rpy"), repayer.clone()),
+                (success_count, 0u32),
+            );
+        } else {
+            let mut i: u32 = 0;
+            while i < limit {
+                let item = items
+                    .get(i)
+                    .unwrap_or_else(|| env.panic_with_error(ContractError::InvalidInput));
+                let mut err_code: u32 = 0;
+
+                if processed_ids.contains_key(item.invoice_id.clone()) {
+                    err_code = ContractError::AlreadyExists as u32;
+                } else {
+                    processed_ids.set(item.invoice_id.clone(), true);
+                    match Self::repay_invoice_internal(
+                        &env,
+                        item.invoice_id.clone(),
+                        item.offer_id.clone(),
+                        &repayer,
+                        item.amount,
+                    ) {
+                        Ok(_) => {
+                            success_count += 1;
+                            results.push_back(BatchItemResult {
+                                id: item.invoice_id.clone(),
+                                success: true,
+                                error_code: 0,
+                            });
+                        }
+                        Err(err) => {
+                            err_code = err as u32;
+                        }
+                    }
+                }
+
+                if err_code != 0 {
+                    failure_count += 1;
+                    results.push_back(BatchItemResult {
+                        id: item.invoice_id.clone(),
+                        success: false,
+                        error_code: err_code,
+                    });
+                }
+                i += 1;
+            }
+            env.events().publish(
+                (symbol_short!("btch_rpy"), repayer.clone()),
+                (success_count, failure_count),
+            );
+        }
+
+        BatchResult {
+            total_processed: total_count,
+            success_count,
+            failure_count,
+            results,
+        }
     }
 
     // ── Overdue / Reclaim ────────────────────────────────────────────────────

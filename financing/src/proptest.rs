@@ -63,7 +63,7 @@ proptest! {
 
         let stats = fin.get_stats();
         assert_eq!(stats.total_offers, 1);
-        
+
         let lender_stats = fin.get_lender_stats(&lender);
         assert_eq!(lender_stats.total_offered, principal);
         assert_eq!(lender_stats.offers_pending, 1);

@@ -2,7 +2,9 @@
 extern crate std;
 
 use super::RegistryContract;
-use invofi_common::{InvoiceStatus, RiskTier, VerificationStatus, VerificationType};
+use invofi_common::{
+    BatchRegisterInvoiceInput, InvoiceStatus, RiskTier, VerificationStatus, VerificationType,
+};
 use soroban_sdk::{
     symbol_short,
     testutils::{Address as _, Events as _, Ledger as _},
@@ -599,7 +601,10 @@ fn test_constructor_cannot_be_reinvoked() {
         &soroban_sdk::Symbol::new(&env, "__constructor"),
         args,
     );
-    assert!(result.is_err(), "constructor must not be re-invokable post-deploy");
+    assert!(
+        result.is_err(),
+        "constructor must not be re-invokable post-deploy"
+    );
 }
 
 #[test]
@@ -713,7 +718,10 @@ fn test_pause_blocks_all_registry_state_changes() {
 
     fn assert_paused<F: FnOnce()>(f: F) {
         let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(f));
-        assert!(result.is_err(), "state-changing function should panic while paused");
+        assert!(
+            result.is_err(),
+            "state-changing function should panic while paused"
+        );
     }
 
     assert_paused(|| {
@@ -757,7 +765,11 @@ fn test_pause_blocks_all_registry_state_changes() {
         client.raise_dispute(&invoice_id, &originator);
     });
     assert_paused(|| {
-        client.resolve_dispute(&admin, &invoice_id, &invofi_common::InvoiceStatus::Cancelled);
+        client.resolve_dispute(
+            &admin,
+            &invoice_id,
+            &invofi_common::InvoiceStatus::Cancelled,
+        );
     });
     assert_paused(|| {
         client.blacklist_address(&admin, &other);
@@ -1460,7 +1472,10 @@ fn test_transition_history_recorded() {
 
     // Query transition history
     let history = client.get_transition_history(&invoice_id);
-    assert!(!history.is_empty(), "Transition history should not be empty");
+    assert!(
+        !history.is_empty(),
+        "Transition history should not be empty"
+    );
     assert_eq!(history.len(), 1, "Should have one transition recorded");
 
     let first = history.first().unwrap();
@@ -1580,10 +1595,7 @@ fn test_transition_events_emitted() {
 
     let events = env.events().all();
     // Should have transition events
-    assert!(
-        !events.is_empty(),
-        "Should emit events on state transition"
-    );
+    assert!(!events.is_empty(), "Should emit events on state transition");
 }
 
 // ─── Verification oracle (issue #181) ────────────────────────────────────────
@@ -2773,7 +2785,6 @@ fn count_events(env: &Env, name: Symbol) -> u32 {
     count
 }
 
-
 #[test]
 fn test_live_approval_below_threshold_reads_pending_not_expired() {
     let env = Env::default();
@@ -2794,8 +2805,7 @@ fn test_live_approval_below_threshold_reads_pending_not_expired() {
         &evidence_hash(&env, 1),
         &true,
     );
-    env.ledger()
-        .set_timestamp(1_000_000 + 7_776_000 + 1);
+    env.ledger().set_timestamp(1_000_000 + 7_776_000 + 1);
 
     // Verifier two now attests, so the type holds one live approval against a
     // threshold of two.
@@ -2848,8 +2858,7 @@ fn test_expired_reads_only_when_no_live_statement_remains() {
         &evidence_hash(&env, 1),
         &true,
     );
-    env.ledger()
-        .set_timestamp(1_000_000 + 7_776_000 + 1);
+    env.ledger().set_timestamp(1_000_000 + 7_776_000 + 1);
 
     assert_eq!(
         client.get_verification_status(&invoice_id, &VerificationType::TaxCompliance),
@@ -2915,3 +2924,145 @@ fn test_rotated_out_verifiers_cannot_lock_an_invoice() {
     );
 }
 
+// ─── Batch Invoice Registration Tests ──────────────────────────────────────
+
+#[test]
+fn test_batch_register_invoices_sizes() {
+    let env = Env::default();
+    env.mock_all_auths();
+    env.ledger().set_timestamp(1_000_000);
+
+    let contract_id = env.register(RegistryContract, (Address::generate(&env),));
+    let client = super::RegistryContractClient::new(&env, &contract_id);
+    let originator = Address::generate(&env);
+
+    // Test batch sizes 1, 10, 50
+    for batch_size in [1u32, 10u32, 50u32] {
+        let mut batch = soroban_sdk::Vec::new(&env);
+        for i in 0..batch_size {
+            let id = Symbol::new(&env, &std::format!("b{:02}_{}", batch_size, i));
+            batch.push_back(BatchRegisterInvoiceInput {
+                id,
+                amount: 10_000_000,
+                currency: symbol_short!("USDC"),
+                due_date: 2_000_000,
+            });
+        }
+
+        let res = client.batch_register_invoices(&originator, &batch, &false);
+        assert_eq!(res.total_processed, batch_size);
+        assert_eq!(res.success_count, batch_size);
+        assert_eq!(res.failure_count, 0);
+
+        // Verify all invoices were stored
+        for item in batch.iter() {
+            let inv = client.get_invoice(&item.id);
+            assert_eq!(inv.status, InvoiceStatus::Pending);
+            assert_eq!(inv.amount, 10_000_000);
+        }
+    }
+}
+
+#[test]
+fn test_batch_register_invoices_partial_mode() {
+    let env = Env::default();
+    env.mock_all_auths();
+    env.ledger().set_timestamp(1_000_000);
+
+    let contract_id = env.register(RegistryContract, (Address::generate(&env),));
+    let client = super::RegistryContractClient::new(&env, &contract_id);
+    let originator = Address::generate(&env);
+
+    // Pre-register one invoice to test AlreadyExists failure in partial mode
+    let existing_id = symbol_short!("exist");
+    client.register_invoice(
+        &existing_id,
+        &originator,
+        &10_000_000i128,
+        &symbol_short!("USDC"),
+        &2_000_000u64,
+    );
+
+    let mut batch = soroban_sdk::Vec::new(&env);
+    // Valid item
+    batch.push_back(BatchRegisterInvoiceInput {
+        id: symbol_short!("part01"),
+        amount: 20_000_000,
+        currency: symbol_short!("USDC"),
+        due_date: 2_000_000,
+    });
+    // Invalid item (AlreadyExists)
+    batch.push_back(BatchRegisterInvoiceInput {
+        id: existing_id,
+        amount: 20_000_000,
+        currency: symbol_short!("USDC"),
+        due_date: 2_000_000,
+    });
+    // Invalid item (amount too low)
+    batch.push_back(BatchRegisterInvoiceInput {
+        id: symbol_short!("part02"),
+        amount: 1_000,
+        currency: symbol_short!("USDC"),
+        due_date: 2_000_000,
+    });
+
+    let res = client.batch_register_invoices(&originator, &batch, &true);
+    assert_eq!(res.total_processed, 3);
+    assert_eq!(res.success_count, 1);
+    assert_eq!(res.failure_count, 2);
+
+    let part01 = client.get_invoice(&symbol_short!("part01"));
+    assert_eq!(part01.amount, 20_000_000);
+}
+
+#[test]
+#[should_panic(expected = "Error(Contract, #7)")]
+fn test_batch_register_invoices_atomic_revert() {
+    let env = Env::default();
+    env.mock_all_auths();
+    env.ledger().set_timestamp(1_000_000);
+
+    let contract_id = env.register(RegistryContract, (Address::generate(&env),));
+    let client = super::RegistryContractClient::new(&env, &contract_id);
+    let originator = Address::generate(&env);
+
+    let existing_id = symbol_short!("exist2");
+    client.register_invoice(
+        &existing_id,
+        &originator,
+        &10_000_000i128,
+        &symbol_short!("USDC"),
+        &2_000_000u64,
+    );
+
+    let mut batch = soroban_sdk::Vec::new(&env);
+    batch.push_back(BatchRegisterInvoiceInput {
+        id: symbol_short!("ok01"),
+        amount: 10_000_000,
+        currency: symbol_short!("USDC"),
+        due_date: 2_000_000,
+    });
+    batch.push_back(BatchRegisterInvoiceInput {
+        id: existing_id,
+        amount: 10_000_000,
+        currency: symbol_short!("USDC"),
+        due_date: 2_000_000,
+    });
+
+    // In atomic mode (allow_partial = false), should panic because existing_id already exists
+    client.batch_register_invoices(&originator, &batch, &false);
+}
+
+#[test]
+fn test_estimate_batch_register_gas() {
+    let env = Env::default();
+    let contract_id = env.register(RegistryContract, (Address::generate(&env),));
+    let client = super::RegistryContractClient::new(&env, &contract_id);
+
+    let gas1 = client.estimate_batch_register_gas(&1);
+    let gas10 = client.estimate_batch_register_gas(&10);
+    let gas50 = client.estimate_batch_register_gas(&50);
+
+    assert!(gas1 < gas10);
+    assert!(gas10 < gas50);
+}
