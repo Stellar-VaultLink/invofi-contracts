@@ -9,6 +9,7 @@
 
 use soroban_sdk::{
     contractclient, contracterror, contracttype, symbol_short, Address, BytesN, Env, Map, Symbol,
+    Vec,
 };
 
 // ─── Constants ───────────────────────────────────────────────────────────────
@@ -63,6 +64,11 @@ pub const MAX_VERIFICATION_FEE_BPS: u32 = 500;
 
 /// Maximum size of the trusted verifier set.
 pub const MAX_VERIFIERS: u32 = 20;
+
+/// Maximum number of signers an `AdminConfig` may hold. Every threshold
+/// check walks the signer set, so this bounds that loop the same way
+/// `MAX_VERIFIERS` bounds the verifier one.
+pub const MAX_ADMIN_SIGNERS: u32 = 20;
 
 /// Maximum attestations retained per invoice. One per (verifier, type) keeps
 /// this at `MAX_VERIFIERS x 3` for the current verifier set; the cap also
@@ -509,6 +515,124 @@ pub fn assert_not_paused(env: &Env) {
     }
 }
 
+// ─── Multisig Admin Governance (ADR-0010) ─────────────────────────────────────
+//
+// Every `assert_admin`-style check across the five contracts used to compare
+// the caller against one stored `Address`. This section replaces that with an
+// M-of-N threshold over a configurable set of signer addresses, following the
+// same "same-block, no timelock" philosophy as the pause mechanism
+// (ADR-0001): a call that already carries `threshold` valid signer
+// authorizations executes immediately, in the same transaction, with no
+// on-chain proposal queue to track.
+//
+// `AdminConfig { signers: [admin], threshold: 1 }` — one signer, threshold
+// one — is single-admin bootstrap mode, and is what every constructor sets up
+// by default. Under it, a threshold-gated call takes a one-element
+// `Vec<Address>` and behaves exactly like the legacy single-admin check: the
+// sole signer's authorization is both necessary and sufficient. Moving to a
+// true M-of-N is a post-deploy admin action (`set_signers`, threshold-gated
+// like everything else here), never a redeploy.
+
+/// M-of-N admin governance config: `threshold` distinct, authorized addresses
+/// out of `signers` are required to authorize any admin-gated call.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct AdminConfig {
+    pub signers: Vec<Address>,
+    pub threshold: u32,
+}
+
+/// One-time setup: writes single-admin bootstrap config (`[admin]`,
+/// threshold 1). Called from each contract's constructor in place of the old
+/// `storage().instance().set(&symbol_short!("admin"), &admin)`. Panics if a
+/// config already exists — constructors run at most once (see ADR-0005).
+pub fn init_admin_config(env: &Env, admin: &Address) {
+    if env.storage().instance().has(&symbol_short!("admcfg")) {
+        panic!("Already initialized");
+    }
+    let mut signers = Vec::new(env);
+    signers.push_back(admin.clone());
+    save_admin_config(
+        env,
+        &AdminConfig {
+            signers,
+            threshold: 1,
+        },
+    );
+}
+
+/// Load the current admin config. Panics if the contract was never
+/// initialized (pre-ADR-0010 instances that have not run `migrate_admin` —
+/// see the migration note in `docs/adr/0010-multisig-admin-governance.md`).
+pub fn load_admin_config(env: &Env) -> AdminConfig {
+    env.storage()
+        .instance()
+        .get(&symbol_short!("admcfg"))
+        .unwrap_or_else(|| panic!("Not initialized"))
+}
+
+/// Persist an admin config. `pub` so `set_signers` (and the one-time
+/// `migrate_admin` path) can write it from each contract; every other
+/// mutation goes through `assert_threshold` first.
+pub fn save_admin_config(env: &Env, cfg: &AdminConfig) {
+    env.storage().instance().set(&symbol_short!("admcfg"), cfg);
+}
+
+/// True if `who` is a member of `cfg.signers`.
+pub fn is_signer(cfg: &AdminConfig, who: &Address) -> bool {
+    cfg.signers.iter().any(|s| s == *who)
+}
+
+/// Validates a candidate `(signers, threshold)` pair before it is written by
+/// `set_signers`: non-empty, threshold in `[1, signers.len()]`, no duplicate
+/// address, and bounded by `MAX_ADMIN_SIGNERS`. A threshold above the signer
+/// count would make the config permanently unsatisfiable; a duplicate would
+/// let one key count twice toward it.
+pub fn validate_signers(env: &Env, signers: &Vec<Address>, threshold: u32) {
+    if signers.is_empty() || signers.len() > MAX_ADMIN_SIGNERS {
+        env.panic_with_error(ContractError::InvalidInput);
+    }
+    if threshold == 0 || threshold > signers.len() {
+        env.panic_with_error(ContractError::InvalidInput);
+    }
+    for (i, a) in signers.iter().enumerate() {
+        for (j, b) in signers.iter().enumerate() {
+            if i != j && a == b {
+                env.panic_with_error(ContractError::InvalidInput);
+            }
+        }
+    }
+}
+
+/// The core threshold check. Requires every address in `provided` to be a
+/// distinct member of `cfg.signers` and to authorize this invocation
+/// (`require_auth`), and requires at least `cfg.threshold` of them. Panics
+/// with `Unauthorized` otherwise.
+///
+/// Soroban lets a single transaction carry a separate signed authorization
+/// entry per address, so `provided` being fully authorized means every one
+/// of those signers actually co-signed *this* call, in this same
+/// transaction — there is no separate on-chain approval step to replay or to
+/// front-run.
+pub fn assert_threshold(env: &Env, cfg: &AdminConfig, provided: &Vec<Address>) {
+    let mut counted: Vec<Address> = Vec::new(env);
+    for who in provided.iter() {
+        if !is_signer(cfg, &who) {
+            env.panic_with_error(ContractError::Unauthorized);
+        }
+        if counted.iter().any(|c| c == who) {
+            // Duplicate entry — would otherwise let one signature count
+            // twice toward the threshold.
+            env.panic_with_error(ContractError::Unauthorized);
+        }
+        who.require_auth();
+        counted.push_back(who);
+    }
+    if counted.len() < cfg.threshold {
+        env.panic_with_error(ContractError::Unauthorized);
+    }
+}
+
 // ─── Cross-Contract Interface ────────────────────────────────────────────────
 // Financing calls these methods on the Registry contract.
 
@@ -664,9 +788,7 @@ pub trait ReputationInterface {
 
 // ─── State Machine State Validation and Enforcement ──────────────────────────
 
-use soroban_sdk::Vec;
-
-/// Validates and executes an invoice state transition. Emits a structured 
+/// Validates and executes an invoice state transition. Emits a structured
 /// transition event and records the transition in the history log.
 /// 
 /// This is the single point of authority for all invoice status changes across
