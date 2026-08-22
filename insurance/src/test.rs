@@ -5,6 +5,15 @@ extern crate std;
 use super::InsuranceContract;
 use soroban_sdk::{symbol_short, testutils::{Address as _, Ledger}, token, Address, Env};
 
+/// Wrap a single signer in the one-element `Vec<Address>` the threshold-gated
+/// admin API expects (ADR-0010). Single-admin/bootstrap deployments pass
+/// exactly this.
+fn one(env: &Env, signer: &Address) -> soroban_sdk::Vec<Address> {
+    let mut v = soroban_sdk::Vec::new(env);
+    v.push_back(signer.clone());
+    v
+}
+
 /// Deploy the insurance contract + a staking token, and initialize.
 fn setup<'a>(
     env: &'a Env,
@@ -177,6 +186,31 @@ fn test_unstake_zero_panics() {
     client.unstake(&staker, &0);
 }
 
+// ─── Multisig admin governance tests (ADR-0010) ─────────────────────────────
+
+#[test]
+fn test_insurance_set_signers_requires_threshold() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let admin = Address::generate(&env);
+    let (_token_id, _insurance_id, client) = setup(&env, &admin);
+
+    let b = Address::generate(&env);
+    let mut two_signers = soroban_sdk::Vec::new(&env);
+    two_signers.push_back(admin.clone());
+    two_signers.push_back(b.clone());
+    client.set_signers(&one(&env, &admin), &two_signers, &2u32);
+
+    let result = client.try_pause(&one(&env, &admin));
+    assert!(result.is_err(), "one of two required signatures must not pause");
+
+    let mut both = soroban_sdk::Vec::new(&env);
+    both.push_back(admin.clone());
+    both.push_back(b.clone());
+    client.pause(&both);
+    assert!(client.contract_is_paused());
+}
+
 #[test]
 #[should_panic(expected = "Error(Contract, #4)")]
 fn test_paused_blocks_stake() {
@@ -189,7 +223,7 @@ fn test_paused_blocks_stake() {
     let staker = Address::generate(&env);
     mint_and_approve(&env, &token_id, &insurance_id, &staker, 1_000_000);
 
-    client.pause(&admin);
+    client.pause(&one(&env, &admin));
     assert!(client.contract_is_paused());
     client.stake(&staker, &1_000_000);
 }
@@ -206,7 +240,7 @@ fn test_pause_blocks_all_insurance_state_changes() {
     let payout_caller = Address::generate(&env);
     let new_token = Address::generate(&env);
 
-    client.pause(&admin);
+    client.pause(&one(&env, &admin));
     fn assert_paused<F: FnOnce()>(f: F) {
         let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(f));
         assert!(result.is_err(), "state-changing function should panic while paused");
@@ -222,13 +256,13 @@ fn test_pause_blocks_all_insurance_state_changes() {
         client.pay_out(&soroban_sdk::symbol_short!("inv_x"), &beneficiary, &1_000i128);
     });
     assert_paused(|| {
-        client.transfer_admin(&admin, &new_admin);
+        client.transfer_admin(&one(&env, &admin), &new_admin);
     });
     assert_paused(|| {
-        client.set_staking_token(&admin, &new_token);
+        client.set_staking_token(&one(&env, &admin), &new_token);
     });
     assert_paused(|| {
-        client.set_payout_caller(&admin, &payout_caller);
+        client.set_payout_caller(&one(&env, &admin), &payout_caller);
     });
 
     assert_eq!(client.get_pool_total(), 0);
@@ -248,7 +282,7 @@ fn test_paused_blocks_unstake() {
     mint_and_approve(&env, &token_id, &insurance_id, &staker, 1_000_000);
     client.stake(&staker, &1_000_000);
 
-    client.pause(&admin);
+    client.pause(&one(&env, &admin));
     client.unstake(&staker, &100_000);
 }
 
@@ -275,7 +309,7 @@ fn test_set_staking_token_admin_only() {
     let (_, _, client) = setup(&env, &admin);
 
     let new_token = Address::generate(&env);
-    client.set_staking_token(&admin, &new_token);
+    client.set_staking_token(&one(&env, &admin), &new_token);
     assert_eq!(client.get_staking_token(), new_token);
 }
 
@@ -304,11 +338,11 @@ fn setup_with_defaulted_invoice<'a>(
     // Deploy a registry, wire it to the insurance contract.
     let registry_id = env.register(RegistryContract, (admin.clone(),));
     let reg = invofi_registry::RegistryContractClient::new(env, &registry_id);
-    client.set_registry(admin, &registry_id);
+    client.set_registry(&one(env, admin), &registry_id);
 
     // Use the payout_caller as the authorised repayment contract on the
     // registry — mock_all_auths covers its auth so we can drive status.
-    reg.set_repayment_contract(admin, payout_caller);
+    reg.set_repayment_contract(&one(env, admin), payout_caller);
 
     // Register a minimal invoice and drive it to Defaulted.
     let originator = Address::generate(env);
@@ -323,7 +357,7 @@ fn setup_with_defaulted_invoice<'a>(
         &due_date,
     );
     // Pending -> Financed (registry needs a financing contract configured).
-    reg.set_financing_contract(admin, payout_caller);
+    reg.set_financing_contract(&one(env, admin), payout_caller);
     reg.financing_marks_invoice_financed(&invoice_id);
     // Advance ledger past due_date so mark_invoice_overdue passes.
     env.ledger().set_timestamp(due_date + 1);
@@ -351,7 +385,7 @@ fn test_payout_after_default_covers_claim() {
     client.stake(&staker, &1_000_000);
 
     // Configure payout caller and registry with a Defaulted invoice.
-    client.set_payout_caller(&admin, &payout_caller);
+    client.set_payout_caller(&one(&env, &admin), &payout_caller);
     assert_eq!(client.get_payout_caller(), Some(payout_caller.clone()));
     let (_reg, invoice_id) =
         setup_with_defaulted_invoice(&env, &admin, &payout_caller, &client);
@@ -381,7 +415,7 @@ fn test_payout_pool_depleted_pays_whats_left() {
     let staker = Address::generate(&env);
     mint_and_approve(&env, &token_id, &insurance_id, &staker, 100_000);
     client.stake(&staker, &100_000);
-    client.set_payout_caller(&admin, &payout_caller);
+    client.set_payout_caller(&one(&env, &admin), &payout_caller);
     let (_reg, invoice_id) =
         setup_with_defaulted_invoice(&env, &admin, &payout_caller, &client);
 
@@ -418,7 +452,7 @@ fn test_payout_pro_rata_multiple_stakers_exact() {
     mint_and_approve(&env, &token_id, &insurance_id, &staker_b, 3_000_000);
     client.stake(&staker_a, &1_000_000);
     client.stake(&staker_b, &3_000_000);
-    client.set_payout_caller(&admin, &payout_caller);
+    client.set_payout_caller(&one(&env, &admin), &payout_caller);
     let (_reg, invoice_id) =
         setup_with_defaulted_invoice(&env, &admin, &payout_caller, &client);
 
@@ -456,14 +490,14 @@ fn test_payout_rejected_when_invoice_overdue_not_defaulted() {
     let staker = Address::generate(&env);
     mint_and_approve(&env, &token_id, &insurance_id, &staker, 1_000_000);
     client.stake(&staker, &1_000_000);
-    client.set_payout_caller(&admin, &payout_caller);
+    client.set_payout_caller(&one(&env, &admin), &payout_caller);
 
     // Deploy registry, wire it — but only advance invoice to Overdue, NOT Defaulted.
     let registry_id = env.register(RegistryContract, (admin.clone(),));
     let reg = invofi_registry::RegistryContractClient::new(&env, &registry_id);
-    client.set_registry(&admin, &registry_id);
-    reg.set_repayment_contract(&admin, &payout_caller);
-    reg.set_financing_contract(&admin, &payout_caller);
+    client.set_registry(&one(&env, &admin), &registry_id);
+    reg.set_repayment_contract(&one(&env, &admin), &payout_caller);
+    reg.set_financing_contract(&one(&env, &admin), &payout_caller);
 
     let originator = Address::generate(&env);
     let invoice_id = symbol_short!("inv_ovd");
@@ -504,11 +538,11 @@ fn test_payout_rejected_when_invoice_pending() {
     let staker = Address::generate(&env);
     mint_and_approve(&env, &token_id, &insurance_id, &staker, 1_000_000);
     client.stake(&staker, &1_000_000);
-    client.set_payout_caller(&admin, &payout_caller);
+    client.set_payout_caller(&one(&env, &admin), &payout_caller);
 
     let registry_id = env.register(RegistryContract, (admin.clone(),));
     let reg = invofi_registry::RegistryContractClient::new(&env, &registry_id);
-    client.set_registry(&admin, &registry_id);
+    client.set_registry(&one(&env, &admin), &registry_id);
 
     let originator = Address::generate(&env);
     let invoice_id = symbol_short!("inv_pnd");
@@ -553,7 +587,7 @@ fn test_payout_zero_amount_panics() {
     let payout_caller = Address::generate(&env);
     let beneficiary = Address::generate(&env);
     let (_, _, client) = setup(&env, &admin);
-    client.set_payout_caller(&admin, &payout_caller);
+    client.set_payout_caller(&one(&env, &admin), &payout_caller);
     let invoice_id = symbol_short!("inv_x");
 
     client.pay_out(&invoice_id, &beneficiary, &0);
@@ -571,8 +605,8 @@ fn test_paused_blocks_payout() {
     let payout_caller = Address::generate(&env);
     let beneficiary = Address::generate(&env);
     let (_, _, client) = setup(&env, &admin);
-    client.set_payout_caller(&admin, &payout_caller);
-    client.pause(&admin);
+    client.set_payout_caller(&one(&env, &admin), &payout_caller);
+    client.pause(&one(&env, &admin));
     let invoice_id = symbol_short!("inv_x");
 
     client.pay_out(&invoice_id, &beneficiary, &1_000);
@@ -597,7 +631,7 @@ fn test_payout_without_registry_panics() {
     mint_and_approve(&env, &token_id, &insurance_id, &staker, 1_000_000);
     client.stake(&staker, &1_000_000);
     // Payout caller configured, but NO registry wired — must fail-closed.
-    client.set_payout_caller(&admin, &payout_caller);
+    client.set_payout_caller(&one(&env, &admin), &payout_caller);
     let invoice_id = symbol_short!("inv_x");
 
     client.pay_out(&invoice_id, &beneficiary, &500_000);
@@ -668,7 +702,7 @@ fn test_yield_math_one_year_500_bps() {
     let admin = Address::generate(&env);
     let (token_id, insurance_id, client) = setup(&env, &admin);
 
-    client.set_yield_rate(&admin, &500); // 5 % annual
+    client.set_yield_rate(&one(&env, &admin), &500); // 5 % annual
     assert_eq!(client.get_yield_rate(), 500);
 
     let staker = Address::generate(&env);
@@ -701,7 +735,7 @@ fn test_yield_math_half_year_1000_bps() {
     let admin = Address::generate(&env);
     let (token_id, insurance_id, client) = setup(&env, &admin);
 
-    client.set_yield_rate(&admin, &1_000); // 10 % annual
+    client.set_yield_rate(&one(&env, &admin), &1_000); // 10 % annual
     let staker = Address::generate(&env);
     mint_and_approve(&env, &token_id, &insurance_id, &staker, 2_000_000);
     fund_yield_reserve(&env, &token_id, &insurance_id, 200_000);
@@ -731,7 +765,7 @@ fn test_partial_unstake_pays_full_yield_then_resets() {
     let admin = Address::generate(&env);
     let (token_id, insurance_id, client) = setup(&env, &admin);
 
-    client.set_yield_rate(&admin, &500); // 5 % annual
+    client.set_yield_rate(&one(&env, &admin), &500); // 5 % annual
     let staker = Address::generate(&env);
     mint_and_approve(&env, &token_id, &insurance_id, &staker, 2_000_000);
     fund_yield_reserve(&env, &token_id, &insurance_id, 200_000);
@@ -777,7 +811,7 @@ fn test_rate_change_prospective_only() {
     let admin = Address::generate(&env);
     let (token_id, insurance_id, client) = setup(&env, &admin);
 
-    client.set_yield_rate(&admin, &500); // 5 % annual
+    client.set_yield_rate(&one(&env, &admin), &500); // 5 % annual
     let staker = Address::generate(&env);
     mint_and_approve(&env, &token_id, &insurance_id, &staker, 1_000_000);
     fund_yield_reserve(&env, &token_id, &insurance_id, 300_000);
@@ -790,7 +824,7 @@ fn test_rate_change_prospective_only() {
     assert_eq!(client.accrued_yield(&staker), 50_000);
 
     // Admin changes rate to 1000 bps. This banks the 50_000 for all stakers.
-    client.set_yield_rate(&admin, &1_000);
+    client.set_yield_rate(&one(&env, &admin), &1_000);
 
     // Immediately after rate change, accrued_yield should still show 50_000
     // (the banked amount; no new accrual yet because elapsed since bank = 0).
@@ -816,7 +850,7 @@ fn test_rate_decrease_preserves_accrued_yield() {
     let admin = Address::generate(&env);
     let (token_id, insurance_id, client) = setup(&env, &admin);
 
-    client.set_yield_rate(&admin, &1_000); // 10 % annual
+    client.set_yield_rate(&one(&env, &admin), &1_000); // 10 % annual
     let staker = Address::generate(&env);
     mint_and_approve(&env, &token_id, &insurance_id, &staker, 1_000_000);
     fund_yield_reserve(&env, &token_id, &insurance_id, 200_000);
@@ -829,7 +863,7 @@ fn test_rate_decrease_preserves_accrued_yield() {
     assert_eq!(client.accrued_yield(&staker), 100_000);
 
     // Admin drops rate to 0. The 100_000 must be banked.
-    client.set_yield_rate(&admin, &0);
+    client.set_yield_rate(&one(&env, &admin), &0);
     assert_eq!(client.accrued_yield(&staker), 100_000); // banked amount unchanged
 
     // No further accrual at 0 bps.
@@ -853,7 +887,7 @@ fn test_topup_banks_yield_and_resets_clock() {
     let admin = Address::generate(&env);
     let (token_id, insurance_id, client) = setup(&env, &admin);
 
-    client.set_yield_rate(&admin, &500); // 5 % annual
+    client.set_yield_rate(&one(&env, &admin), &500); // 5 % annual
     let staker = Address::generate(&env);
     mint_and_approve(&env, &token_id, &insurance_id, &staker, 3_000_000);
     fund_yield_reserve(&env, &token_id, &insurance_id, 200_000);
@@ -894,7 +928,7 @@ fn test_multiple_stakers_independent_yield() {
     let admin = Address::generate(&env);
     let (token_id, insurance_id, client) = setup(&env, &admin);
 
-    client.set_yield_rate(&admin, &500); // 5 % annual
+    client.set_yield_rate(&one(&env, &admin), &500); // 5 % annual
     let staker_a = Address::generate(&env);
     let staker_b = Address::generate(&env);
     mint_and_approve(&env, &token_id, &insurance_id, &staker_a, 1_000_000);
@@ -940,7 +974,7 @@ fn test_set_yield_rate_non_admin_panics() {
     // Calling with an address that is not the admin — must panic Unauthorized.
     // mock_all_auths satisfies the require_auth; the explicit admin-equality
     // check rejects the call.
-    client.set_yield_rate(&impostor, &500);
+    client.set_yield_rate(&one(&env, &impostor), &500);
 }
 
 // ── accrued_yield for non-staker returns 0 ───────────────────────────────────
@@ -952,7 +986,7 @@ fn test_accrued_yield_non_staker_returns_zero() {
 
     let admin = Address::generate(&env);
     let (_, _, client) = setup(&env, &admin);
-    client.set_yield_rate(&admin, &500);
+    client.set_yield_rate(&one(&env, &admin), &500);
 
     let stranger = Address::generate(&env);
     set_ts(&env, 31_536_000);

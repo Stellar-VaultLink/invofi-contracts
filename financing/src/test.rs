@@ -10,6 +10,15 @@ use soroban_sdk::{
     token, Address, Env, Symbol, TryFromVal,
 };
 
+/// Wrap a single signer in the one-element `Vec<Address>` the threshold-gated
+/// admin API expects (ADR-0010). Single-admin/bootstrap deployments pass
+/// exactly this.
+fn one(env: &Env, signer: &Address) -> soroban_sdk::Vec<Address> {
+    let mut v = soroban_sdk::Vec::new(env);
+    v.push_back(signer.clone());
+    v
+}
+
 /// Deploy the registry + financing contracts and return both clients.
 /// The registry is initialized with `admin`; financing is wired to the
 /// registry address and the SEP-41 `token`.
@@ -30,7 +39,7 @@ fn setup_contracts<'a>(
 
     // Register financing as a trusted caller on the registry so its
     // cross-contract status transition (Pending -> Financed) is allowed.
-    registry_client.set_financing_contract(admin, &financing_id);
+    registry_client.set_financing_contract(&one(env, admin), &financing_id);
 
     (registry_client, financing_client)
 }
@@ -308,7 +317,7 @@ fn test_blacklisted_cannot_create_offer() {
         &3_000_000u64,
     );
     // Blacklist on registry, then try to create offer on financing
-    reg.blacklist_address(&admin, &lender);
+    reg.blacklist_address(&one(&env, &admin), &lender);
     fin.create_offer(
         &symbol_short!("off_bl2"),
         &symbol_short!("bl2"),
@@ -345,7 +354,7 @@ fn test_accept_offer() {
     );
     let fin = super::FinancingContractClient::new(&env, &financing_id);
 
-    reg.set_financing_contract(&admin, &financing_id);
+    reg.set_financing_contract(&one(&env, &admin), &financing_id);
     mint_and_approve(&env, &token_id, &financing_id, &lender, amount);
 
     reg.register_invoice(
@@ -782,7 +791,7 @@ fn test_update_offer_status_and_amount_repaid() {
             Address::generate(&env),
         ),
     );
-    fin.set_repayment_contract(&admin, &repayment_id);
+    fin.set_repayment_contract(&one(&env, &admin), &repayment_id);
 
     // Simulate repayment callback
     fin.update_offer_status(&symbol_short!("off_cr"), &OfferStatus::Financed);
@@ -834,7 +843,7 @@ fn test_update_lender_stats_repaid() {
             Address::generate(&env),
         ),
     );
-    fin.set_repayment_contract(&admin, &repayment_id);
+    fin.set_repayment_contract(&one(&env, &admin), &repayment_id);
 
     fin.update_lender_stats_repaid(&lender, &true);
 
@@ -864,7 +873,7 @@ fn test_update_stats_repaid_and_get_fee_bps() {
             Address::generate(&env),
         ),
     );
-    fin.set_repayment_contract(&admin, &repayment_id);
+    fin.set_repayment_contract(&one(&env, &admin), &repayment_id);
 
     // Simulate stats update
     fin.update_stats_repaid(&1_000_000i128, &50_000i128);
@@ -909,6 +918,53 @@ fn test_get_offer_duration_limits() {
     assert_eq!(max, invofi_common::MAX_OFFER_DURATION_SECS);
 }
 
+// ─── Multisig admin governance tests (ADR-0010) ─────────────────────────────
+
+#[test]
+fn test_financing_bootstrap_admin_config_defaults() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let admin = Address::generate(&env);
+    let financing_id = env.register(
+        FinancingContract,
+        (admin.clone(), Address::generate(&env), Address::generate(&env)),
+    );
+    let fin = super::FinancingContractClient::new(&env, &financing_id);
+
+    let cfg = fin.get_admin_config();
+    assert_eq!(cfg.signers.len(), 1);
+    assert_eq!(cfg.signers.get(0).unwrap(), admin);
+    assert_eq!(cfg.threshold, 1);
+}
+
+#[test]
+fn test_financing_set_signers_requires_threshold() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let admin = Address::generate(&env);
+    let financing_id = env.register(
+        FinancingContract,
+        (admin.clone(), Address::generate(&env), Address::generate(&env)),
+    );
+    let fin = super::FinancingContractClient::new(&env, &financing_id);
+
+    let b = Address::generate(&env);
+    let mut two_signers = soroban_sdk::Vec::new(&env);
+    two_signers.push_back(admin.clone());
+    two_signers.push_back(b.clone());
+    fin.set_signers(&one(&env, &admin), &two_signers, &2u32);
+
+    // A single signer is no longer sufficient once threshold is 2.
+    let result = fin.try_pause(&one(&env, &admin));
+    assert!(result.is_err());
+
+    let mut both = soroban_sdk::Vec::new(&env);
+    both.push_back(admin.clone());
+    both.push_back(b.clone());
+    fin.pause(&both);
+    assert!(fin.contract_is_paused());
+}
+
 // ─── Task 4A: emergency pause / circuit breaker ──────────────────────────────
 
 #[test]
@@ -933,7 +989,7 @@ fn test_pause_blocks_create_offer() {
         &3_000_000u64,
     );
 
-    fin.pause(&admin);
+    fin.pause(&one(&env, &admin));
     fin.create_offer(
         &symbol_short!("offp1"),
         &invoice_id,
@@ -958,7 +1014,7 @@ fn test_pause_blocks_all_financing_state_changes() {
     let repayment = Address::generate(&env);
     let pos_token = Address::generate(&env);
 
-    fin.pause(&admin);
+    fin.pause(&one(&env, &admin));
 
     fn assert_paused<F: FnOnce()>(f: F) {
         let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(f));
@@ -986,16 +1042,16 @@ fn test_pause_blocks_all_financing_state_changes() {
         fin.reject_offer(&symbol_short!("offx4"), &originator);
     });
     assert_paused(|| {
-        fin.set_repayment_contract(&admin, &repayment);
+        fin.set_repayment_contract(&one(&env, &admin), &repayment);
     });
     assert_paused(|| {
-        fin.transfer_admin(&admin, &new_admin);
+        fin.transfer_admin(&one(&env, &admin), &new_admin);
     });
     assert_paused(|| {
-        fin.register_currency(&admin, &symbol_short!("EUR"), &Address::generate(&env));
+        fin.register_currency(&one(&env, &admin), &symbol_short!("EUR"), &Address::generate(&env));
     });
     assert_paused(|| {
-        fin.set_position_token(&admin, &pos_token);
+        fin.set_position_token(&one(&env, &admin), &pos_token);
     });
     assert_paused(|| {
         fin.update_offer_status(&symbol_short!("offx5"), &OfferStatus::Rejected);
@@ -1045,9 +1101,9 @@ fn test_accept_offer_mints_position_token() {
     let pos_token_id = pos_sac.address();
 
     mint_and_approve(&env, &token_id, &financing_id, &lender, amount);
-    reg.set_financing_contract(&admin, &financing_id);
+    reg.set_financing_contract(&one(&env, &admin), &financing_id);
     assert!(fin.get_position_token().is_none());
-    fin.set_position_token(&admin, &pos_token_id);
+    fin.set_position_token(&one(&env, &admin), &pos_token_id);
     assert_eq!(fin.get_position_token(), Some(pos_token_id.clone()));
 
     reg.register_invoice(
@@ -1103,7 +1159,7 @@ fn test_accept_offer_without_position_token_still_works() {
     );
     let fin = super::FinancingContractClient::new(&env, &financing_id);
 
-    reg.set_financing_contract(&admin, &financing_id);
+    reg.set_financing_contract(&one(&env, &admin), &financing_id);
     mint_and_approve(&env, &token_id, &financing_id, &lender, amount);
     assert!(fin.get_position_token().is_none());
 
@@ -1264,7 +1320,7 @@ fn test_off_schedule_repayment_does_not_corrupt_state() {
             Address::generate(&env),
         ),
     );
-    fin.set_repayment_contract(&admin, &repayment_id);
+    fin.set_repayment_contract(&one(&env, &admin), &repayment_id);
 
     // Simulate an ad-hoc off-schedule partial repayment (42M — not a multiple
     // of installment_amount = 105M). State should remain readable and correct.
@@ -1416,7 +1472,7 @@ fn test_get_installment_due_zero_when_all_paid() {
             Address::generate(&env),
         ),
     );
-    fin.set_repayment_contract(&admin, &repayment_id);
+    fin.set_repayment_contract(&one(&env, &admin), &repayment_id);
 
     // Simulate full coverage: 4 installments × installment_amount.
     fin.update_offer_amount_repaid(&symbol_short!("off_sc1"), &full_paid);
@@ -1541,7 +1597,7 @@ fn test_daily_frequency_period() {
             Address::generate(&env),
         ),
     );
-    fin.set_repayment_contract(&admin, &repayment_id);
+    fin.set_repayment_contract(&one(&env, &admin), &repayment_id);
 
     // Mark installment 1 as paid.
     fin.update_offer_amount_repaid(&symbol_short!("off_sc1"), &sched.installment_amount);
@@ -1587,7 +1643,7 @@ fn setup_negotiation<'a>(
     );
     let fin = super::FinancingContractClient::new(env, &financing_id);
 
-    reg.set_financing_contract(&admin, &financing_id);
+    reg.set_financing_contract(&one(&env, &admin), &financing_id);
     // The lender's standing allowance to the financing contract is their
     // pre-commitment: it is what makes auto-accept executable without a second
     // signature from them at match time.
@@ -2389,7 +2445,7 @@ fn test_amend_offer_is_pause_guarded() {
     let (_reg, fin, admin, _originator, lender, _token) =
         setup_negotiation(&env, &invoice_id, &offer_id, 1_000_000_000);
 
-    fin.pause(&admin);
+    fin.pause(&one(&env, &admin));
     fin.amend_offer(
         &offer_id,
         &lender,
@@ -2412,7 +2468,7 @@ fn test_counter_offer_is_pause_guarded() {
     let (_reg, fin, admin, originator, _lender, _token) =
         setup_negotiation(&env, &invoice_id, &offer_id, 1_000_000_000);
 
-    fin.pause(&admin);
+    fin.pause(&one(&env, &admin));
     fin.counter_offer(
         &offer_id,
         &originator,
@@ -2438,7 +2494,7 @@ fn test_negotiation_window_is_configurable_and_deadlines_are_frozen() {
 
     assert_eq!(fin.get_negotiation_window(), 259_200);
 
-    fin.set_negotiation_window(&admin, &7_200u64);
+    fin.set_negotiation_window(&one(&env, &admin), &7_200u64);
     assert_eq!(fin.get_negotiation_window(), 7_200);
 
     fin.amend_offer(
@@ -2453,7 +2509,7 @@ fn test_negotiation_window_is_configurable_and_deadlines_are_frozen() {
 
     // Widening the window afterwards must not resurrect a negotiation that is
     // already running against a frozen deadline.
-    fin.set_negotiation_window(&admin, &2_592_000u64);
+    fin.set_negotiation_window(&one(&env, &admin), &2_592_000u64);
     assert_eq!(fin.get_negotiation_deadline(&offer_id), 1_007_200);
     env.ledger().set_timestamp(1_007_201);
     assert_eq!(
@@ -2474,7 +2530,7 @@ fn test_set_negotiation_window_is_admin_only() {
     let (_reg, fin, _admin, _originator, lender, _token) =
         setup_negotiation(&env, &invoice_id, &offer_id, 1_000_000_000);
 
-    fin.set_negotiation_window(&lender, &7_200u64);
+    fin.set_negotiation_window(&one(&env, &lender), &7_200u64);
 }
 
 #[test]
@@ -2489,7 +2545,7 @@ fn test_negotiation_window_below_minimum_panics() {
     let (_reg, fin, admin, _originator, _lender, _token) =
         setup_negotiation(&env, &invoice_id, &offer_id, 1_000_000_000);
 
-    fin.set_negotiation_window(&admin, &3_599u64);
+    fin.set_negotiation_window(&one(&env, &admin), &3_599u64);
 }
 
 #[test]
@@ -2504,7 +2560,7 @@ fn test_negotiation_window_above_maximum_panics() {
     let (_reg, fin, admin, _originator, _lender, _token) =
         setup_negotiation(&env, &invoice_id, &offer_id, 1_000_000_000);
 
-    fin.set_negotiation_window(&admin, &2_592_001u64);
+    fin.set_negotiation_window(&one(&env, &admin), &2_592_001u64);
 }
 
 // ── Events ───────────────────────────────────────────────────────────────────
