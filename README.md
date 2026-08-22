@@ -152,6 +152,7 @@ the frontend's portfolio offers a one-click trustline helper.
 | `__constructor(admin)` | Deployer (at deploy) | Sets admin atomically in the deploy operation (ADR-0005) |
 | `set_recorder(admin, recorder)` | Admin | Set the repayment contract as the only writer |
 | `record_outcome(originator, outcome)` | Recorder only | `0` = repaid, `1` = defaulted; updates outcome counts |
+| `resolve_dispute(admin, originator, originator_favourable)` | Admin | Neutralize one recorded default when a dispute resolves in the originator's favour; emits `rep_chg` with the corrected score (ADR-0004 §7, issue #134) |
 | `get_score(originator)` | Anyone | `repayments − 2×defaults`, floored at 0 (ADR-0004) |
 | `get_record(originator)` | Anyone | Raw `{repayments, defaults}` counts — the source of truth |
 
@@ -190,6 +191,7 @@ Every state-mutating function publishes a Soroban contract event. Topics are
 | `pool_pay` | `pay_out` (insurance) | `amount paid` |
 | `pool_yld` | `unstake` (insurance) | `yield paid` — emitted only when yield > 0 |
 | `reputn` | `record_outcome` (reputation) | `outcome` |
+| `rep_chg` | `resolve_dispute` (reputation) | corrected score — emitted when a dispute resolution neutralizes a default |
 
 ---
 
@@ -378,12 +380,21 @@ Thanks to everyone who has contributed to InvoFi — the list below is generated
                 </a>
             </td>
             <td align="center">
+                <a href="https://github.com/JinadJay">
+                    <img src="https://avatars.githubusercontent.com/u/103272555?v=4" width="100;" alt="JinadJay"/>
+                    <br />
+                    <sub><b>JinadJay</b></sub>
+                </a>
+            </td>
+            <td align="center">
                 <a href="https://github.com/Chigybillionz">
                     <img src="https://avatars.githubusercontent.com/u/184784116?v=4" width="100;" alt="Chigybillionz"/>
                     <br />
                     <sub><b>OKORIE CHIGOZIE JEHOSHAPHAT</b></sub>
                 </a>
             </td>
+		</tr>
+		<tr>
             <td align="center">
                 <a href="https://github.com/RawNuke">
                     <img src="https://avatars.githubusercontent.com/u/67506722?v=4" width="100;" alt="RawNuke"/>
@@ -391,8 +402,6 @@ Thanks to everyone who has contributed to InvoFi — the list below is generated
                     <sub><b>Raw_Nuke</b></sub>
                 </a>
             </td>
-		</tr>
-		<tr>
             <td align="center">
                 <a href="https://github.com/Wetshakat">
                     <img src="https://avatars.githubusercontent.com/u/182114004?v=4" width="100;" alt="Wetshakat"/>

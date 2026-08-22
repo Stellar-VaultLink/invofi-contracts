@@ -12,6 +12,11 @@
 //! `score = successful_repayments * 1 - defaults * 2`, floored at 0.
 //! A richer weighted model (amount-weighted, recency decay) is tracked as a
 //! follow-up issue; see ADR-0004.
+//!
+//! Disputes (issue #134): a default that is later overturned by a dispute
+//! resolving in the originator's favour is neutralized via the admin-only
+//! `resolve_dispute` — the `-2` penalty stops counting against them. The
+//! rule is documented in ADR-0004 §7.
 
 use soroban_sdk::{contract, contractimpl, contracttype, symbol_short, Address, Env, Map};
 
@@ -174,6 +179,55 @@ impl ReputationContract {
 
         env.events()
             .publish((symbol_short!("reputn"), originator.clone()), outcome);
+    }
+
+    /// Adjust an originator's recorded outcome after a dispute resolution.
+    /// Admin only — mirrors the admin-only `resolve_dispute` in the
+    /// registry. After the admin resolves a disputed invoice, they call
+    /// this so the resolution is reflected in the originator's score.
+    ///
+    /// Documented rule (ADR-0004 §7): when `originator_favourable` is
+    /// true, one previously-recorded default is neutralized — `defaults`
+    /// decrements by one (floored at 0) — so the `-2` penalty stops
+    /// counting against the originator. When false, the recorded outcome
+    /// stands unchanged: the penalty, if already applied by
+    /// `record_outcome`, remains.
+    ///
+    /// Emits `ReputationChanged` (topic `rep_chg`) with the corrected
+    /// score when a default was neutralized. `get_score` stays public and
+    /// read-only. Returns the originator's corrected score.
+    pub fn resolve_dispute(
+        env: Env,
+        admin: Address,
+        originator: Address,
+        originator_favourable: bool,
+    ) -> i128 {
+        assert_not_paused(&env);
+        admin.require_auth();
+        let current: Address = env
+            .storage()
+            .instance()
+            .get(&symbol_short!("admin"))
+            .unwrap_or_else(|| panic!("Not initialized"));
+        if current != admin {
+            env.panic_with_error(ContractError::Unauthorized);
+        }
+
+        let mut records = load_records(&env);
+        let mut record = records.get(originator.clone()).unwrap_or(ReputationRecord {
+            repayments: 0,
+            defaults: 0,
+        });
+        let mut score = (record.repayments as i128 - 2 * record.defaults as i128).max(0);
+        if originator_favourable && record.defaults > 0 {
+            record.defaults -= 1;
+            score = (record.repayments as i128 - 2 * record.defaults as i128).max(0);
+            records.set(originator.clone(), record);
+            save_records(&env, &records);
+            env.events()
+                .publish((symbol_short!("rep_chg"), originator.clone()), score);
+        }
+        score
     }
 
     // ── Query helpers (public, read-only) ───────────────────────────────────

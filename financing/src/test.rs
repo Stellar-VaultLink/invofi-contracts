@@ -24,8 +24,10 @@ fn setup_contracts<'a>(
     let registry_id = env.register(RegistryContract, (admin.clone(),));
     let registry_client = invofi_registry::RegistryContractClient::new(env, &registry_id);
 
-    let financing_id =
-        env.register(FinancingContract, (admin.clone(), registry_id.clone(), token.clone()));
+    let financing_id = env.register(
+        FinancingContract,
+        (admin.clone(), registry_id.clone(), token.clone()),
+    );
     let financing_client = super::FinancingContractClient::new(env, &financing_id);
 
     // Register financing as a trusted caller on the registry so its
@@ -44,13 +46,7 @@ fn create_token(env: &Env) -> Address {
 
 /// Mint `amount` to `who` and approve `spender` to move those funds (the same
 /// flow a real lender runs on-chain before `accept_offer`).
-fn mint_and_approve(
-    env: &Env,
-    token_id: &Address,
-    spender: &Address,
-    who: &Address,
-    amount: i128,
-) {
+fn mint_and_approve(env: &Env, token_id: &Address, spender: &Address, who: &Address, amount: i128) {
     let asset_client = token::StellarAssetClient::new(env, token_id);
     asset_client.mint(who, &amount);
 
@@ -931,7 +927,10 @@ fn test_pause_blocks_all_financing_state_changes() {
 
     fn assert_paused<F: FnOnce()>(f: F) {
         let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(f));
-        assert!(result.is_err(), "state-changing function should panic while paused");
+        assert!(
+            result.is_err(),
+            "state-changing function should panic while paused"
+        );
     }
 
     assert_paused(|| {
@@ -979,7 +978,10 @@ fn test_pause_blocks_all_financing_state_changes() {
         fin.update_stats_repaid(&1_000i128, &50i128);
     });
 
-    assert_eq!(fin.get_offer_duration_limits().0, invofi_common::MIN_OFFER_DURATION_SECS);
+    assert_eq!(
+        fin.get_offer_duration_limits().0,
+        invofi_common::MIN_OFFER_DURATION_SECS
+    );
     assert_eq!(fin.get_stats().total_offers, 0);
 }
 
@@ -1196,8 +1198,8 @@ fn test_installment_math_matches_documented_model() {
     );
 
     // Documented model: principal_slice + yield_on_slice
-    let expected_principal_slice = 1_200_000_000i128 / 12;       // 100_000_000
-    let expected_yield = expected_principal_slice * 500 / 10_000;  // 5_000_000
+    let expected_principal_slice = 1_200_000_000i128 / 12; // 100_000_000
+    let expected_yield = expected_principal_slice * 500 / 10_000; // 5_000_000
     let expected_installment = expected_principal_slice + expected_yield; // 105_000_000
 
     assert_eq!(sched.installment_amount, expected_installment);
@@ -1622,7 +1624,10 @@ fn test_amend_offer_rewrites_terms_and_opens_negotiation() {
     assert_eq!(round.duration, 2_592_000);
     assert_eq!(round.timestamp, 1_000_000);
 
-    assert_eq!(fin.get_negotiation_status(&offer_id), NegotiationStatus::Open);
+    assert_eq!(
+        fin.get_negotiation_status(&offer_id),
+        NegotiationStatus::Open
+    );
     // 72-hour default window, frozen at open.
     assert_eq!(fin.get_negotiation_deadline(&offer_id), 1_000_000 + 259_200);
 
@@ -1875,7 +1880,10 @@ fn test_near_miss_terms_do_not_auto_accept() {
     assert_eq!(reg.get_invoice(&invoice_id).status, InvoiceStatus::Pending);
     let token_client = token::TokenClient::new(&env, &token_id);
     assert_eq!(token_client.balance(&originator), 0);
-    assert_eq!(fin.get_negotiation_status(&offer_id), NegotiationStatus::Open);
+    assert_eq!(
+        fin.get_negotiation_status(&offer_id),
+        NegotiationStatus::Open
+    );
 }
 
 #[test]
@@ -1915,7 +1923,10 @@ fn test_superseded_counter_offer_is_not_executable() {
 
     assert_eq!(result.status, OfferStatus::Pending);
     assert_eq!(reg.get_invoice(&invoice_id).status, InvoiceStatus::Pending);
-    assert_eq!(token::TokenClient::new(&env, &token_id).balance(&originator), 0);
+    assert_eq!(
+        token::TokenClient::new(&env, &token_id).balance(&originator),
+        0
+    );
 }
 
 // ── Optimistic concurrency ───────────────────────────────────────────────────
@@ -2010,7 +2021,10 @@ fn test_negotiation_status_expires_on_read_without_any_call() {
 
     // On the deadline itself the negotiation is still open.
     env.ledger().set_timestamp(1_000_000 + 259_200);
-    assert_eq!(fin.get_negotiation_status(&offer_id), NegotiationStatus::Open);
+    assert_eq!(
+        fin.get_negotiation_status(&offer_id),
+        NegotiationStatus::Open
+    );
 
     // One second later it is expired — derived, with nothing having been
     // called in between.
@@ -2250,7 +2264,14 @@ fn test_amend_after_acceptance_panics() {
         setup_negotiation(&env, &invoice_id, &offer_id, amount);
 
     fin.accept_offer(&offer_id, &originator);
-    fin.amend_offer(&offer_id, &lender, &0u32, &(amount), &400u32, &(1_296_000u64));
+    fin.amend_offer(
+        &offer_id,
+        &lender,
+        &0u32,
+        &(amount),
+        &400u32,
+        &(1_296_000u64),
+    );
 }
 
 #[test]
@@ -2646,5 +2667,159 @@ fn test_plain_accept_without_a_negotiation_emits_no_closure() {
         0,
         "an offer with no negotiation must not emit neg_clsd"
     );
-    assert_eq!(fin.get_negotiation_status(&offer_id), NegotiationStatus::None);
+    assert_eq!(
+        fin.get_negotiation_status(&offer_id),
+        NegotiationStatus::None
+    );
+}
+
+// ─── Batch Offer Processing Tests ─────────────────────────────────────────
+
+fn run_batch_accept_reject_test(batch_size: u32) {
+    let env = Env::default();
+    env.mock_all_auths();
+    env.ledger().set_timestamp(1_000_000);
+
+    let admin = Address::generate(&env);
+    let originator = Address::generate(&env);
+    let lender = Address::generate(&env);
+    let token_id = create_token(&env);
+
+    let (reg, fin) = setup_contracts(&env, &admin, &token_id);
+
+    let mut accept_ids = soroban_sdk::Vec::new(&env);
+    let mut reject_ids = soroban_sdk::Vec::new(&env);
+
+    for i in 0..batch_size {
+        let inv_acc_id = Symbol::new(&env, &std::format!("ia_{}_{}", batch_size, i));
+        let off_acc_id = Symbol::new(&env, &std::format!("oa_{}_{}", batch_size, i));
+        let inv_rej_id = Symbol::new(&env, &std::format!("ir_{}_{}", batch_size, i));
+        let off_rej_id = Symbol::new(&env, &std::format!("or_{}_{}", batch_size, i));
+
+        reg.register_invoice(
+            &inv_acc_id,
+            &originator,
+            &10_000_000i128,
+            &symbol_short!("USDC"),
+            &2_000_000u64,
+        );
+        fin.create_offer(
+            &off_acc_id,
+            &inv_acc_id,
+            &lender,
+            &10_000_000i128,
+            &symbol_short!("USDC"),
+            &500u32,
+            &86_400u64,
+        );
+        accept_ids.push_back(off_acc_id);
+
+        reg.register_invoice(
+            &inv_rej_id,
+            &originator,
+            &10_000_000i128,
+            &symbol_short!("USDC"),
+            &2_000_000u64,
+        );
+        fin.create_offer(
+            &off_rej_id,
+            &inv_rej_id,
+            &lender,
+            &10_000_000i128,
+            &symbol_short!("USDC"),
+            &500u32,
+            &86_400u64,
+        );
+        reject_ids.push_back(off_rej_id);
+    }
+
+    mint_and_approve(
+        &env,
+        &token_id,
+        &fin.address,
+        &lender,
+        10_000_000 * (batch_size as i128),
+    );
+
+    let acc_res = fin.batch_accept_offers(&originator, &accept_ids, &false);
+    assert_eq!(acc_res.total_processed, batch_size);
+    assert_eq!(acc_res.success_count, batch_size);
+    assert_eq!(acc_res.failure_count, 0);
+
+    let rej_res = fin.batch_reject_offers(&originator, &reject_ids, &false);
+    assert_eq!(rej_res.total_processed, batch_size);
+    assert_eq!(rej_res.success_count, batch_size);
+    assert_eq!(rej_res.failure_count, 0);
+
+    for id in accept_ids.iter() {
+        let off = fin.get_offer(&id);
+        assert_eq!(off.status, OfferStatus::Accepted);
+    }
+    for id in reject_ids.iter() {
+        let off = fin.get_offer(&id);
+        assert_eq!(off.status, OfferStatus::Rejected);
+    }
+}
+
+#[test]
+fn test_batch_accept_and_reject_offers_size_1() {
+    run_batch_accept_reject_test(1);
+}
+
+#[test]
+fn test_batch_accept_and_reject_offers_size_10() {
+    run_batch_accept_reject_test(10);
+}
+
+#[test]
+fn test_batch_accept_and_reject_offers_size_25() {
+    run_batch_accept_reject_test(25);
+}
+
+#[test]
+fn test_batch_accept_offers_partial_mode() {
+    let env = Env::default();
+    env.mock_all_auths();
+    env.ledger().set_timestamp(1_000_000);
+
+    let admin = Address::generate(&env);
+    let originator = Address::generate(&env);
+    let lender = Address::generate(&env);
+    let token_id = create_token(&env);
+
+    let (reg, fin) = setup_contracts(&env, &admin, &token_id);
+
+    let inv_id = symbol_short!("partinv");
+    let off_valid = symbol_short!("partval");
+    let off_invalid = symbol_short!("partinvl");
+
+    reg.register_invoice(
+        &inv_id,
+        &originator,
+        &10_000_000i128,
+        &symbol_short!("USDC"),
+        &2_000_000u64,
+    );
+    fin.create_offer(
+        &off_valid,
+        &inv_id,
+        &lender,
+        &10_000_000i128,
+        &symbol_short!("USDC"),
+        &500u32,
+        &86_400u64,
+    );
+    mint_and_approve(&env, &token_id, &fin.address, &lender, 10_000_000);
+
+    let mut batch = soroban_sdk::Vec::new(&env);
+    batch.push_back(off_valid.clone());
+    batch.push_back(off_invalid.clone()); // Non-existent offer
+
+    let res = fin.batch_accept_offers(&originator, &batch, &true);
+    assert_eq!(res.total_processed, 2);
+    assert_eq!(res.success_count, 1);
+    assert_eq!(res.failure_count, 1);
+
+    let accepted = fin.get_offer(&off_valid);
+    assert_eq!(accepted.status, OfferStatus::Accepted);
 }

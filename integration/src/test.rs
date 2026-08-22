@@ -1,16 +1,16 @@
 #![cfg(test)]
 extern crate std;
 
-use invofi_common::{InvoiceStatus, OfferStatus};
-use invofi_insurance::InsuranceContract;
+use invofi_common::{BatchRegisterInvoiceInput, BatchRepayItem, InvoiceStatus, OfferStatus};
 use invofi_financing::FinancingContract;
+use invofi_insurance::InsuranceContract;
 use invofi_registry::RegistryContract;
 use invofi_repayment::RepaymentContract;
 use invofi_reputation::ReputationContract;
 use soroban_sdk::{
     symbol_short,
     testutils::{Address as _, Ledger as _},
-    token, Address, Env,
+    token, Address, Env, Symbol,
 };
 
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -222,7 +222,8 @@ fn test_registry_financing_offer_on_financed_invoice_panics() {
         &3_000_000u64,
     );
     // Use the originator escape hatch to move it to Financed.
-    p.reg.update_invoice_status(&invoice_id, &p.originator, &InvoiceStatus::Financed);
+    p.reg
+        .update_invoice_status(&invoice_id, &p.originator, &InvoiceStatus::Financed);
 
     // Try to create an offer on the already-Financed invoice — must panic.
     p.fin.create_offer(
@@ -290,7 +291,9 @@ fn test_financing_repayment_full_repay_syncs_state() {
     asset.mint(&p.originator, &total_due);
 
     // Repay in full via the Repayment contract.
-    let repaid = p.rep.repay_invoice(&invoice_id, &offer_id, &p.originator, &total_due);
+    let repaid = p
+        .rep
+        .repay_invoice(&invoice_id, &offer_id, &p.originator, &total_due);
     assert_eq!(repaid.status, InvoiceStatus::Repaid);
 
     // Offer must be Repaid in Financing (cross-crate state sync).
@@ -341,7 +344,9 @@ fn test_financing_repayment_partial_keeps_financed() {
     let partial = amount / 10;
     let asset = token::StellarAssetClient::new(&env, &p.token_id);
     asset.mint(&p.originator, &partial);
-    let repaid = p.rep.repay_invoice(&invoice_id, &offer_id, &p.originator, &partial);
+    let repaid = p
+        .rep
+        .repay_invoice(&invoice_id, &offer_id, &p.originator, &partial);
     assert_eq!(repaid.status, InvoiceStatus::Financed);
 
     let offer_after = p.fin.get_offer(&offer_id);
@@ -549,7 +554,8 @@ fn test_repayment_reputation_success_on_full_repay() {
     // Fund originator + full repayment.
     let asset = token::StellarAssetClient::new(&env, &p.token_id);
     asset.mint(&p.originator, &total_due);
-    p.rep.repay_invoice(&invoice_id, &offer_id, &p.originator, &total_due);
+    p.rep
+        .repay_invoice(&invoice_id, &offer_id, &p.originator, &total_due);
 
     // Reputation: one success → score 1.
     assert_eq!(p.repu.get_score(&p.originator), 1);
@@ -579,16 +585,42 @@ fn test_repayment_reputation_default_on_reclaim() {
 
     // We'll do two quick repay cycles to build score, then one default.
     for i in 0u32..2 {
-        let inv_id = soroban_sdk::Symbol::new(&env, match i { 0 => "inv_s1", _ => "inv_s2" });
-        let off_id = soroban_sdk::Symbol::new(&env, match i { 0 => "off_s1", _ => "off_s2" });
+        let inv_id = soroban_sdk::Symbol::new(
+            &env,
+            match i {
+                0 => "inv_s1",
+                _ => "inv_s2",
+            },
+        );
+        let off_id = soroban_sdk::Symbol::new(
+            &env,
+            match i {
+                0 => "off_s1",
+                _ => "off_s2",
+            },
+        );
         let due: u64 = 3_000_000 + i as u64;
 
         let asset = token::StellarAssetClient::new(&env, &p.token_id);
         asset.mint(&p.lender, &amount);
         mint_and_approve(&env, &p.token_id, &p.financing_id, &p.lender, amount);
 
-        p.reg.register_invoice(&inv_id, &p.originator, &amount, &symbol_short!("USDC"), &due);
-        p.fin.create_offer(&off_id, &inv_id, &p.lender, &amount, &symbol_short!("USDC"), &500u32, &2_592_000u64);
+        p.reg.register_invoice(
+            &inv_id,
+            &p.originator,
+            &amount,
+            &symbol_short!("USDC"),
+            &due,
+        );
+        p.fin.create_offer(
+            &off_id,
+            &inv_id,
+            &p.lender,
+            &amount,
+            &symbol_short!("USDC"),
+            &500u32,
+            &2_592_000u64,
+        );
         p.fin.accept_offer(&off_id, &p.originator);
 
         // Advance 365 days so pro-rata interest = flat yield.
@@ -773,7 +805,9 @@ fn test_full_lifecycle_register_offer_accept_repay() {
     // ── Step 5: Repay in full (Repayment → Financing → Registry → Reputation)
     let asset = token::StellarAssetClient::new(&env, &p.token_id);
     asset.mint(&p.originator, &total_due);
-    let repaid = p.rep.repay_invoice(&invoice_id, &offer_id, &p.originator, &total_due);
+    let repaid = p
+        .rep
+        .repay_invoice(&invoice_id, &offer_id, &p.originator, &total_due);
     assert_eq!(repaid.status, InvoiceStatus::Repaid);
 
     // Offer Repaid in Financing.
@@ -790,4 +824,122 @@ fn test_full_lifecycle_register_offer_accept_repay() {
     let stats = p.fin.get_stats();
     assert_eq!(stats.total_financed, amount);
     assert_eq!(stats.total_repaid, total_due);
+}
+
+// ─── Batch Operations Full Lifecycle Integration Test & Gas Benchmarking ──
+
+fn run_lifecycle_batch_test(batch_size: u32) {
+    let env = Env::default();
+    env.mock_all_auths();
+    env.ledger().set_timestamp(1_000_000);
+
+    let p = deploy_protocol(&env);
+
+    let mut reg_batch = soroban_sdk::Vec::new(&env);
+    let mut offer_ids = soroban_sdk::Vec::new(&env);
+    let mut repay_items = soroban_sdk::Vec::new(&env);
+
+    let amount = 10_000_000i128;
+    let interest_rate = 500u32;
+    let total_due = amount + (amount * (interest_rate as i128) / 10_000);
+
+    for i in 0..batch_size {
+        let inv_id = Symbol::new(&env, &std::format!("l_i_{}_{}", batch_size, i));
+        let off_id = Symbol::new(&env, &std::format!("l_o_{}_{}", batch_size, i));
+
+        let current_ts = env.ledger().timestamp();
+        reg_batch.push_back(BatchRegisterInvoiceInput {
+            id: inv_id.clone(),
+            amount,
+            currency: symbol_short!("USDC"),
+            due_date: current_ts + 2_000_000,
+        });
+
+        offer_ids.push_back(off_id.clone());
+        repay_items.push_back(BatchRepayItem {
+            invoice_id: inv_id,
+            offer_id: off_id,
+            amount: total_due,
+        });
+    }
+
+    // 1. Batch Invoice Registration
+    let reg_res = p
+        .reg
+        .batch_register_invoices(&p.originator, &reg_batch, &false);
+    assert_eq!(reg_res.success_count, batch_size);
+
+    // 2. Individual Offer Creation (to prepare for batch accept)
+    for i in 0..batch_size {
+        let item = reg_batch.get(i).unwrap();
+        let off_id = offer_ids.get(i).unwrap();
+        p.fin.create_offer(
+            &off_id,
+            &item.id,
+            &p.lender,
+            &amount,
+            &symbol_short!("USDC"),
+            &interest_rate,
+            &86_400u64,
+        );
+    }
+    mint_and_approve(
+        &env,
+        &p.token_id,
+        &p.financing_id,
+        &p.lender,
+        amount * (batch_size as i128),
+    );
+
+    // 3. Batch Offer Acceptance
+    let acc_res = p.fin.batch_accept_offers(&p.originator, &offer_ids, &false);
+    assert_eq!(acc_res.success_count, batch_size);
+
+    // 4. Batch Repayment
+    // Advance 365 days so pro-rata interest equals total_due (principal + flat yield)
+    let funded_at = env.ledger().timestamp();
+    env.ledger().set_timestamp(funded_at + 365 * 86_400);
+
+    // Mint repayment tokens to originator
+    let asset = token::StellarAssetClient::new(&env, &p.token_id);
+    asset.mint(&p.originator, &(total_due * (batch_size as i128)));
+    let rep_token = token::TokenClient::new(&env, &p.token_id);
+    rep_token.approve(
+        &p.originator,
+        &p.repayment_id,
+        &(total_due * (batch_size as i128)),
+        &(env.ledger().sequence() + 1000),
+    );
+
+    let rpy_res = p
+        .rep
+        .batch_repay_invoices(&p.originator, &repay_items, &false);
+    assert_eq!(rpy_res.success_count, batch_size);
+
+    // Verify end states
+    for i in 0..batch_size {
+        let item = reg_batch.get(i).unwrap();
+        let inv = p.reg.get_invoice(&item.id);
+        assert_eq!(inv.status, InvoiceStatus::Repaid);
+    }
+}
+
+#[test]
+fn test_full_lifecycle_batch_size_1() {
+    run_lifecycle_batch_test(1);
+}
+
+#[test]
+fn test_full_lifecycle_batch_size_5() {
+    run_lifecycle_batch_test(5);
+}
+
+#[test]
+fn test_full_lifecycle_batch_size_10() {
+    run_lifecycle_batch_test(10);
+}
+
+#[test]
+fn test_full_lifecycle_batch_size_25() {
+    run_lifecycle_batch_test(25);
 }
