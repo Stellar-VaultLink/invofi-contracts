@@ -5,11 +5,13 @@ on:
     types: [opened, synchronize, reopened]
 
 permissions:
+  contents: read
   pull-requests: write
 
 jobs:
   auto-label:
     name: Auto-label PR
+    if: github.event.pull_request.head.repo.full_name == github.repository
     runs-on: ubuntu-latest
     steps:
       - uses: actions/labeler@v5
