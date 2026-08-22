@@ -23,6 +23,11 @@ pub const MIN_OFFER_DURATION_SECS: u64 = 86_400;
 /// Maximum allowed financing duration in `create_offer`. 365 days, in seconds.
 pub const MAX_OFFER_DURATION_SECS: u64 = 31_536_000;
 
+/// Maximum allowed interest rate in `create_offer`, in basis points (100%).
+/// Bounds `yield_amount = amount * rate / 10_000` so pathological rates cannot
+/// grow the yield arbitrarily large.
+pub const MAX_INTEREST_BPS: u32 = 10_000;
+
 /// Minimum invoice amount in stroops (1 XLM = 10_000_000 stroops).
 /// Prevents dust invoices that would cost more in fees than they're worth.
 pub const MIN_INVOICE_AMOUNT: i128 = 10_000_000;

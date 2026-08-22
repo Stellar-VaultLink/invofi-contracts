@@ -9,8 +9,9 @@ use invofi_common::{
     assert_not_paused, resolve_token, ContractError, FinancingOffer, Invoice, InvoiceStatus,
     LenderStats, NegotiationParty, NegotiationRecord, NegotiationStatus, OfferStatus,
     ProtocolStats, RegistryClient, RepaymentSchedule, ScheduleFrequency,
-    DEFAULT_NEGOTIATION_WINDOW_SECS, MAX_NEGOTIATION_ROUNDS, MAX_NEGOTIATION_WINDOW_SECS,
-    MAX_OFFER_DURATION_SECS, MIN_NEGOTIATION_WINDOW_SECS, MIN_OFFER_DURATION_SECS,
+    DEFAULT_NEGOTIATION_WINDOW_SECS, MAX_INTEREST_BPS, MAX_NEGOTIATION_ROUNDS,
+    MAX_NEGOTIATION_WINDOW_SECS, MAX_OFFER_DURATION_SECS, MIN_NEGOTIATION_WINDOW_SECS,
+    MIN_OFFER_DURATION_SECS,
 };
 
 // ─── Storage Helpers ─────────────────────────────────────────────────────────
@@ -142,7 +143,7 @@ fn last_proposal_by(
 /// enforces. A negotiation must not be a way to reach terms the offer could
 /// not have been created with in the first place.
 fn assert_terms_valid(env: &Env, amount: i128, interest_rate: u32, duration: u64) {
-    let rate_ok = (1..=10_000).contains(&interest_rate);
+    let rate_ok = (1..=MAX_INTEREST_BPS).contains(&interest_rate);
     let duration_ok = (MIN_OFFER_DURATION_SECS..=MAX_OFFER_DURATION_SECS).contains(&duration);
     if amount <= 0 || !rate_ok || !duration_ok {
         env.panic_with_error(ContractError::InvalidInput);
@@ -354,7 +355,7 @@ impl FinancingContract {
         assert!(amount > 0, "offer amount must be greater than zero");
         assert!(interest_rate > 0, "interest_rate must be greater than zero");
         assert!(
-            interest_rate <= 10_000,
+            interest_rate <= MAX_INTEREST_BPS,
             "interest_rate must be at most 10000 bps"
         );
         assert!(

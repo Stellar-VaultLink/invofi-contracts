@@ -209,6 +209,7 @@ All contracts emit machine-readable `E_*` error codes (see [docs/error-codes.md]
 | `GRACE_PERIOD_SECS` | 604,800 | 7-day grace period before lender can reclaim |
 | `MIN_OFFER_DURATION_SECS` | 86,400 | Minimum offer duration (1 day) |
 | `MAX_OFFER_DURATION_SECS` | 31,536,000 | Maximum offer duration (1 year) |
+| `MAX_INTEREST_BPS` | 10,000 | Maximum offer interest rate (100%) |
 | `MIN_INVOICE_AMOUNT` | 10,000,000 | Minimum invoice amount in stroops (10 XLM / 10 USDC) |
 | `DEFAULT_NEGOTIATION_WINDOW_SECS` | 259,200 | Default offer-negotiation window (72 hours) |
 | `MIN_NEGOTIATION_WINDOW_SECS` / `MAX_NEGOTIATION_WINDOW_SECS` | 3,600 / 2,592,000 | Bounds an admin may configure the window to (1 hour – 30 days) |
