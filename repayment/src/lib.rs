@@ -377,7 +377,7 @@ impl RepaymentContract {
             .storage()
             .instance()
             .get(&symbol_short!("registry"))
-            .ok_or(ContractError::NotFound)?;
+.ok_or(ContractError::NotFound)?;
         let registry_client = RegistryClient::new(env, &registry_addr);
         let invoice: Invoice = match registry_client.try_get_invoice(&invoice_id) {
             Ok(Ok(inv)) => inv,
@@ -395,7 +395,7 @@ impl RepaymentContract {
             .storage()
             .instance()
             .get(&symbol_short!("financing"))
-            .ok_or(ContractError::NotFound)?;
+.ok_or(ContractError::NotFound)?;
         let financing_client = FinancingClient::new(env, &financing_addr);
         let mut offer: FinancingOffer = match financing_client.try_get_offer(&offer_id) {
             Ok(Ok(off)) => off,
