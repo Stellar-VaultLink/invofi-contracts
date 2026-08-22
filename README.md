@@ -358,6 +358,13 @@ Thanks to everyone who has contributed to InvoFi — the list below is generated
 		</tr>
 		<tr>
             <td align="center">
+                <a href="https://github.com/Awointa">
+                    <img src="https://avatars.githubusercontent.com/u/82676631?v=4" width="100;" alt="Awointa"/>
+                    <br />
+                    <sub><b>Bob_The_Builder</b></sub>
+                </a>
+            </td>
+            <td align="center">
                 <a href="https://github.com/hexlaapp">
                     <img src="https://avatars.githubusercontent.com/u/287440938?v=4" width="100;" alt="hexlaapp"/>
                     <br />
@@ -365,31 +372,24 @@ Thanks to everyone who has contributed to InvoFi — the list below is generated
                 </a>
             </td>
             <td align="center">
-                <a href="https://github.com/xeladev4">
-                    <img src="https://avatars.githubusercontent.com/u/171882586?v=4" width="100;" alt="xeladev4"/>
+                <a href="https://github.com/Agbasimere">
+                    <img src="https://avatars.githubusercontent.com/u/107962282?v=4" width="100;" alt="Agbasimere"/>
                     <br />
-                    <sub><b>xeladev4</b></sub>
+                    <sub><b>Buik3m</b></sub>
                 </a>
             </td>
             <td align="center">
-                <a href="https://github.com/Wetshakat">
-                    <img src="https://avatars.githubusercontent.com/u/182114004?v=4" width="100;" alt="Wetshakat"/>
+                <a href="https://github.com/Just-Bamford">
+                    <img src="https://avatars.githubusercontent.com/u/233368823?v=4" width="100;" alt="Just-Bamford"/>
                     <br />
-                    <sub><b>Ishaku Dyelshak </b></sub>
+                    <sub><b>Bamford</b></sub>
                 </a>
             </td>
             <td align="center">
-                <a href="https://github.com/RawNuke">
-                    <img src="https://avatars.githubusercontent.com/u/67506722?v=4" width="100;" alt="RawNuke"/>
+                <a href="https://github.com/DevSolex">
+                    <img src="https://avatars.githubusercontent.com/u/220715997?v=4" width="100;" alt="DevSolex"/>
                     <br />
-                    <sub><b>Raw_Nuke</b></sub>
-                </a>
-            </td>
-            <td align="center">
-                <a href="https://github.com/Chigybillionz">
-                    <img src="https://avatars.githubusercontent.com/u/184784116?v=4" width="100;" alt="Chigybillionz"/>
-                    <br />
-                    <sub><b>OKORIE CHIGOZIE JEHOSHAPHAT</b></sub>
+                    <sub><b>Dev solex</b></sub>
                 </a>
             </td>
             <td align="center">
@@ -402,31 +402,31 @@ Thanks to everyone who has contributed to InvoFi — the list below is generated
 		</tr>
 		<tr>
             <td align="center">
-                <a href="https://github.com/DevSolex">
-                    <img src="https://avatars.githubusercontent.com/u/220715997?v=4" width="100;" alt="DevSolex"/>
+                <a href="https://github.com/Chigybillionz">
+                    <img src="https://avatars.githubusercontent.com/u/184784116?v=4" width="100;" alt="Chigybillionz"/>
                     <br />
-                    <sub><b>Dev solex</b></sub>
+                    <sub><b>OKORIE CHIGOZIE JEHOSHAPHAT</b></sub>
                 </a>
             </td>
             <td align="center">
-                <a href="https://github.com/Just-Bamford">
-                    <img src="https://avatars.githubusercontent.com/u/233368823?v=4" width="100;" alt="Just-Bamford"/>
+                <a href="https://github.com/RawNuke">
+                    <img src="https://avatars.githubusercontent.com/u/67506722?v=4" width="100;" alt="RawNuke"/>
                     <br />
-                    <sub><b>Bamford</b></sub>
+                    <sub><b>Raw_Nuke</b></sub>
                 </a>
             </td>
             <td align="center">
-                <a href="https://github.com/Awointa">
-                    <img src="https://avatars.githubusercontent.com/u/82676631?v=4" width="100;" alt="Awointa"/>
+                <a href="https://github.com/Wetshakat">
+                    <img src="https://avatars.githubusercontent.com/u/182114004?v=4" width="100;" alt="Wetshakat"/>
                     <br />
-                    <sub><b>Bob_The_Builder</b></sub>
+                    <sub><b>Ishaku Dyelshak </b></sub>
                 </a>
             </td>
             <td align="center">
-                <a href="https://github.com/Agbasimere">
-                    <img src="https://avatars.githubusercontent.com/u/107962282?v=4" width="100;" alt="Agbasimere"/>
+                <a href="https://github.com/xeladev4">
+                    <img src="https://avatars.githubusercontent.com/u/171882586?v=4" width="100;" alt="xeladev4"/>
                     <br />
-                    <sub><b>Buik3m</b></sub>
+                    <sub><b>xeladev4</b></sub>
                 </a>
             </td>
 		</tr>
