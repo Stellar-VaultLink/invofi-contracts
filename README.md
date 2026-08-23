@@ -298,6 +298,12 @@ The workflow has **no push or pull_request trigger** — it can only be started 
 
 See [CHANGELOG.md](./CHANGELOG.md) for version history.
 
+## Security
+
+- [Threat model](./docs/threat-model.md) — assets, trust boundaries, threat actors (originator, lender, admin, keeper, front-runner), mitigations mapped to enforcing functions/tests, and explicit accepted risks. The evaluation baseline for security reviewers and the SCF Audit Bank.
+- [Security policy](./SECURITY.md) — private vulnerability reporting.
+- [Security self-review](./docs/security-self-review.md) — engineering line-by-line review of token movement and pause paths.
+
 ## Compliance
 
 See the [compliance & regulatory posture](https://github.com/Stellar-VaultLink/invofi/blob/main/docs/compliance.md) in the main repo — KYC/SEP-12 roadmap, jurisdictions avoided at launch, and the securities-by-design analysis.
