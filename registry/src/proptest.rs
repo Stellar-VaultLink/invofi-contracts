@@ -10,6 +10,15 @@ use soroban_sdk::{
     Address, Env,
 };
 
+/// Wrap a single signer in the one-element `Vec<Address>` the threshold-gated
+/// admin API expects (ADR-0010). Single-admin/bootstrap deployments pass
+/// exactly this.
+fn one(env: &Env, signer: &Address) -> soroban_sdk::Vec<Address> {
+    let mut v = soroban_sdk::Vec::new(env);
+    v.push_back(signer.clone());
+    v
+}
+
 /// Deploys a registry and authorizes stand-in financing/repayment addresses
 /// (mirrors production wiring without pulling in the financing/repayment
 /// crates, which registry does not depend on).
@@ -26,8 +35,8 @@ fn setup(
     let reg = crate::RegistryContractClient::new(env, &registry_id);
     let financing = Address::generate(env);
     let repayment = Address::generate(env);
-    reg.set_financing_contract(&admin, &financing);
-    reg.set_repayment_contract(&admin, &repayment);
+    reg.set_financing_contract(&one(env, &admin), &financing);
+    reg.set_repayment_contract(&one(env, &admin), &repayment);
     (reg, admin, financing, repayment)
 }
 

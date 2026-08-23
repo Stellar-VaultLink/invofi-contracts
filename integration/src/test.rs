@@ -17,6 +17,15 @@ use soroban_sdk::{
 // Shared Test Helpers
 // ═══════════════════════════════════════════════════════════════════════════════
 
+/// Wrap a single signer in the one-element `Vec<Address>` the threshold-gated
+/// admin API expects (ADR-0010). Single-admin/bootstrap deployments pass
+/// exactly this.
+fn one(env: &Env, signer: &Address) -> soroban_sdk::Vec<Address> {
+    let mut v = soroban_sdk::Vec::new(env);
+    v.push_back(signer.clone());
+    v
+}
+
 /// Deploy a fresh SEP-41 token and return its contract address.
 pub(crate) fn create_token(env: &Env) -> Address {
     let token_admin = Address::generate(env);
@@ -110,22 +119,22 @@ pub(crate) fn deploy_protocol(env: &Env) -> Protocol {
 
     // ── Wire cross-contract trust ──────────────────────────────────────────
     // Registry trusts financing and repayment for system status transitions.
-    reg.set_financing_contract(&admin, &financing_id);
-    reg.set_repayment_contract(&admin, &repayment_id);
+    reg.set_financing_contract(&one(&env, &admin), &financing_id);
+    reg.set_repayment_contract(&one(&env, &admin), &repayment_id);
 
     // Financing trusts repayment for callback methods.
-    fin.set_repayment_contract(&admin, &repayment_id);
+    fin.set_repayment_contract(&one(&env, &admin), &repayment_id);
 
     // Repayment trusts insurance and reputation for default hooks.
-    rep.set_insurance(&admin, &insurance_id);
-    rep.set_reputation(&admin, &reputation_id);
+    rep.set_insurance(&one(&env, &admin), &insurance_id);
+    rep.set_reputation(&one(&env, &admin), &reputation_id);
 
     // Insurance: payout caller = repayment, registry for Defaulted check.
-    ins.set_payout_caller(&admin, &repayment_id);
-    ins.set_registry(&admin, &registry_id);
+    ins.set_payout_caller(&one(&env, &admin), &repayment_id);
+    ins.set_registry(&one(&env, &admin), &registry_id);
 
     // Reputation: recorder = repayment.
-    repu.set_recorder(&admin, &repayment_id);
+    repu.set_recorder(&one(&env, &admin), &repayment_id);
 
     Protocol {
         admin,

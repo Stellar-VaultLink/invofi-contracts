@@ -13,6 +13,15 @@ use soroban_sdk::{
     token, Address, Env,
 };
 
+/// Wrap a single signer in the one-element `Vec<Address>` the threshold-gated
+/// admin API expects (ADR-0010). Single-admin/bootstrap deployments pass
+/// exactly this.
+fn one(env: &Env, signer: &Address) -> soroban_sdk::Vec<Address> {
+    let mut v = soroban_sdk::Vec::new(env);
+    v.push_back(signer.clone());
+    v
+}
+
 /// Deploy all three contracts (registry, financing, repayment) and return
 /// their clients. All share the same admin and token.
 fn setup_contracts<'a>(
@@ -48,12 +57,12 @@ fn setup_contracts<'a>(
     let rep = super::RepaymentContractClient::new(env, &repayment_id);
 
     // Register repayment contract with financing (for authorized callbacks)
-    fin.set_repayment_contract(admin, &repayment_id);
+    fin.set_repayment_contract(&one(env, admin), &repayment_id);
 
     // Register both contracts as trusted callers on the registry so the
     // cross-contract status transitions (accept + repay) are allowed.
-    reg.set_repayment_contract(admin, &repayment_id);
-    reg.set_financing_contract(admin, &financing_id);
+    reg.set_repayment_contract(&one(env, admin), &repayment_id);
+    reg.set_financing_contract(&one(env, admin), &financing_id);
 
     (reg, fin, rep)
 }
@@ -115,9 +124,9 @@ fn test_repay_invoice_partial_then_full() {
     let rep = super::RepaymentContractClient::new(&env, &repayment_id);
 
     mint_and_approve(&env, &token_id, &financing_id, &lender, amount);
-    fin.set_repayment_contract(&admin, &repayment_id);
-    reg.set_repayment_contract(&admin, &repayment_id);
-    reg.set_financing_contract(&admin, &financing_id);
+    fin.set_repayment_contract(&one(&env, &admin), &repayment_id);
+    reg.set_repayment_contract(&one(&env, &admin), &repayment_id);
+    reg.set_financing_contract(&one(&env, &admin), &financing_id);
 
     // Register invoice
     reg.register_invoice(
@@ -231,9 +240,9 @@ fn test_repay_invoice_overpayment_panics() {
     let rep = super::RepaymentContractClient::new(&env, &repayment_id);
 
     mint_and_approve(&env, &token_id, &financing_id, &lender, amount);
-    fin.set_repayment_contract(&admin, &repayment_id);
-    reg.set_repayment_contract(&admin, &repayment_id);
-    reg.set_financing_contract(&admin, &financing_id);
+    fin.set_repayment_contract(&one(&env, &admin), &repayment_id);
+    reg.set_repayment_contract(&one(&env, &admin), &repayment_id);
+    reg.set_financing_contract(&one(&env, &admin), &financing_id);
 
     reg.register_invoice(
         &symbol_short!("inv_op"),
@@ -336,9 +345,9 @@ fn test_repay_zero_amount_panics() {
     let rep = super::RepaymentContractClient::new(&env, &repayment_id);
 
     mint_and_approve(&env, &token_id, &financing_id, &lender, amount);
-    fin.set_repayment_contract(&admin, &repayment_id);
-    reg.set_repayment_contract(&admin, &repayment_id);
-    reg.set_financing_contract(&admin, &financing_id);
+    fin.set_repayment_contract(&one(&env, &admin), &repayment_id);
+    reg.set_repayment_contract(&one(&env, &admin), &repayment_id);
+    reg.set_financing_contract(&one(&env, &admin), &financing_id);
 
     reg.register_invoice(
         &symbol_short!("inv_za"),
@@ -404,9 +413,9 @@ fn test_reclaim_invoice_after_grace_period() {
     let rep = super::RepaymentContractClient::new(&env, &repayment_id);
 
     mint_and_approve(&env, &token_id, &financing_id, &lender, amount);
-    fin.set_repayment_contract(&admin, &repayment_id);
-    reg.set_repayment_contract(&admin, &repayment_id);
-    reg.set_financing_contract(&admin, &financing_id);
+    fin.set_repayment_contract(&one(&env, &admin), &repayment_id);
+    reg.set_repayment_contract(&one(&env, &admin), &repayment_id);
+    reg.set_financing_contract(&one(&env, &admin), &financing_id);
 
     reg.register_invoice(
         &invoice_id,
@@ -478,9 +487,9 @@ fn test_reclaim_before_grace_period_panics() {
     let rep = super::RepaymentContractClient::new(&env, &repayment_id);
 
     mint_and_approve(&env, &token_id, &financing_id, &lender, amount);
-    fin.set_repayment_contract(&admin, &repayment_id);
-    reg.set_repayment_contract(&admin, &repayment_id);
-    reg.set_financing_contract(&admin, &financing_id);
+    fin.set_repayment_contract(&one(&env, &admin), &repayment_id);
+    reg.set_repayment_contract(&one(&env, &admin), &repayment_id);
+    reg.set_financing_contract(&one(&env, &admin), &financing_id);
 
     reg.register_invoice(
         &invoice_id,
@@ -541,9 +550,9 @@ fn test_reclaim_on_non_overdue_panics() {
     let rep = super::RepaymentContractClient::new(&env, &repayment_id);
 
     mint_and_approve(&env, &token_id, &financing_id, &lender, amount);
-    fin.set_repayment_contract(&admin, &repayment_id);
-    reg.set_repayment_contract(&admin, &repayment_id);
-    reg.set_financing_contract(&admin, &financing_id);
+    fin.set_repayment_contract(&one(&env, &admin), &repayment_id);
+    reg.set_repayment_contract(&one(&env, &admin), &repayment_id);
+    reg.set_financing_contract(&one(&env, &admin), &financing_id);
 
     reg.register_invoice(
         &symbol_short!("inv_nr"),
@@ -601,9 +610,9 @@ fn test_calculate_total_due() {
     let rep = super::RepaymentContractClient::new(&env, &repayment_id);
 
     mint_and_approve(&env, &token_id, &financing_id, &lender, 10_000i128);
-    fin.set_repayment_contract(&admin, &repayment_id);
-    reg.set_repayment_contract(&admin, &repayment_id);
-    reg.set_financing_contract(&admin, &financing_id);
+    fin.set_repayment_contract(&one(&env, &admin), &repayment_id);
+    reg.set_repayment_contract(&one(&env, &admin), &repayment_id);
+    reg.set_financing_contract(&one(&env, &admin), &financing_id);
 
     reg.register_invoice(
         &symbol_short!("inv_td"),
@@ -665,9 +674,9 @@ fn test_calculate_total_due_after_partial() {
     let rep = super::RepaymentContractClient::new(&env, &repayment_id);
 
     mint_and_approve(&env, &token_id, &financing_id, &lender, amount);
-    fin.set_repayment_contract(&admin, &repayment_id);
-    reg.set_repayment_contract(&admin, &repayment_id);
-    reg.set_financing_contract(&admin, &financing_id);
+    fin.set_repayment_contract(&one(&env, &admin), &repayment_id);
+    reg.set_repayment_contract(&one(&env, &admin), &repayment_id);
+    reg.set_financing_contract(&one(&env, &admin), &financing_id);
 
     reg.register_invoice(
         &symbol_short!("inv_tp"),
@@ -749,6 +758,32 @@ fn test_get_duration_limits() {
     assert_eq!(max, invofi_common::MAX_OFFER_DURATION_SECS);
 }
 
+// ─── Multisig admin governance tests (ADR-0010) ─────────────────────────────
+
+#[test]
+fn test_repayment_set_signers_requires_threshold() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let admin = Address::generate(&env);
+    let token = create_token(&env);
+    let (_reg, _fin, rep) = setup_contracts(&env, &admin, &token);
+
+    let b = Address::generate(&env);
+    let mut two_signers = soroban_sdk::Vec::new(&env);
+    two_signers.push_back(admin.clone());
+    two_signers.push_back(b.clone());
+    rep.set_signers(&one(&env, &admin), &two_signers, &2u32);
+
+    let result = rep.try_pause(&one(&env, &admin));
+    assert!(result.is_err(), "one of two required signatures must not pause");
+
+    let mut both = soroban_sdk::Vec::new(&env);
+    both.push_back(admin.clone());
+    both.push_back(b.clone());
+    rep.pause(&both);
+    assert!(rep.contract_is_paused());
+}
+
 // ─── Task 4A: emergency pause / circuit breaker ──────────────────────────────
 
 #[test]
@@ -787,9 +822,9 @@ fn test_pause_blocks_repay_invoice() {
     let rep = super::RepaymentContractClient::new(&env, &repayment_id);
 
     mint_and_approve(&env, &token_id, &financing_id, &lender, amount);
-    fin.set_repayment_contract(&admin, &repayment_id);
-    reg.set_repayment_contract(&admin, &repayment_id);
-    reg.set_financing_contract(&admin, &financing_id);
+    fin.set_repayment_contract(&one(&env, &admin), &repayment_id);
+    reg.set_repayment_contract(&one(&env, &admin), &repayment_id);
+    reg.set_financing_contract(&one(&env, &admin), &financing_id);
 
     reg.register_invoice(
         &invoice_id,
@@ -809,7 +844,7 @@ fn test_pause_blocks_repay_invoice() {
     );
     fin.accept_offer(&offer_id, &originator);
 
-    rep.pause(&admin);
+    rep.pause(&one(&env, &admin));
     rep.repay_invoice(&invoice_id, &offer_id, &originator, &amount);
 }
 
@@ -824,7 +859,7 @@ fn test_pause_blocks_all_repayment_state_changes() {
     let reputation = Address::generate(&env);
     let new_admin = Address::generate(&env);
 
-    rep.pause(&admin);
+    rep.pause(&one(&env, &admin));
     fn assert_paused<F: FnOnce()>(f: F) {
         let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(f));
         assert!(
@@ -852,13 +887,13 @@ fn test_pause_blocks_all_repayment_state_changes() {
         );
     });
     assert_paused(|| {
-        rep.set_insurance(&admin, &insurance);
+        rep.set_insurance(&one(&env, &admin), &insurance);
     });
     assert_paused(|| {
-        rep.set_reputation(&admin, &reputation);
+        rep.set_reputation(&one(&env, &admin), &reputation);
     });
     assert_paused(|| {
-        rep.transfer_admin(&admin, &new_admin);
+        rep.transfer_admin(&one(&env, &admin), &new_admin);
     });
 
     assert_eq!(
@@ -906,9 +941,9 @@ fn test_reclaim_triggers_defaulted_payout_and_reputation() {
     let rep = super::RepaymentContractClient::new(&env, &repayment_id);
 
     mint_and_approve(&env, &token_id, &financing_id, &lender, amount);
-    fin.set_repayment_contract(&admin, &repayment_id);
-    reg.set_repayment_contract(&admin, &repayment_id);
-    reg.set_financing_contract(&admin, &financing_id);
+    fin.set_repayment_contract(&one(&env, &admin), &repayment_id);
+    reg.set_repayment_contract(&one(&env, &admin), &repayment_id);
+    reg.set_financing_contract(&one(&env, &admin), &financing_id);
 
     // Insurance pool, funded by a third-party staker with the same token
     // the loan settles in (300M coverage against a 1.05B obligation).
@@ -924,19 +959,19 @@ fn test_reclaim_triggers_defaulted_payout_and_reputation() {
         &(env.ledger().sequence() + 1000),
     );
     ins.stake(&staker, &300_000_000);
-    ins.set_payout_caller(&admin, &repayment_id);
+    ins.set_payout_caller(&one(&env, &admin), &repayment_id);
     // Wire the registry into the insurance contract so pay_out can verify
     // the invoice is Defaulted on-chain before moving staked funds.
-    ins.set_registry(&admin, &registry_id);
+    ins.set_registry(&one(&env, &admin), &registry_id);
 
     // Reputation contract, recorder = repayment.
     let reputation_id = env.register(ReputationContract, (admin.clone(),));
     let repu = invofi_reputation::ReputationContractClient::new(&env, &reputation_id);
-    repu.set_recorder(&admin, &repayment_id);
+    repu.set_recorder(&one(&env, &admin), &repayment_id);
 
     // Wire repayment -> insurance + reputation.
-    rep.set_insurance(&admin, &insurance_id);
-    rep.set_reputation(&admin, &reputation_id);
+    rep.set_insurance(&one(&env, &admin), &insurance_id);
+    rep.set_reputation(&one(&env, &admin), &reputation_id);
 
     reg.register_invoice(
         &invoice_id,
@@ -1024,14 +1059,14 @@ fn test_full_repay_records_reputation_success() {
     let rep = super::RepaymentContractClient::new(&env, &repayment_id);
 
     mint_and_approve(&env, &token_id, &financing_id, &lender, amount);
-    fin.set_repayment_contract(&admin, &repayment_id);
-    reg.set_repayment_contract(&admin, &repayment_id);
-    reg.set_financing_contract(&admin, &financing_id);
+    fin.set_repayment_contract(&one(&env, &admin), &repayment_id);
+    reg.set_repayment_contract(&one(&env, &admin), &repayment_id);
+    reg.set_financing_contract(&one(&env, &admin), &financing_id);
 
     let reputation_id = env.register(ReputationContract, (admin.clone(),));
     let repu = invofi_reputation::ReputationContractClient::new(&env, &reputation_id);
-    repu.set_recorder(&admin, &repayment_id);
-    rep.set_reputation(&admin, &reputation_id);
+    repu.set_recorder(&one(&env, &admin), &repayment_id);
+    rep.set_reputation(&one(&env, &admin), &reputation_id);
 
     reg.register_invoice(
         &invoice_id,
@@ -1260,9 +1295,9 @@ fn setup_penalty_case<'a>(env: &'a Env) -> PenCase<'a> {
     let rep = super::RepaymentContractClient::new(env, &repayment_id);
 
     mint_and_approve(env, &token_id, &financing_id, &lender, PEN_AMOUNT);
-    fin.set_repayment_contract(&admin, &repayment_id);
-    reg.set_repayment_contract(&admin, &repayment_id);
-    reg.set_financing_contract(&admin, &financing_id);
+    fin.set_repayment_contract(&one(&env, &admin), &repayment_id);
+    reg.set_repayment_contract(&one(&env, &admin), &repayment_id);
+    reg.set_financing_contract(&one(&env, &admin), &financing_id);
 
     reg.register_invoice(
         &symbol_short!("inv_pen"),
@@ -1336,7 +1371,7 @@ fn test_penalty_zero_cap_disables_accrual() {
 
     // A rate with a zero ceiling accrues nothing — the cap is a hard bound,
     // so a zero cap is a hard zero.
-    c.rep.set_penalty(&c.admin, &PEN_BPS, &0u32);
+    c.rep.set_penalty(&one(&env, &c.admin), &PEN_BPS, &0u32);
     at_days_overdue(&env, 10);
     assert_eq!(c.rep.calculate_penalty(&symbol_short!("off_pen")), 0);
 }
@@ -1347,7 +1382,7 @@ fn test_penalty_accrues_in_whole_days() {
     env.mock_all_auths();
     env.ledger().set_timestamp(PEN_DUE_DATE - 2_592_000);
     let c = setup_penalty_case(&env);
-    c.rep.set_penalty(&c.admin, &PEN_BPS, &PEN_CAP_BPS);
+    c.rep.set_penalty(&one(&env, &c.admin), &PEN_BPS, &PEN_CAP_BPS);
 
     at_days_overdue(&env, 1);
     assert_eq!(
@@ -1376,7 +1411,7 @@ fn test_penalty_truncates_partial_day_toward_borrower() {
     env.mock_all_auths();
     env.ledger().set_timestamp(PEN_DUE_DATE - 2_592_000);
     let c = setup_penalty_case(&env);
-    c.rep.set_penalty(&c.admin, &PEN_BPS, &PEN_CAP_BPS);
+    c.rep.set_penalty(&one(&env, &c.admin), &PEN_BPS, &PEN_CAP_BPS);
 
     // One second short of day 5: the day in progress is not charged, so the
     // borrower is billed for 4 days. ADR-0007 decision 3 — rounding runs in
@@ -1401,7 +1436,7 @@ fn test_penalty_not_accrued_before_or_at_due_date() {
     env.mock_all_auths();
     env.ledger().set_timestamp(PEN_DUE_DATE - 2_592_000);
     let c = setup_penalty_case(&env);
-    c.rep.set_penalty(&c.admin, &PEN_BPS, &PEN_CAP_BPS);
+    c.rep.set_penalty(&one(&env, &c.admin), &PEN_BPS, &PEN_CAP_BPS);
 
     env.ledger().set_timestamp(PEN_DUE_DATE - 1);
     assert_eq!(c.rep.calculate_penalty(&symbol_short!("off_pen")), 0);
@@ -1421,7 +1456,7 @@ fn test_penalty_stops_at_hard_cap() {
     env.mock_all_auths();
     env.ledger().set_timestamp(PEN_DUE_DATE - 2_592_000);
     let c = setup_penalty_case(&env);
-    c.rep.set_penalty(&c.admin, &PEN_BPS, &PEN_CAP_BPS);
+    c.rep.set_penalty(&one(&env, &c.admin), &PEN_BPS, &PEN_CAP_BPS);
 
     // Day 299: still below the ceiling, accruing linearly.
     at_days_overdue(&env, 299);
@@ -1448,7 +1483,7 @@ fn test_penalty_base_frozen_across_partial_repayment() {
     env.mock_all_auths();
     env.ledger().set_timestamp(PEN_DUE_DATE - 2_592_000);
     let c = setup_penalty_case(&env);
-    c.rep.set_penalty(&c.admin, &PEN_BPS, &PEN_CAP_BPS);
+    c.rep.set_penalty(&one(&env, &c.admin), &PEN_BPS, &PEN_CAP_BPS);
 
     at_days_overdue(&env, 5);
     let before = c.rep.calculate_penalty(&symbol_short!("off_pen"));
@@ -1491,7 +1526,7 @@ fn test_penalty_must_be_settled_for_full_repayment() {
     env.mock_all_auths();
     env.ledger().set_timestamp(PEN_DUE_DATE - 2_592_000);
     let c = setup_penalty_case(&env);
-    c.rep.set_penalty(&c.admin, &PEN_BPS, &PEN_CAP_BPS);
+    c.rep.set_penalty(&one(&env, &c.admin), &PEN_BPS, &PEN_CAP_BPS);
 
     at_days_overdue(&env, 5);
     let _penalty = 5 * PEN_PER_DAY;
@@ -1542,7 +1577,7 @@ fn test_penalty_overpayment_beyond_accrued_total_panics() {
     env.mock_all_auths();
     env.ledger().set_timestamp(PEN_DUE_DATE - 2_592_000);
     let c = setup_penalty_case(&env);
-    c.rep.set_penalty(&c.admin, &PEN_BPS, &PEN_CAP_BPS);
+    c.rep.set_penalty(&one(&env, &c.admin), &PEN_BPS, &PEN_CAP_BPS);
 
     at_days_overdue(&env, 5);
     // Total owed = principal + pro-rata interest + penalty.
@@ -1563,7 +1598,7 @@ fn test_penalty_accrues_while_invoice_marked_overdue() {
     env.mock_all_auths();
     env.ledger().set_timestamp(PEN_DUE_DATE - 2_592_000);
     let c = setup_penalty_case(&env);
-    c.rep.set_penalty(&c.admin, &PEN_BPS, &PEN_CAP_BPS);
+    c.rep.set_penalty(&one(&env, &c.admin), &PEN_BPS, &PEN_CAP_BPS);
 
     // Accrual is anchored on due_date, not on the status transition, so
     // flipping the invoice to Overdue neither starts nor resets the meter.
@@ -1589,7 +1624,7 @@ fn test_penalty_excluded_from_insurance_payout() {
     env.mock_all_auths();
     env.ledger().set_timestamp(PEN_DUE_DATE - 2_592_000);
     let c = setup_penalty_case(&env);
-    c.rep.set_penalty(&c.admin, &PEN_BPS, &PEN_CAP_BPS);
+    c.rep.set_penalty(&one(&env, &c.admin), &PEN_BPS, &PEN_CAP_BPS);
 
     // A pool deliberately deep enough to cover the full claim, so the
     // assertion below distinguishes "penalty excluded" from "pool exhausted".
@@ -1606,11 +1641,11 @@ fn test_penalty_excluded_from_insurance_payout() {
         &(env.ledger().sequence() + 1000),
     );
     ins.stake(&staker, &3_000_000_000);
-    ins.set_payout_caller(&c.admin, &c.repayment_id);
+    ins.set_payout_caller(&one(&env, &c.admin), &c.repayment_id);
     // pay_out verifies on-chain that the invoice is Defaulted before moving
     // staked funds, so the pool needs the registry wired or it fails closed.
-    ins.set_registry(&c.admin, &c.registry_id);
-    c.rep.set_insurance(&c.admin, &insurance_id);
+    ins.set_registry(&one(&env, &c.admin), &c.registry_id);
+    c.rep.set_insurance(&one(&env, &c.admin), &insurance_id);
 
     // Past due plus the grace period, then default.
     env.ledger()
@@ -1645,7 +1680,7 @@ fn test_set_penalty_admin_only() {
     let c = setup_penalty_case(&env);
 
     let stranger = Address::generate(&env);
-    c.rep.set_penalty(&stranger, &PEN_BPS, &PEN_CAP_BPS);
+    c.rep.set_penalty(&one(&env, &stranger), &PEN_BPS, &PEN_CAP_BPS);
 }
 
 #[test]
@@ -1656,7 +1691,7 @@ fn test_set_penalty_rejects_excessive_rate() {
     env.ledger().set_timestamp(PEN_DUE_DATE - 2_592_000);
     let c = setup_penalty_case(&env);
 
-    c.rep.set_penalty(&c.admin, &501u32, &PEN_CAP_BPS);
+    c.rep.set_penalty(&one(&env, &c.admin), &501u32, &PEN_CAP_BPS);
 }
 
 #[test]
@@ -1667,7 +1702,7 @@ fn test_set_penalty_rejects_excessive_cap() {
     env.ledger().set_timestamp(PEN_DUE_DATE - 2_592_000);
     let c = setup_penalty_case(&env);
 
-    c.rep.set_penalty(&c.admin, &PEN_BPS, &10_001u32);
+    c.rep.set_penalty(&one(&env, &c.admin), &PEN_BPS, &10_001u32);
 }
 
 #[test]
@@ -1678,6 +1713,6 @@ fn test_set_penalty_blocked_while_paused() {
     env.ledger().set_timestamp(PEN_DUE_DATE - 2_592_000);
     let c = setup_penalty_case(&env);
 
-    c.rep.pause(&c.admin);
-    c.rep.set_penalty(&c.admin, &PEN_BPS, &PEN_CAP_BPS);
+    c.rep.pause(&one(&env, &c.admin));
+    c.rep.set_penalty(&one(&env, &c.admin), &PEN_BPS, &PEN_CAP_BPS);
 }

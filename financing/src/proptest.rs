@@ -11,6 +11,15 @@ use soroban_sdk::{
     Address, Env,
 };
 
+/// Wrap a single signer in the one-element `Vec<Address>` the threshold-gated
+/// admin API expects (ADR-0010). Single-admin/bootstrap deployments pass
+/// exactly this.
+fn one(env: &Env, signer: &Address) -> soroban_sdk::Vec<Address> {
+    let mut v = soroban_sdk::Vec::new(env);
+    v.push_back(signer.clone());
+    v
+}
+
 proptest! {
     #![proptest_config(ProptestConfig::with_cases(2000))]
 
@@ -128,7 +137,7 @@ proptest! {
             let fin = crate::FinancingContractClient::new(&env, &financing_id);
             // accept_offer triggers a Pending -> Financed transition through the
             // registry; financing must be registered as that trusted caller.
-            reg.set_financing_contract(&admin, &financing_id);
+            reg.set_financing_contract(&one(&env, &admin), &financing_id);
 
             reg.register_invoice(&invoice_id, &originator, &principal, &symbol_short!("USD"), &2_000_000u64);
 
@@ -177,8 +186,8 @@ proptest! {
             let pos_token_id = pos_sac.address();
             // accept_offer triggers a Pending -> Financed transition through the
             // registry; financing must be registered as that trusted caller.
-            reg.set_financing_contract(&admin, &financing_id);
-            fin.set_position_token(&admin, &pos_token_id);
+            reg.set_financing_contract(&one(&env, &admin), &financing_id);
+            fin.set_position_token(&one(&env, &admin), &pos_token_id);
 
             let asset_client = soroban_sdk::token::StellarAssetClient::new(&env, &token_id);
             let token_client = soroban_sdk::token::TokenClient::new(&env, &token_id);
@@ -224,7 +233,7 @@ proptest! {
             let reg = invofi_registry::RegistryContractClient::new(&env, &registry_id);
             let financing_id = env.register(FinancingContract, (admin.clone(), registry_id.clone(), token_id.clone()));
             let fin = crate::FinancingContractClient::new(&env, &financing_id);
-            fin.set_position_token(&admin, &pos_token_id);
+            fin.set_position_token(&one(&env, &admin), &pos_token_id);
             let pos_client = soroban_sdk::token::TokenClient::new(&env, &pos_token_id);
 
             let invoice_id = symbol_short!("inv_wd");

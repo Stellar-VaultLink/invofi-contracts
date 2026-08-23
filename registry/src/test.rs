@@ -9,6 +9,15 @@ use soroban_sdk::{
     token, Address, BytesN, Env, IntoVal, Symbol, TryFromVal,
 };
 
+/// Wrap a single signer in the one-element `Vec<Address>` the threshold-gated
+/// admin API expects (ADR-0010). Single-admin/bootstrap deployments pass
+/// exactly this.
+fn one(env: &Env, signer: &Address) -> soroban_sdk::Vec<Address> {
+    let mut v = soroban_sdk::Vec::new(env);
+    v.push_back(signer.clone());
+    v
+}
+
 // ─── Invoice CRUD tests ──────────────────────────────────────────────────────
 
 #[test]
@@ -599,10 +608,7 @@ fn test_constructor_cannot_be_reinvoked() {
         &soroban_sdk::Symbol::new(&env, "__constructor"),
         args,
     );
-    assert!(
-        result.is_err(),
-        "constructor must not be re-invokable post-deploy"
-    );
+    assert!(result.is_err(), "constructor must not be re-invokable post-deploy");
 }
 
 #[test]
@@ -614,7 +620,7 @@ fn test_transfer_admin() {
     let client = super::RegistryContractClient::new(&env, &contract_id);
     let new_admin = Address::generate(&env);
 
-    client.transfer_admin(&admin, &new_admin);
+    client.transfer_admin(&one(&env, &admin), &new_admin);
     assert_eq!(client.get_admin(), new_admin);
 }
 
@@ -629,10 +635,372 @@ fn test_transfer_admin_unauthorized_panics() {
     let not_admin = Address::generate(&env);
     let new_admin = Address::generate(&env);
 
-    client.transfer_admin(&not_admin, &new_admin);
+    client.transfer_admin(&one(&env, &not_admin), &new_admin);
 }
 
-// ─── Pause tests ──────────────────────────────────────────────────────────────
+// ─── Multisig admin governance tests (ADR-0010) ─────────────────────────────
+
+#[test]
+fn test_bootstrap_admin_config_defaults() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let admin = Address::generate(&env);
+    let contract_id = env.register(RegistryContract, (admin.clone(),));
+    let client = super::RegistryContractClient::new(&env, &contract_id);
+
+    // Every constructor boots into single-admin bootstrap mode: one signer,
+    // threshold one.
+    let cfg = client.get_admin_config();
+    assert_eq!(cfg.signers.len(), 1);
+    assert_eq!(cfg.signers.get(0).unwrap(), admin);
+    assert_eq!(cfg.threshold, 1);
+    assert_eq!(client.get_signers(), cfg.signers);
+    assert_eq!(client.get_threshold(), 1);
+}
+
+#[test]
+fn test_set_signers_upgrades_to_true_multisig() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let admin = Address::generate(&env);
+    let contract_id = env.register(RegistryContract, (admin.clone(),));
+    let client = super::RegistryContractClient::new(&env, &contract_id);
+
+    let b = Address::generate(&env);
+    let c = Address::generate(&env);
+    let mut new_signers = soroban_sdk::Vec::new(&env);
+    new_signers.push_back(admin.clone());
+    new_signers.push_back(b.clone());
+    new_signers.push_back(c.clone());
+
+    // Bootstrap mode's sole signer can authorize the upgrade alone.
+    client.set_signers(&one(&env, &admin), &new_signers, &2u32);
+
+    let cfg = client.get_admin_config();
+    assert_eq!(cfg.threshold, 2);
+    assert_eq!(cfg.signers, new_signers);
+}
+
+#[test]
+fn test_multisig_requires_threshold_distinct_signatures() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let admin = Address::generate(&env);
+    let contract_id = env.register(RegistryContract, (admin.clone(),));
+    let client = super::RegistryContractClient::new(&env, &contract_id);
+
+    let b = Address::generate(&env);
+    let c = Address::generate(&env);
+    let mut signers_3 = soroban_sdk::Vec::new(&env);
+    signers_3.push_back(admin.clone());
+    signers_3.push_back(b.clone());
+    signers_3.push_back(c.clone());
+    client.set_signers(&one(&env, &admin), &signers_3, &2u32);
+
+    // A single signer is no longer enough once threshold is 2.
+    let result = client.try_pause(&one(&env, &admin));
+    assert!(result.is_err(), "one of two required signatures must not pause");
+    assert!(!client.contract_is_paused());
+
+    // Two distinct configured signers together clear the threshold.
+    let mut two = soroban_sdk::Vec::new(&env);
+    two.push_back(admin.clone());
+    two.push_back(b.clone());
+    client.pause(&two);
+    assert!(client.contract_is_paused());
+}
+
+#[test]
+fn test_multisig_rejects_non_signer_address() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let admin = Address::generate(&env);
+    let contract_id = env.register(RegistryContract, (admin.clone(),));
+    let client = super::RegistryContractClient::new(&env, &contract_id);
+
+    let b = Address::generate(&env);
+    let outsider = Address::generate(&env);
+    let mut signers_2 = soroban_sdk::Vec::new(&env);
+    signers_2.push_back(admin.clone());
+    signers_2.push_back(b.clone());
+    client.set_signers(&one(&env, &admin), &signers_2, &2u32);
+
+    // One real signer plus one address outside the configured set must not
+    // satisfy the threshold, even though the vec has two entries.
+    let mut bad = soroban_sdk::Vec::new(&env);
+    bad.push_back(admin.clone());
+    bad.push_back(outsider);
+    let result = client.try_pause(&bad);
+    assert!(result.is_err(), "a non-signer address must not count toward the threshold");
+}
+
+#[test]
+fn test_multisig_rejects_duplicate_signer_in_same_call() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let admin = Address::generate(&env);
+    let contract_id = env.register(RegistryContract, (admin.clone(),));
+    let client = super::RegistryContractClient::new(&env, &contract_id);
+
+    let b = Address::generate(&env);
+    let mut signers_2 = soroban_sdk::Vec::new(&env);
+    signers_2.push_back(admin.clone());
+    signers_2.push_back(b.clone());
+    client.set_signers(&one(&env, &admin), &signers_2, &2u32);
+
+    // The same signer listed twice must not count as two approvals.
+    let mut dup = soroban_sdk::Vec::new(&env);
+    dup.push_back(admin.clone());
+    dup.push_back(admin.clone());
+    let result = client.try_pause(&dup);
+    assert!(result.is_err(), "a duplicated signer must not satisfy a threshold of two");
+}
+
+#[test]
+fn test_set_signers_unauthorized_panics() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let admin = Address::generate(&env);
+    let contract_id = env.register(RegistryContract, (admin.clone(),));
+    let client = super::RegistryContractClient::new(&env, &contract_id);
+    let outsider = Address::generate(&env);
+    let new_signers = one(&env, &Address::generate(&env));
+
+    let result = client.try_set_signers(&one(&env, &outsider), &new_signers, &1u32);
+    assert!(result.is_err(), "a non-signer must not be able to reconfigure the admin set");
+}
+
+#[test]
+fn test_set_signers_rejects_invalid_threshold() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let admin = Address::generate(&env);
+    let contract_id = env.register(RegistryContract, (admin.clone(),));
+    let client = super::RegistryContractClient::new(&env, &contract_id);
+    let b = Address::generate(&env);
+    let mut two_signers = soroban_sdk::Vec::new(&env);
+    two_signers.push_back(admin.clone());
+    two_signers.push_back(b.clone());
+
+    // threshold 0 is never satisfiable and is rejected outright.
+    let result = client.try_set_signers(&one(&env, &admin), &two_signers, &0u32);
+    assert!(result.is_err());
+
+    // threshold above the signer count could never be met.
+    let result = client.try_set_signers(&one(&env, &admin), &two_signers, &3u32);
+    assert!(result.is_err());
+}
+
+#[test]
+fn test_set_signers_rejects_empty_and_duplicate_signers() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let admin = Address::generate(&env);
+    let contract_id = env.register(RegistryContract, (admin.clone(),));
+    let client = super::RegistryContractClient::new(&env, &contract_id);
+
+    let empty: soroban_sdk::Vec<Address> = soroban_sdk::Vec::new(&env);
+    let result = client.try_set_signers(&one(&env, &admin), &empty, &1u32);
+    assert!(result.is_err(), "an empty signer set is never satisfiable");
+
+    let mut dup_signers = soroban_sdk::Vec::new(&env);
+    dup_signers.push_back(admin.clone());
+    dup_signers.push_back(admin.clone());
+    let result = client.try_set_signers(&one(&env, &admin), &dup_signers, &2u32);
+    assert!(result.is_err(), "a duplicate address would let one key count twice");
+}
+
+#[test]
+fn test_transfer_admin_collapses_multisig_back_to_single_admin() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let admin = Address::generate(&env);
+    let contract_id = env.register(RegistryContract, (admin.clone(),));
+    let client = super::RegistryContractClient::new(&env, &contract_id);
+
+    let b = Address::generate(&env);
+    let mut two_signers = soroban_sdk::Vec::new(&env);
+    two_signers.push_back(admin.clone());
+    two_signers.push_back(b.clone());
+    client.set_signers(&one(&env, &admin), &two_signers, &2u32);
+
+    let new_admin = Address::generate(&env);
+    let mut both = soroban_sdk::Vec::new(&env);
+    both.push_back(admin.clone());
+    both.push_back(b.clone());
+    client.transfer_admin(&both, &new_admin);
+
+    let cfg = client.get_admin_config();
+    assert_eq!(cfg.signers.len(), 1);
+    assert_eq!(cfg.signers.get(0).unwrap(), new_admin);
+    assert_eq!(cfg.threshold, 1);
+    // Single-admin bootstrap behavior is restored: one signature suffices.
+    client.pause(&one(&env, &new_admin));
+    assert!(client.contract_is_paused());
+}
+
+// ─── Threshold boundary tests (issue #128 acceptance criteria) ─────────────────
+//
+// These tests explicitly cover the "exactly N, N-1, N+1" threshold
+// boundary: a 2-of-3 set, a 1-of-1 set, and a 3-of-3 set. Each case
+// verifies that exactly N signers succeed, N-1 signers fail, and
+// (where applicable) N+1 signers also succeed.
+
+/// 2-of-3 threshold: exactly 2 signers (N) must authorize, 1 (N-1) must not,
+/// and 3 (N+1) must also succeed.
+#[test]
+fn test_threshold_2_of_3_boundary() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let admin = Address::generate(&env);
+    let contract_id = env.register(RegistryContract, (admin.clone(),));
+    let client = super::RegistryContractClient::new(&env, &contract_id);
+
+    let b = Address::generate(&env);
+    let c = Address::generate(&env);
+    let mut signers_3 = soroban_sdk::Vec::new(&env);
+    signers_3.push_back(admin.clone());
+    signers_3.push_back(b.clone());
+    signers_3.push_back(c.clone());
+    client.set_signers(&one(&env, &admin), &signers_3, &2u32);
+
+    // N-1 (1 of 2 required) must fail.
+    let result = client.try_set_fee(&one(&env, &admin), &100u32);
+    assert!(result.is_err(), "N-1 (1 of 2) must not authorize a fee change");
+
+    // N (exactly 2 of 2 required) must succeed.
+    let mut exactly_2 = soroban_sdk::Vec::new(&env);
+    exactly_2.push_back(admin.clone());
+    exactly_2.push_back(b.clone());
+    client.set_fee(&exactly_2, &100u32);
+    assert_eq!(client.get_fee(), 100);
+
+    // N+1 (3 of 2 required) must also succeed.
+    let mut all_3 = soroban_sdk::Vec::new(&env);
+    all_3.push_back(admin.clone());
+    all_3.push_back(b.clone());
+    all_3.push_back(c.clone());
+    client.set_fee(&all_3, &200u32);
+    assert_eq!(client.get_fee(), 200);
+}
+
+/// 1-of-1 threshold: exactly 1 signer (N) must authorize, 0 (N-1) must not.
+#[test]
+fn test_threshold_1_of_1_boundary() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let admin = Address::generate(&env);
+    let contract_id = env.register(RegistryContract, (admin.clone(),));
+    let client = super::RegistryContractClient::new(&env, &contract_id);
+
+    // Bootstrap mode is already 1-of-1.
+    // N-1 (0 signers) must fail.
+    let empty: soroban_sdk::Vec<Address> = soroban_sdk::Vec::new(&env);
+    let result = client.try_set_fee(&empty, &50u32);
+    assert!(result.is_err(), "N-1 (0 of 1) must not authorize a fee change");
+
+    // N (exactly 1 of 1 required) must succeed.
+    client.set_fee(&one(&env, &admin), &50u32);
+    assert_eq!(client.get_fee(), 50);
+}
+
+/// 3-of-3 threshold: exactly 3 signers (N) must authorize, 2 (N-1) must not.
+#[test]
+fn test_threshold_3_of_3_boundary() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let admin = Address::generate(&env);
+    let contract_id = env.register(RegistryContract, (admin.clone(),));
+    let client = super::RegistryContractClient::new(&env, &contract_id);
+
+    let b = Address::generate(&env);
+    let c = Address::generate(&env);
+    let mut signers_3 = soroban_sdk::Vec::new(&env);
+    signers_3.push_back(admin.clone());
+    signers_3.push_back(b.clone());
+    signers_3.push_back(c.clone());
+    client.set_signers(&one(&env, &admin), &signers_3, &3u32);
+
+    // N-1 (2 of 3 required) must fail.
+    let mut two = soroban_sdk::Vec::new(&env);
+    two.push_back(admin.clone());
+    two.push_back(b.clone());
+    let result = client.try_set_fee(&two, &100u32);
+    assert!(result.is_err(), "N-1 (2 of 3) must not authorize a fee change");
+
+    // N (exactly 3 of 3 required) must succeed.
+    let mut all_3 = soroban_sdk::Vec::new(&env);
+    all_3.push_back(admin.clone());
+    all_3.push_back(b.clone());
+    all_3.push_back(c.clone());
+    client.set_fee(&all_3, &100u32);
+    assert_eq!(client.get_fee(), 100);
+}
+
+/// 2-of-3 threshold tested on a non-pause admin op (set_rate) to verify
+/// the threshold check is applied uniformly across all admin-gated functions.
+#[test]
+fn test_threshold_boundary_on_set_rate() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let admin = Address::generate(&env);
+    let contract_id = env.register(RegistryContract, (admin.clone(),));
+    let client = super::RegistryContractClient::new(&env, &contract_id);
+
+    let b = Address::generate(&env);
+    let c = Address::generate(&env);
+    let mut signers_3 = soroban_sdk::Vec::new(&env);
+    signers_3.push_back(admin.clone());
+    signers_3.push_back(b.clone());
+    signers_3.push_back(c.clone());
+    client.set_signers(&one(&env, &admin), &signers_3, &2u32);
+
+    // N-1 (1 of 2) must fail.
+    let result = client.try_set_rate(&one(&env, &admin), &RiskTier::A, &500u32);
+    assert!(result.is_err(), "N-1 must not authorize a rate change");
+
+    // N (exactly 2 of 2) must succeed.
+    let mut exactly_2 = soroban_sdk::Vec::new(&env);
+    exactly_2.push_back(admin.clone());
+    exactly_2.push_back(c.clone());
+    client.set_rate(&exactly_2, &RiskTier::A, &500u32);
+    assert_eq!(client.get_rate(&RiskTier::A), 500);
+}
+
+/// set_signers itself is threshold-gated by the current config. Test that
+/// N-1 signers cannot reconfigure the admin set.
+#[test]
+fn test_threshold_boundary_on_set_signers() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let admin = Address::generate(&env);
+    let contract_id = env.register(RegistryContract, (admin.clone(),));
+    let client = super::RegistryContractClient::new(&env, &contract_id);
+
+    let b = Address::generate(&env);
+    let c = Address::generate(&env);
+    let mut signers_3 = soroban_sdk::Vec::new(&env);
+    signers_3.push_back(admin.clone());
+    signers_3.push_back(b.clone());
+    signers_3.push_back(c.clone());
+    client.set_signers(&one(&env, &admin), &signers_3, &2u32);
+
+    let new_admin = Address::generate(&env);
+    let new_signers = one(&env, &new_admin);
+
+    // N-1 (1 of 2) must fail.
+    let result = client.try_set_signers(&one(&env, &admin), &new_signers, &1u32);
+    assert!(result.is_err(), "N-1 must not authorize set_signers");
+
+    // N (exactly 2 of 2) must succeed.
+    let mut exactly_2 = soroban_sdk::Vec::new(&env);
+    exactly_2.push_back(admin.clone());
+    exactly_2.push_back(b.clone());
+    client.set_signers(&exactly_2, &new_signers, &1u32);
+    let cfg = client.get_admin_config();
+    assert_eq!(cfg.threshold, 1);
+    assert_eq!(cfg.signers.get(0).unwrap(), new_admin);
+}
 
 #[test]
 fn test_pause_and_unpause() {
@@ -644,9 +1012,9 @@ fn test_pause_and_unpause() {
     let client = super::RegistryContractClient::new(&env, &contract_id);
 
     assert!(!client.contract_is_paused());
-    client.pause(&admin);
+    client.pause(&one(&env, &admin));
     assert!(client.contract_is_paused());
-    client.unpause(&admin);
+    client.unpause(&one(&env, &admin));
     assert!(!client.contract_is_paused());
 }
 
@@ -661,7 +1029,7 @@ fn test_register_invoice_while_paused_panics() {
     let client = super::RegistryContractClient::new(&env, &contract_id);
     let originator = Address::generate(&env);
 
-    client.pause(&admin);
+    client.pause(&one(&env, &admin));
     client.register_invoice(
         &symbol_short!("inv_p1"),
         &originator,
@@ -681,7 +1049,7 @@ fn test_pause_unauthorized_panics() {
     let client = super::RegistryContractClient::new(&env, &contract_id);
     let not_admin = Address::generate(&env);
 
-    client.pause(&not_admin);
+    client.pause(&one(&env, &not_admin));
 }
 
 #[test]
@@ -694,8 +1062,8 @@ fn test_pause_blocks_transfer_admin() {
     let client = super::RegistryContractClient::new(&env, &contract_id);
     let new_admin = Address::generate(&env);
 
-    client.pause(&admin);
-    client.transfer_admin(&admin, &new_admin);
+    client.pause(&one(&env, &admin));
+    client.transfer_admin(&one(&env, &admin), &new_admin);
 }
 
 #[test]
@@ -706,7 +1074,7 @@ fn test_pause_blocks_all_registry_state_changes() {
     let contract_id = env.register(RegistryContract, (admin.clone(),));
     let client = super::RegistryContractClient::new(&env, &contract_id);
 
-    client.pause(&admin);
+    client.pause(&one(&env, &admin));
     let originator = Address::generate(&env);
     let other = Address::generate(&env);
     let financing = Address::generate(&env);
@@ -716,10 +1084,7 @@ fn test_pause_blocks_all_registry_state_changes() {
 
     fn assert_paused<F: FnOnce()>(f: F) {
         let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(f));
-        assert!(
-            result.is_err(),
-            "state-changing function should panic while paused"
-        );
+        assert!(result.is_err(), "state-changing function should panic while paused");
     }
 
     assert_paused(|| {
@@ -763,39 +1128,36 @@ fn test_pause_blocks_all_registry_state_changes() {
         client.raise_dispute(&invoice_id, &originator);
     });
     assert_paused(|| {
-        client.resolve_dispute(
-            &admin,
-            &invoice_id,
-            &invofi_common::InvoiceStatus::Cancelled,
-        );
+        client.resolve_dispute(&one(&env, &admin), &invoice_id, &invofi_common::InvoiceStatus::Cancelled);
     });
     assert_paused(|| {
-        client.blacklist_address(&admin, &other);
+        client.blacklist_address(&one(&env, &admin), &other);
     });
     assert_paused(|| {
-        client.unblacklist_address(&admin, &other);
+        client.unblacklist_address(&one(&env, &admin), &other);
     });
     assert_paused(|| {
-        client.transfer_admin(&admin, &new_admin);
+        client.transfer_admin(&one(&env, &admin), &new_admin);
     });
     assert_paused(|| {
-        client.set_financing_contract(&admin, &financing);
+        client.set_financing_contract(&one(&env, &admin), &financing);
     });
     assert_paused(|| {
-        client.set_repayment_contract(&admin, &repayment);
+        client.set_repayment_contract(&one(&env, &admin), &repayment);
     });
     assert_paused(|| {
-        client.set_rate(&admin, &invofi_common::RiskTier::A, &500u32);
+        client.set_rate(&one(&env, &admin), &invofi_common::RiskTier::A, &500u32);
     });
     assert_paused(|| {
-        client.set_fee(&admin, &50u32);
+        client.set_fee(&one(&env, &admin), &50u32);
     });
 
     assert_eq!(client.get_fee(), 0);
     assert_eq!(client.get_all_invoices().len(), 0);
 }
 
-// ─── Rate oracle tests ───────────────────────────────────────────────────────
+
+// ─── Pause tests ──────────────────────────────────────────────────────────────
 
 #[test]
 fn test_set_and_get_rate() {
@@ -805,9 +1167,9 @@ fn test_set_and_get_rate() {
     let contract_id = env.register(RegistryContract, (admin.clone(),));
     let client = super::RegistryContractClient::new(&env, &contract_id);
 
-    client.set_rate(&admin, &RiskTier::A, &500u32);
-    client.set_rate(&admin, &RiskTier::B, &800u32);
-    client.set_rate(&admin, &RiskTier::C, &1200u32);
+    client.set_rate(&one(&env, &admin), &RiskTier::A, &500u32);
+    client.set_rate(&one(&env, &admin), &RiskTier::B, &800u32);
+    client.set_rate(&one(&env, &admin), &RiskTier::C, &1200u32);
 
     assert_eq!(client.get_rate(&RiskTier::A), 500);
     assert_eq!(client.get_rate(&RiskTier::B), 800);
@@ -823,7 +1185,7 @@ fn test_set_rate_out_of_range_panics() {
     let contract_id = env.register(RegistryContract, (admin.clone(),));
     let client = super::RegistryContractClient::new(&env, &contract_id);
 
-    client.set_rate(&admin, &RiskTier::A, &10_001u32);
+    client.set_rate(&one(&env, &admin), &RiskTier::A, &10_001u32);
 }
 
 #[test]
@@ -836,7 +1198,7 @@ fn test_set_rate_unauthorized_panics() {
     let client = super::RegistryContractClient::new(&env, &contract_id);
     let not_admin = Address::generate(&env);
 
-    client.set_rate(&not_admin, &RiskTier::A, &500u32);
+    client.set_rate(&one(&env, &not_admin), &RiskTier::A, &500u32);
 }
 
 #[test]
@@ -862,7 +1224,7 @@ fn test_set_and_get_fee() {
     let client = super::RegistryContractClient::new(&env, &contract_id);
 
     assert_eq!(client.get_fee(), 0);
-    client.set_fee(&admin, &200u32);
+    client.set_fee(&one(&env, &admin), &200u32);
     assert_eq!(client.get_fee(), 200);
 }
 
@@ -875,7 +1237,7 @@ fn test_set_fee_too_high_panics() {
     let contract_id = env.register(RegistryContract, (admin.clone(),));
     let client = super::RegistryContractClient::new(&env, &contract_id);
 
-    client.set_fee(&admin, &600u32);
+    client.set_fee(&one(&env, &admin), &600u32);
 }
 
 // ─── Blacklist tests ───────────────────────────────────────────────────────────
@@ -892,15 +1254,15 @@ fn test_blacklist_and_unblacklist() {
 
     assert!(!client.is_blacklisted(&bad_actor));
 
-    client.blacklist_address(&admin, &bad_actor);
+    client.blacklist_address(&one(&env, &admin), &bad_actor);
     assert!(client.is_blacklisted(&bad_actor));
     assert_eq!(client.get_blacklist().len(), 1);
 
     // Idempotent
-    client.blacklist_address(&admin, &bad_actor);
+    client.blacklist_address(&one(&env, &admin), &bad_actor);
     assert_eq!(client.get_blacklist().len(), 1);
 
-    client.unblacklist_address(&admin, &bad_actor);
+    client.unblacklist_address(&one(&env, &admin), &bad_actor);
     assert!(!client.is_blacklisted(&bad_actor));
     assert_eq!(client.get_blacklist().len(), 0);
 }
@@ -916,7 +1278,7 @@ fn test_blacklisted_cannot_register_invoice() {
     let client = super::RegistryContractClient::new(&env, &contract_id);
     let bad_actor = Address::generate(&env);
 
-    client.blacklist_address(&admin, &bad_actor);
+    client.blacklist_address(&one(&env, &admin), &bad_actor);
     client.register_invoice(
         &symbol_short!("bl1"),
         &bad_actor,
@@ -937,7 +1299,7 @@ fn test_blacklist_non_admin_panics() {
     let non_admin = Address::generate(&env);
     let victim = Address::generate(&env);
 
-    client.blacklist_address(&non_admin, &victim);
+    client.blacklist_address(&one(&env, &non_admin), &victim);
 }
 
 // ─── Stats tests ───────────────────────────────────────────────────────────────
@@ -1143,7 +1505,7 @@ fn test_repayment_marks_defaulted_transition() {
     let invoice_id = symbol_short!("inv_df1");
     let due_date: u64 = 1_735_689_600;
 
-    client.set_repayment_contract(&admin, &repayment);
+    client.set_repayment_contract(&one(&env, &admin), &repayment);
 
     client.register_invoice(
         &invoice_id,
@@ -1182,7 +1544,7 @@ fn test_repayment_marks_defaulted_requires_overdue() {
     let invoice_id = symbol_short!("inv_df2");
     let due_date: u64 = 1_735_689_600;
 
-    client.set_repayment_contract(&admin, &repayment);
+    client.set_repayment_contract(&one(&env, &admin), &repayment);
 
     client.register_invoice(
         &invoice_id,
@@ -1209,8 +1571,8 @@ fn test_state_machine_valid_transitions() {
     let financing = Address::generate(&env);
     let repayment = Address::generate(&env);
 
-    client.set_financing_contract(&admin, &financing);
-    client.set_repayment_contract(&admin, &repayment);
+    client.set_financing_contract(&one(&env, &admin), &financing);
+    client.set_repayment_contract(&one(&env, &admin), &repayment);
 
     let invoice_id = symbol_short!("sm001");
     let due_date: u64 = 1_735_689_600;
@@ -1271,7 +1633,7 @@ fn test_state_machine_financed_to_overdue() {
     let originator = Address::generate(&env);
     let financing = Address::generate(&env);
 
-    client.set_financing_contract(&admin, &financing);
+    client.set_financing_contract(&one(&env, &admin), &financing);
 
     let invoice_id = symbol_short!("sm003");
     let due_date: u64 = 100; // Past ledger timestamp
@@ -1302,7 +1664,7 @@ fn test_state_machine_financed_to_disputed_to_resolved() {
     let originator = Address::generate(&env);
     let financing = Address::generate(&env);
 
-    client.set_financing_contract(&admin, &financing);
+    client.set_financing_contract(&one(&env, &admin), &financing);
 
     let invoice_id = symbol_short!("sm004");
     client.register_invoice(
@@ -1321,14 +1683,14 @@ fn test_state_machine_financed_to_disputed_to_resolved() {
     assert_eq!(disputed.status, InvoiceStatus::Disputed);
 
     // Disputed -> Financed (admin resolution)
-    let resolved = client.resolve_dispute(&admin, &invoice_id, &InvoiceStatus::Financed);
+    let resolved = client.resolve_dispute(&one(&env, &admin), &invoice_id, &InvoiceStatus::Financed);
     assert_eq!(resolved.status, InvoiceStatus::Financed);
 
     // Financed -> Disputed (again)
     client.raise_dispute(&invoice_id, &originator);
 
     // Disputed -> Cancelled (admin resolution)
-    let resolved2 = client.resolve_dispute(&admin, &invoice_id, &InvoiceStatus::Cancelled);
+    let resolved2 = client.resolve_dispute(&one(&env, &admin), &invoice_id, &InvoiceStatus::Cancelled);
     assert_eq!(resolved2.status, InvoiceStatus::Cancelled);
 }
 
@@ -1343,7 +1705,7 @@ fn test_state_machine_invalid_repaid_from_pending() {
     let originator = Address::generate(&env);
     let repayment = Address::generate(&env);
 
-    client.set_repayment_contract(&admin, &repayment);
+    client.set_repayment_contract(&one(&env, &admin), &repayment);
 
     let invoice_id = symbol_short!("sm_bad1");
     client.register_invoice(
@@ -1370,8 +1732,8 @@ fn test_state_machine_invalid_financed_from_repaid() {
     let financing = Address::generate(&env);
     let repayment = Address::generate(&env);
 
-    client.set_financing_contract(&admin, &financing);
-    client.set_repayment_contract(&admin, &repayment);
+    client.set_financing_contract(&one(&env, &admin), &financing);
+    client.set_repayment_contract(&one(&env, &admin), &repayment);
 
     let invoice_id = symbol_short!("sm_bad2");
     client.register_invoice(
@@ -1402,8 +1764,8 @@ fn test_state_machine_invalid_overdue_from_repaid() {
     let financing = Address::generate(&env);
     let repayment = Address::generate(&env);
 
-    client.set_financing_contract(&admin, &financing);
-    client.set_repayment_contract(&admin, &repayment);
+    client.set_financing_contract(&one(&env, &admin), &financing);
+    client.set_repayment_contract(&one(&env, &admin), &repayment);
 
     let invoice_id = symbol_short!("sm_bad3");
     client.register_invoice(
@@ -1454,7 +1816,7 @@ fn test_transition_history_recorded() {
     let originator = Address::generate(&env);
     let financing = Address::generate(&env);
 
-    client.set_financing_contract(&admin, &financing);
+    client.set_financing_contract(&one(&env, &admin), &financing);
 
     let invoice_id = symbol_short!("sm_hist");
     client.register_invoice(
@@ -1470,10 +1832,7 @@ fn test_transition_history_recorded() {
 
     // Query transition history
     let history = client.get_transition_history(&invoice_id);
-    assert!(
-        !history.is_empty(),
-        "Transition history should not be empty"
-    );
+    assert!(!history.is_empty(), "Transition history should not be empty");
     assert_eq!(history.len(), 1, "Should have one transition recorded");
 
     let first = history.first().unwrap();
@@ -1494,8 +1853,8 @@ fn test_transition_history_multiple_transitions() {
     let financing = Address::generate(&env);
     let repayment = Address::generate(&env);
 
-    client.set_financing_contract(&admin, &financing);
-    client.set_repayment_contract(&admin, &repayment);
+    client.set_financing_contract(&one(&env, &admin), &financing);
+    client.set_repayment_contract(&one(&env, &admin), &repayment);
 
     let invoice_id = symbol_short!("sm_multi");
     client.register_invoice(
@@ -1574,7 +1933,7 @@ fn test_transition_events_emitted() {
     let originator = Address::generate(&env);
     let financing = Address::generate(&env);
 
-    client.set_financing_contract(&admin, &financing);
+    client.set_financing_contract(&one(&env, &admin), &financing);
 
     let invoice_id = symbol_short!("sm_evt");
     client.register_invoice(
@@ -1593,7 +1952,10 @@ fn test_transition_events_emitted() {
 
     let events = env.events().all();
     // Should have transition events
-    assert!(!events.is_empty(), "Should emit events on state transition");
+    assert!(
+        !events.is_empty(),
+        "Should emit events on state transition"
+    );
 }
 
 // ─── Verification oracle (issue #181) ────────────────────────────────────────
@@ -1635,7 +1997,7 @@ fn setup_oracle<'a>(
         &symbol_short!("USDC"),
         &(9_000_000u64),
     );
-    client.add_verifier(&admin, &verifier);
+    client.add_verifier(&one(&env, &admin), &verifier);
 
     (client, admin, originator, verifier)
 }
@@ -1654,14 +2016,14 @@ fn test_verifier_set_management() {
 
     // add_verifier is idempotent — re-adding must not double-count a verifier
     // towards an m-of-n threshold.
-    client.add_verifier(&admin, &verifier);
+    client.add_verifier(&one(&env, &admin), &verifier);
     assert_eq!(client.get_verifiers().len(), 1);
 
     let second = Address::generate(&env);
-    client.add_verifier(&admin, &second);
+    client.add_verifier(&one(&env, &admin), &second);
     assert_eq!(client.get_verifiers().len(), 2);
 
-    client.remove_verifier(&admin, &verifier);
+    client.remove_verifier(&one(&env, &admin), &verifier);
     assert!(!client.is_verifier(&verifier));
     assert!(client.is_verifier(&second));
 }
@@ -1676,7 +2038,7 @@ fn test_add_verifier_is_admin_only() {
     let invoice_id = symbol_short!("vinv02");
     let (client, _admin, originator, _verifier) = setup_oracle(&env, &invoice_id, 1_000_000_000);
 
-    client.add_verifier(&originator, &Address::generate(&env));
+    client.add_verifier(&one(&env, &originator), &Address::generate(&env));
 }
 
 #[test]
@@ -1798,7 +2160,7 @@ fn test_rejection_outranks_approvals() {
     let invoice_id = symbol_short!("vinv06");
     let (client, admin, _originator, verifier) = setup_oracle(&env, &invoice_id, 1_000_000_000);
     let second = Address::generate(&env);
-    client.add_verifier(&admin, &second);
+    client.add_verifier(&one(&env, &admin), &second);
 
     client.attest(
         &invoice_id,
@@ -1836,8 +2198,8 @@ fn test_threshold_requires_distinct_verifiers() {
     let invoice_id = symbol_short!("vinv07");
     let (client, admin, _originator, verifier) = setup_oracle(&env, &invoice_id, 1_000_000_000);
     let second = Address::generate(&env);
-    client.add_verifier(&admin, &second);
-    client.set_verifier_threshold(&admin, &2u32);
+    client.add_verifier(&one(&env, &admin), &second);
+    client.set_verifier_threshold(&one(&env, &admin), &2u32);
     assert_eq!(client.get_verifier_threshold(), 2);
 
     client.attest(
@@ -1891,7 +2253,7 @@ fn test_zero_verifier_threshold_panics() {
     let invoice_id = symbol_short!("vinv08");
     let (client, admin, _originator, _verifier) = setup_oracle(&env, &invoice_id, 1_000_000_000);
 
-    client.set_verifier_threshold(&admin, &0u32);
+    client.set_verifier_threshold(&one(&env, &admin), &0u32);
 }
 
 // ── Fees ─────────────────────────────────────────────────────────────────────
@@ -1910,8 +2272,8 @@ fn test_verification_fee_is_charged_to_the_originator() {
     let token_admin = Address::generate(&env);
     let sac = env.register_stellar_asset_contract_v2(token_admin);
     let token_id = sac.address();
-    client.register_currency(&admin, &symbol_short!("USDC"), &token_id);
-    client.set_verification_fee(&admin, &50u32);
+    client.register_currency(&one(&env, &admin), &symbol_short!("USDC"), &token_id);
+    client.set_verification_fee(&one(&env, &admin), &50u32);
     assert_eq!(client.calculate_verification_fee(&invoice_id), 5_000_000);
 
     token::StellarAssetClient::new(&env, &token_id).mint(&originator, &amount);
@@ -1950,8 +2312,8 @@ fn test_fee_is_charged_on_rejection_too() {
     let token_admin = Address::generate(&env);
     let sac = env.register_stellar_asset_contract_v2(token_admin);
     let token_id = sac.address();
-    client.register_currency(&admin, &symbol_short!("USDC"), &token_id);
-    client.set_verification_fee(&admin, &100u32);
+    client.register_currency(&one(&env, &admin), &symbol_short!("USDC"), &token_id);
+    client.set_verification_fee(&one(&env, &admin), &100u32);
 
     token::StellarAssetClient::new(&env, &token_id).mint(&originator, &amount);
     token::TokenClient::new(&env, &token_id).approve(
@@ -2016,7 +2378,7 @@ fn test_nonzero_fee_without_a_registered_token_panics() {
     let invoice_id = symbol_short!("vinv12");
     let (client, admin, _originator, verifier) = setup_oracle(&env, &invoice_id, 1_000_000_000);
 
-    client.set_verification_fee(&admin, &50u32);
+    client.set_verification_fee(&one(&env, &admin), &50u32);
     client.attest(
         &invoice_id,
         &verifier,
@@ -2036,7 +2398,7 @@ fn test_verification_fee_above_ceiling_panics() {
     let invoice_id = symbol_short!("vinv13");
     let (client, admin, _originator, _verifier) = setup_oracle(&env, &invoice_id, 1_000_000_000);
 
-    client.set_verification_fee(&admin, &501u32);
+    client.set_verification_fee(&one(&env, &admin), &501u32);
 }
 
 #[test]
@@ -2049,11 +2411,11 @@ fn test_fee_math_rounds_down_and_does_not_overflow() {
     // 1 bps of 19 999 999 stroops is 1 999.9999 -> 1 999: the division
     // happens last and truncates in the payer's favour.
     let (client, admin, _originator, _verifier) = setup_oracle(&env, &invoice_id, 19_999_999);
-    client.set_verification_fee(&admin, &1u32);
+    client.set_verification_fee(&one(&env, &admin), &1u32);
     assert_eq!(client.calculate_verification_fee(&invoice_id), 1_999);
 
     // 500 bps of the same is 999 999.95 -> 999 999, truncated the same way.
-    client.set_verification_fee(&admin, &500u32);
+    client.set_verification_fee(&one(&env, &admin), &500u32);
     assert_eq!(client.calculate_verification_fee(&invoice_id), 999_999);
 }
 
@@ -2069,7 +2431,7 @@ fn test_fee_math_overflow_reverts_instead_of_wrapping() {
     // small (or negative) fee.
     let invoice_id = symbol_short!("vinv15");
     let (client, admin, _originator, _verifier) = setup_oracle(&env, &invoice_id, i128::MAX);
-    client.set_verification_fee(&admin, &500u32);
+    client.set_verification_fee(&one(&env, &admin), &500u32);
     client.calculate_verification_fee(&invoice_id);
 }
 
@@ -2196,7 +2558,7 @@ fn test_attestation_validity_is_configurable_and_not_retroactive() {
     let (client, admin, _originator, verifier) = setup_oracle(&env, &invoice_id, 1_000_000_000);
 
     assert_eq!(client.get_attestation_validity(), 7_776_000);
-    client.set_attestation_validity(&admin, &86_400u64);
+    client.set_attestation_validity(&one(&env, &admin), &86_400u64);
 
     let first = client.attest(
         &invoice_id,
@@ -2208,7 +2570,7 @@ fn test_attestation_validity_is_configurable_and_not_retroactive() {
     assert_eq!(first.valid_until, 1_000_000 + 86_400);
 
     // Widening the setting must not extend an attestation already submitted.
-    client.set_attestation_validity(&admin, &31_536_000u64);
+    client.set_attestation_validity(&one(&env, &admin), &31_536_000u64);
     let stored = client.get_verifications(&invoice_id).get(0).unwrap();
     assert_eq!(stored.valid_until, 1_000_000 + 86_400);
     env.ledger().set_timestamp(1_000_000 + 86_401);
@@ -2228,7 +2590,7 @@ fn test_attestation_validity_below_minimum_panics() {
     let invoice_id = symbol_short!("vinv19");
     let (client, admin, _originator, _verifier) = setup_oracle(&env, &invoice_id, 1_000_000_000);
 
-    client.set_attestation_validity(&admin, &86_399u64);
+    client.set_attestation_validity(&one(&env, &admin), &86_399u64);
 }
 
 #[test]
@@ -2241,7 +2603,7 @@ fn test_attestation_validity_above_maximum_panics() {
     let invoice_id = symbol_short!("vinv20");
     let (client, admin, _originator, _verifier) = setup_oracle(&env, &invoice_id, 1_000_000_000);
 
-    client.set_attestation_validity(&admin, &31_536_001u64);
+    client.set_attestation_validity(&one(&env, &admin), &31_536_001u64);
 }
 
 // ── Guards ───────────────────────────────────────────────────────────────────
@@ -2295,7 +2657,7 @@ fn test_attest_is_pause_guarded() {
     let invoice_id = symbol_short!("vinv23");
     let (client, admin, _originator, verifier) = setup_oracle(&env, &invoice_id, 1_000_000_000);
 
-    client.pause(&admin);
+    client.pause(&one(&env, &admin));
     client.attest(
         &invoice_id,
         &verifier,
@@ -2334,7 +2696,7 @@ fn test_removed_verifier_cannot_attest_but_keeps_its_history() {
         &evidence_hash(&env, 1),
         &true,
     );
-    client.remove_verifier(&admin, &verifier);
+    client.remove_verifier(&one(&env, &admin), &verifier);
 
     // The record of what they said survives removal — that is the point of
     // storing it.
@@ -2360,8 +2722,8 @@ fn test_removal_revokes_a_contributing_approval_and_a_rejection() {
     let invoice_id = symbol_short!("vinv26");
     let (client, admin, _originator, first) = setup_oracle(&env, &invoice_id, 1_000_000_000);
     let second = Address::generate(&env);
-    client.add_verifier(&admin, &second);
-    client.set_verifier_threshold(&admin, &2u32);
+    client.add_verifier(&one(&env, &admin), &second);
+    client.set_verifier_threshold(&one(&env, &admin), &2u32);
 
     // Two approvals clear the threshold.
     client.attest(
@@ -2384,7 +2746,7 @@ fn test_removal_revokes_a_contributing_approval_and_a_rejection() {
     );
 
     // Removing one of them drops the live approval count below the threshold.
-    client.remove_verifier(&admin, &second);
+    client.remove_verifier(&one(&env, &admin), &second);
     assert_eq!(
         client.get_verification_status(&invoice_id, &VerificationType::DocumentHash),
         VerificationStatus::Pending,
@@ -2404,7 +2766,7 @@ fn test_removal_revokes_a_contributing_approval_and_a_rejection() {
         client.get_verification_status(&invoice_id, &VerificationType::TaxCompliance),
         VerificationStatus::Rejected
     );
-    client.remove_verifier(&admin, &first);
+    client.remove_verifier(&one(&env, &admin), &first);
     assert_eq!(
         client.get_verification_status(&invoice_id, &VerificationType::TaxCompliance),
         VerificationStatus::Pending,
@@ -2436,7 +2798,7 @@ fn test_eviction_cannot_disturb_another_types_status() {
     // Fill the invoice to its cap with departed verifiers.
     for round in 0..20u8 {
         let rotating = Address::generate(&env);
-        client.add_verifier(&admin, &rotating);
+        client.add_verifier(&one(&env, &admin), &rotating);
         for (offset, v_type) in types.iter().enumerate() {
             client.attest(
                 &invoice_id,
@@ -2446,13 +2808,13 @@ fn test_eviction_cannot_disturb_another_types_status() {
                 &true,
             );
         }
-        client.remove_verifier(&admin, &rotating);
+        client.remove_verifier(&one(&env, &admin), &rotating);
     }
     assert_eq!(client.get_verifications(&invoice_id).len(), 60);
 
     // An active verifier vouches for one type, then another, forcing evictions.
     let active = Address::generate(&env);
-    client.add_verifier(&admin, &active);
+    client.add_verifier(&one(&env, &admin), &active);
     client.attest(
         &invoice_id,
         &active,
@@ -2535,7 +2897,7 @@ fn test_eviction_preserves_every_status_it_can_reach() {
     ];
     for round in 0..19u8 {
         let rotating = Address::generate(&env);
-        client.add_verifier(&admin, &rotating);
+        client.add_verifier(&one(&env, &admin), &rotating);
         for (offset, v_type) in types.iter().enumerate() {
             client.attest(
                 &invoice_id,
@@ -2545,13 +2907,13 @@ fn test_eviction_preserves_every_status_it_can_reach() {
                 &true,
             );
         }
-        client.remove_verifier(&admin, &rotating);
+        client.remove_verifier(&one(&env, &admin), &rotating);
     }
     assert_eq!(client.get_verifications(&invoice_id).len(), 59);
 
     // DocumentHash verified by a verifier who remains trusted and live.
     let active = Address::generate(&env);
-    client.add_verifier(&admin, &active);
+    client.add_verifier(&one(&env, &admin), &active);
     client.attest(
         &invoice_id,
         &active,
@@ -2569,7 +2931,7 @@ fn test_eviction_preserves_every_status_it_can_reach() {
     // are available -- so the live statements are untouched throughout.
     for n in 0..3u8 {
         let extra = Address::generate(&env);
-        client.add_verifier(&admin, &extra);
+        client.add_verifier(&one(&env, &admin), &extra);
         client.attest(
             &invoice_id,
             &extra,
@@ -2577,7 +2939,7 @@ fn test_eviction_preserves_every_status_it_can_reach() {
             &evidence_hash(&env, 200 + n),
             &true,
         );
-        client.remove_verifier(&admin, &extra);
+        client.remove_verifier(&one(&env, &admin), &extra);
     }
 
     // The guaranteed half: neither Verified nor Rejected moved.
@@ -2645,7 +3007,7 @@ fn test_eviction_cannot_fire_without_a_departed_record_to_take() {
     }
     for round in 0..19u8 {
         let v = Address::generate(&env);
-        client.add_verifier(&admin, &v);
+        client.add_verifier(&one(&env, &admin), &v);
         for (offset, v_type) in types.iter().enumerate() {
             client.attest(
                 &invoice_id,
@@ -2666,10 +3028,7 @@ fn test_eviction_cannot_fire_without_a_departed_record_to_take() {
         let mut found = 0u32;
         for a in c.get_verifications(&invoice_id).iter() {
             if a.verifier == first && a.v_type == VerificationType::BusinessRegistration {
-                assert!(
-                    a.valid_until < env.ledger().timestamp(),
-                    "record must be lapsed"
-                );
+                assert!(a.valid_until < env.ledger().timestamp(), "record must be lapsed");
                 found += 1;
             }
         }
@@ -2740,7 +3099,7 @@ fn test_verification_completed_is_emitted_once_per_status_change() {
     let invoice_id = symbol_short!("vinv27");
     let (client, admin, _originator, verifier) = setup_oracle(&env, &invoice_id, 1_000_000_000);
     let second = Address::generate(&env);
-    client.add_verifier(&admin, &second);
+    client.add_verifier(&one(&env, &admin), &second);
 
     // The test harness exposes the events of the most recent invocation, so
     // each attestation is checked as it lands.
@@ -2786,6 +3145,7 @@ fn count_events(env: &Env, name: Symbol) -> u32 {
     count
 }
 
+
 #[test]
 fn test_live_approval_below_threshold_reads_pending_not_expired() {
     let env = Env::default();
@@ -2795,8 +3155,8 @@ fn test_live_approval_below_threshold_reads_pending_not_expired() {
     let invoice_id = symbol_short!("vinv20");
     let (client, admin, _originator, first) = setup_oracle(&env, &invoice_id, 1_000_000_000);
     let second = Address::generate(&env);
-    client.add_verifier(&admin, &second);
-    client.set_verifier_threshold(&admin, &2u32);
+    client.add_verifier(&one(&env, &admin), &second);
+    client.set_verifier_threshold(&one(&env, &admin), &2u32);
 
     // Verifier one attests, then lets its attestation lapse.
     client.attest(
@@ -2806,7 +3166,8 @@ fn test_live_approval_below_threshold_reads_pending_not_expired() {
         &evidence_hash(&env, 1),
         &true,
     );
-    env.ledger().set_timestamp(1_000_000 + 7_776_000 + 1);
+    env.ledger()
+        .set_timestamp(1_000_000 + 7_776_000 + 1);
 
     // Verifier two now attests, so the type holds one live approval against a
     // threshold of two.
@@ -2829,7 +3190,7 @@ fn test_live_approval_below_threshold_reads_pending_not_expired() {
 
     // And once the threshold is met it flips to Verified.
     let third = Address::generate(&env);
-    client.add_verifier(&admin, &third);
+    client.add_verifier(&one(&env, &admin), &third);
     client.attest(
         &invoice_id,
         &third,
@@ -2859,7 +3220,8 @@ fn test_expired_reads_only_when_no_live_statement_remains() {
         &evidence_hash(&env, 1),
         &true,
     );
-    env.ledger().set_timestamp(1_000_000 + 7_776_000 + 1);
+    env.ledger()
+        .set_timestamp(1_000_000 + 7_776_000 + 1);
 
     assert_eq!(
         client.get_verification_status(&invoice_id, &VerificationType::TaxCompliance),
@@ -2886,7 +3248,7 @@ fn test_rotated_out_verifiers_cannot_lock_an_invoice() {
     ];
     for round in 0..20u8 {
         let rotating = Address::generate(&env);
-        client.add_verifier(&admin, &rotating);
+        client.add_verifier(&one(&env, &admin), &rotating);
         for (offset, v_type) in types.iter().enumerate() {
             client.attest(
                 &invoice_id,
@@ -2896,7 +3258,7 @@ fn test_rotated_out_verifiers_cannot_lock_an_invoice() {
                 &true,
             );
         }
-        client.remove_verifier(&admin, &rotating);
+        client.remove_verifier(&one(&env, &admin), &rotating);
     }
     assert_eq!(client.get_verifications(&invoice_id).len(), 60);
 
@@ -2904,7 +3266,7 @@ fn test_rotated_out_verifiers_cannot_lock_an_invoice() {
     // eviction policy this reverted, and the invoice could never be verified
     // again by anyone.
     let fresh = Address::generate(&env);
-    client.add_verifier(&admin, &fresh);
+    client.add_verifier(&one(&env, &admin), &fresh);
     client.attest(
         &invoice_id,
         &fresh,
@@ -2924,3 +3286,4 @@ fn test_rotated_out_verifiers_cannot_lock_an_invoice() {
         VerificationStatus::Verified
     );
 }
+

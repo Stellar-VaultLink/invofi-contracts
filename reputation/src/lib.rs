@@ -18,9 +18,15 @@
 //! `resolve_dispute` — the `-2` penalty stops counting against them. The
 //! rule is documented in ADR-0004 §7.
 
-use soroban_sdk::{contract, contractimpl, contracttype, symbol_short, Address, Env, Map};
+use soroban_sdk::{contract, contractimpl, contracttype, symbol_short, Address, Env, Map, Vec};
 
-use invofi_common::{assert_not_paused, ContractError};
+use invofi_common::{assert_not_paused, AdminConfig, ContractError};
+
+/// Threshold-gated admin check (ADR-0010). See `invofi_common::assert_threshold`.
+fn assert_admin(env: &Env, signers: &Vec<Address>) {
+    let cfg = invofi_common::load_admin_config(env);
+    invofi_common::assert_threshold(env, &cfg, signers);
+}
 
 /// Outcome discriminant for a successful full repayment.
 pub const OUTCOME_REPAID: u32 = 0;
@@ -65,35 +71,75 @@ impl ReputationContract {
     /// of the deploy operation, which only the deployer can authorize. There
     /// is therefore no separate initialize() call to front-run (issue #75).
     pub fn __constructor(env: Env, admin: Address) {
-        if env.storage().instance().has(&symbol_short!("admin")) {
-            panic!("Already initialized");
-        }
-        env.storage()
-            .instance()
-            .set(&symbol_short!("admin"), &admin);
+        invofi_common::init_admin_config(&env, &admin);
     }
 
+    /// Returns the primary admin address (the first configured signer). See
+    /// `RegistryContract::get_admin` for the same caveat under true M-of-N.
     pub fn get_admin(env: Env) -> Address {
-        env.storage()
-            .instance()
-            .get(&symbol_short!("admin"))
+        invofi_common::load_admin_config(&env)
+            .signers
+            .get(0)
             .unwrap_or_else(|| panic!("Not initialized"))
+    }
+
+    /// The full M-of-N admin governance config. See ADR-0010.
+    pub fn get_admin_config(env: Env) -> AdminConfig {
+        invofi_common::load_admin_config(&env)
+    }
+
+    /// The current signer set.
+    pub fn get_signers(env: Env) -> Vec<Address> {
+        invofi_common::load_admin_config(&env).signers
+    }
+
+    /// The current approval threshold.
+    pub fn get_threshold(env: Env) -> u32 {
+        invofi_common::load_admin_config(&env).threshold
+    }
+
+    /// Reconfigure the admin signer set and threshold. See
+    /// `RegistryContract::set_signers`.
+    pub fn set_signers(
+        env: Env,
+        signers: Vec<Address>,
+        new_signers: Vec<Address>,
+        new_threshold: u32,
+    ) {
+        assert_not_paused(&env);
+        assert_admin(&env, &signers);
+        invofi_common::validate_signers(&env, &new_signers, new_threshold);
+        invofi_common::save_admin_config(
+            &env,
+            &AdminConfig {
+                signers: new_signers,
+                threshold: new_threshold,
+            },
+        );
+    }
+
+    /// Transfers admin rights, collapsing the config back to a single new
+    /// admin. See `RegistryContract::transfer_admin`.
+    pub fn transfer_admin(env: Env, signers: Vec<Address>, new_admin: Address) {
+        assert_not_paused(&env);
+        assert_admin(&env, &signers);
+        let mut new_signers = Vec::new(&env);
+        new_signers.push_back(new_admin);
+        invofi_common::save_admin_config(
+            &env,
+            &AdminConfig {
+                signers: new_signers,
+                threshold: 1,
+            },
+        );
     }
 
     /// Configure the address allowed to record outcomes — this is the
     /// repayment contract. Admin only. Recording is disabled until a
     /// recorder is configured (fail-closed).
-    pub fn set_recorder(env: Env, admin: Address, recorder: Address) {
+    pub fn set_recorder(env: Env, signers: Vec<Address>, recorder: Address) {
         assert_not_paused(&env);
-        admin.require_auth();
-        let current: Address = env
-            .storage()
-            .instance()
-            .get(&symbol_short!("admin"))
-            .unwrap_or_else(|| panic!("Not initialized"));
-        if current != admin {
-            env.panic_with_error(ContractError::Unauthorized);
-        }
+        assert_admin(&env, &signers);
         env.storage()
             .instance()
             .set(&symbol_short!("recorder"), &recorder);
@@ -105,31 +151,15 @@ impl ReputationContract {
 
     // ── Pause / unpause (Task 4A circuit breaker) ───────────────────────────
 
-    pub fn pause(env: Env, admin: Address) {
-        admin.require_auth();
-        let current: Address = env
-            .storage()
-            .instance()
-            .get(&symbol_short!("admin"))
-            .unwrap_or_else(|| panic!("Not initialized"));
-        if current != admin {
-            env.panic_with_error(ContractError::Unauthorized);
-        }
+    pub fn pause(env: Env, signers: Vec<Address>) {
+        assert_admin(&env, &signers);
         env.storage()
             .instance()
             .set(&symbol_short!("paused"), &true);
     }
 
-    pub fn unpause(env: Env, admin: Address) {
-        admin.require_auth();
-        let current: Address = env
-            .storage()
-            .instance()
-            .get(&symbol_short!("admin"))
-            .unwrap_or_else(|| panic!("Not initialized"));
-        if current != admin {
-            env.panic_with_error(ContractError::Unauthorized);
-        }
+    pub fn unpause(env: Env, signers: Vec<Address>) {
+        assert_admin(&env, &signers);
         env.storage()
             .instance()
             .set(&symbol_short!("paused"), &false);
@@ -198,20 +228,12 @@ impl ReputationContract {
     /// read-only. Returns the originator's corrected score.
     pub fn resolve_dispute(
         env: Env,
-        admin: Address,
+        signers: Vec<Address>,
         originator: Address,
         originator_favourable: bool,
     ) -> i128 {
         assert_not_paused(&env);
-        admin.require_auth();
-        let current: Address = env
-            .storage()
-            .instance()
-            .get(&symbol_short!("admin"))
-            .unwrap_or_else(|| panic!("Not initialized"));
-        if current != admin {
-            env.panic_with_error(ContractError::Unauthorized);
-        }
+        assert_admin(&env, &signers);
 
         let mut records = load_records(&env);
         let mut record = records.get(originator.clone()).unwrap_or(ReputationRecord {

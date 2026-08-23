@@ -10,7 +10,11 @@ fn setup(env: &Env) -> (crate::ReputationContractClient<'static>, Address, Addre
     let reputation_id = env.register(ReputationContract, (admin.clone(),));
     let repu = crate::ReputationContractClient::new(env, &reputation_id);
     let recorder = Address::generate(env);
-    repu.set_recorder(&admin, &recorder);
+    // ADR-0010: the admin API is threshold-gated; bootstrap deployments pass
+    // a one-element signer list.
+    let mut signers = soroban_sdk::Vec::new(env);
+    signers.push_back(admin.clone());
+    repu.set_recorder(&signers, &recorder);
     (repu, admin, recorder)
 }
 

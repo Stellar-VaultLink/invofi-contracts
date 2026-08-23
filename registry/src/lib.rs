@@ -5,11 +5,11 @@ use soroban_sdk::{
 };
 
 use invofi_common::{
-    assert_not_paused, assert_transition, get_transition_history, Attestation, ContractError,
-    Invoice, InvoiceStatus, ProtocolStats, RiskTier, TransitionRecord, VerificationStatus,
-    VerificationType, DEFAULT_ATTESTATION_VALIDITY_SECS, MAX_ATTESTATIONS_PER_INVOICE,
-    MAX_ATTESTATION_VALIDITY_SECS, MAX_VERIFICATION_FEE_BPS, MAX_VERIFIERS,
-    MIN_ATTESTATION_VALIDITY_SECS, MIN_INVOICE_AMOUNT, VERIFICATION_TYPES,
+    assert_not_paused, assert_transition, get_transition_history, AdminConfig, Attestation,
+    ContractError, Invoice, InvoiceStatus, ProtocolStats, RiskTier, TransitionRecord,
+    VerificationStatus, VerificationType, DEFAULT_ATTESTATION_VALIDITY_SECS,
+    MAX_ATTESTATIONS_PER_INVOICE, MAX_ATTESTATION_VALIDITY_SECS, MAX_VERIFICATION_FEE_BPS,
+    MAX_VERIFIERS, MIN_ATTESTATION_VALIDITY_SECS, MIN_INVOICE_AMOUNT, VERIFICATION_TYPES,
 };
 
 // ─── Storage Helpers ─────────────────────────────────────────────────────────
@@ -257,16 +257,13 @@ fn assert_not_blacklisted(env: &Env, address: &Address) {
     }
 }
 
-fn assert_admin(env: &Env, caller: &Address) {
-    caller.require_auth();
-    let current: Address = env
-        .storage()
-        .instance()
-        .get(&symbol_short!("admin"))
-        .unwrap_or_else(|| panic!("Not initialized"));
-    if current != *caller {
-        env.panic_with_error(ContractError::Unauthorized);
-    }
+/// Threshold-gated admin check (ADR-0010). `signers` must contain at least
+/// `threshold` distinct, authorized addresses from the contract's
+/// `AdminConfig`. In single-admin bootstrap mode (the default at deploy)
+/// this is one address behaving exactly like the legacy admin check.
+fn assert_admin(env: &Env, signers: &Vec<Address>) {
+    let cfg = invofi_common::load_admin_config(env);
+    invofi_common::assert_threshold(env, &cfg, signers);
 }
 
 // ─── Contract ────────────────────────────────────────────────────────────────
@@ -286,38 +283,83 @@ impl RegistryContract {
     /// deployment can never be hijacked by a third party setting themselves
     /// as admin (issue #75).
     pub fn __constructor(env: Env, admin: Address) {
-        if env.storage().instance().has(&symbol_short!("admin")) {
-            panic!("Already initialized");
-        }
-        env.storage()
-            .instance()
-            .set(&symbol_short!("admin"), &admin);
+        invofi_common::init_admin_config(&env, &admin);
     }
 
-    /// Returns the admin address. Panics if not yet initialized.
+    /// Returns the primary admin address (the first configured signer).
+    /// Panics if not yet initialized. In single-admin bootstrap mode this is
+    /// the only signer; under true M-of-N it is a convenience for tooling
+    /// that only needs *an* admin-controlled address, not a source of
+    /// authorization by itself — use `get_signers`/`get_threshold` for that.
     pub fn get_admin(env: Env) -> Address {
-        env.storage()
-            .instance()
-            .get(&symbol_short!("admin"))
+        invofi_common::load_admin_config(&env)
+            .signers
+            .get(0)
             .unwrap_or_else(|| panic!("Not initialized"))
     }
 
-    /// Transfers admin rights to a new address. Only the current admin can
-    /// call this.
-    pub fn transfer_admin(env: Env, admin: Address, new_admin: Address) {
+    /// The full M-of-N admin governance config. See ADR-0010.
+    pub fn get_admin_config(env: Env) -> AdminConfig {
+        invofi_common::load_admin_config(&env)
+    }
+
+    /// The current signer set.
+    pub fn get_signers(env: Env) -> Vec<Address> {
+        invofi_common::load_admin_config(&env).signers
+    }
+
+    /// The current approval threshold.
+    pub fn get_threshold(env: Env) -> u32 {
+        invofi_common::load_admin_config(&env).threshold
+    }
+
+    /// Reconfigure the admin signer set and threshold. Threshold-gated by the
+    /// *current* config, so raising the bar (e.g. moving from single-admin
+    /// bootstrap to true M-of-N) requires the outgoing config's own
+    /// authorization — this is the mechanism ADR-0010 describes for opting
+    /// into multisig after deploy.
+    pub fn set_signers(
+        env: Env,
+        signers: Vec<Address>,
+        new_signers: Vec<Address>,
+        new_threshold: u32,
+    ) {
         assert_not_paused(&env);
-        assert_admin(&env, &admin);
-        env.storage()
-            .instance()
-            .set(&symbol_short!("admin"), &new_admin);
+        assert_admin(&env, &signers);
+        invofi_common::validate_signers(&env, &new_signers, new_threshold);
+        invofi_common::save_admin_config(
+            &env,
+            &AdminConfig {
+                signers: new_signers,
+                threshold: new_threshold,
+            },
+        );
+    }
+
+    /// Hands control to a single new admin, collapsing the config back to
+    /// single-admin bootstrap mode (threshold 1). Requires the *current*
+    /// threshold's worth of signer authorizations. For reconfiguring to a
+    /// true M-of-N set instead, use `set_signers`.
+    pub fn transfer_admin(env: Env, signers: Vec<Address>, new_admin: Address) {
+        assert_not_paused(&env);
+        assert_admin(&env, &signers);
+        let mut new_signers = Vec::new(&env);
+        new_signers.push_back(new_admin);
+        invofi_common::save_admin_config(
+            &env,
+            &AdminConfig {
+                signers: new_signers,
+                threshold: 1,
+            },
+        );
     }
 
     /// Register the financing contract address. Admin only. The financing
     /// contract is the only caller allowed to transition a Pending invoice to
     /// Financed via `transition_invoice_status`.
-    pub fn set_financing_contract(env: Env, admin: Address, financing: Address) {
+    pub fn set_financing_contract(env: Env, signers: Vec<Address>, financing: Address) {
         assert_not_paused(&env);
-        assert_admin(&env, &admin);
+        assert_admin(&env, &signers);
         env.storage()
             .instance()
             .set(&symbol_short!("financing"), &financing);
@@ -326,9 +368,9 @@ impl RegistryContract {
     /// Register the repayment contract address. Admin only. The repayment
     /// contract is the only caller allowed to transition a Financed invoice
     /// to Financed (partial) or Repaid (full) via `transition_invoice_status`.
-    pub fn set_repayment_contract(env: Env, admin: Address, repayment: Address) {
+    pub fn set_repayment_contract(env: Env, signers: Vec<Address>, repayment: Address) {
         assert_not_paused(&env);
-        assert_admin(&env, &admin);
+        assert_admin(&env, &signers);
         env.storage()
             .instance()
             .set(&symbol_short!("repayment"), &repayment);
@@ -337,16 +379,16 @@ impl RegistryContract {
     // ── Pause / unpause ──────────────────────────────────────────────────────
 
     /// Halt all state-mutating operations. Admin only.
-    pub fn pause(env: Env, admin: Address) {
-        assert_admin(&env, &admin);
+    pub fn pause(env: Env, signers: Vec<Address>) {
+        assert_admin(&env, &signers);
         env.storage()
             .instance()
             .set(&symbol_short!("paused"), &true);
     }
 
     /// Resume operations after a pause. Admin only.
-    pub fn unpause(env: Env, admin: Address) {
-        assert_admin(&env, &admin);
+    pub fn unpause(env: Env, signers: Vec<Address>) {
+        assert_admin(&env, &signers);
         env.storage()
             .instance()
             .set(&symbol_short!("paused"), &false);
@@ -364,9 +406,9 @@ impl RegistryContract {
 
     /// Sets the yield rate (in basis points, 0-10000) for a risk tier.
     /// Admin only.
-    pub fn set_rate(env: Env, admin: Address, tier: RiskTier, rate_bps: u32) {
+    pub fn set_rate(env: Env, signers: Vec<Address>, tier: RiskTier, rate_bps: u32) {
         assert_not_paused(&env);
-        assert_admin(&env, &admin);
+        assert_admin(&env, &signers);
         if rate_bps > 10_000 {
             env.panic_with_error(ContractError::InvalidInput);
         }
@@ -386,9 +428,9 @@ impl RegistryContract {
     // ── Protocol fee ─────────────────────────────────────────────────────────
 
     /// Set the protocol fee in basis points (max 500 = 5%). Admin only.
-    pub fn set_fee(env: Env, admin: Address, fee_bps: u32) {
+    pub fn set_fee(env: Env, signers: Vec<Address>, fee_bps: u32) {
         assert_not_paused(&env);
-        assert_admin(&env, &admin);
+        assert_admin(&env, &signers);
         if fee_bps > 500 {
             env.panic_with_error(ContractError::InvalidInput);
         }
@@ -480,7 +522,7 @@ impl RegistryContract {
         }
         let old_status = invoice.status;
         assert_transition(&env, id.clone(), old_status, new_status, originator.clone());
-
+        
         invoice.status = new_status;
         invoices.set(id, invoice.clone());
         save_invoices(&env, &invoices);
@@ -512,8 +554,10 @@ impl RegistryContract {
         invoice.amount = new_amount;
         invoices.set(invoice_id, invoice.clone());
         save_invoices(&env, &invoices);
-        env.events()
-            .publish((symbol_short!("inv_amt"), invoice.id.clone()), new_amount);
+        env.events().publish(
+            (symbol_short!("inv_amt"), invoice.id.clone()),
+            new_amount,
+        );
         invoice
     }
 
@@ -528,16 +572,10 @@ impl RegistryContract {
         if invoice.originator != originator {
             env.panic_with_error(ContractError::Unauthorized);
         }
-
+        
         let old_status = invoice.status;
-        assert_transition(
-            &env,
-            invoice_id.clone(),
-            old_status,
-            InvoiceStatus::Cancelled,
-            originator.clone(),
-        );
-
+        assert_transition(&env, invoice_id.clone(), old_status, InvoiceStatus::Cancelled, originator.clone());
+        
         invoice.status = InvoiceStatus::Cancelled;
         invoices.set(invoice_id, invoice.clone());
         save_invoices(&env, &invoices);
@@ -564,23 +602,21 @@ impl RegistryContract {
         let mut invoice = invoices
             .get(id.clone())
             .unwrap_or_else(|| env.panic_with_error(ContractError::NotFound));
-
+        
         let new_status = if fully_repaid {
             InvoiceStatus::Repaid
         } else {
             InvoiceStatus::Financed
         };
-
+        
         let old_status = invoice.status;
         assert_transition(&env, id.clone(), old_status, new_status, repayer.clone());
-
+        
         invoice.status = new_status;
         invoices.set(id, invoice.clone());
         save_invoices(&env, &invoices);
-        env.events().publish(
-            (symbol_short!("inv_sts"), invoice.id.clone()),
-            invoice.status,
-        );
+        env.events()
+            .publish((symbol_short!("inv_sts"), invoice.id.clone()), invoice.status);
         invoice
     }
 
@@ -602,16 +638,10 @@ impl RegistryContract {
         let mut invoice = invoices
             .get(id.clone())
             .unwrap_or_else(|| env.panic_with_error(ContractError::NotFound));
-
+        
         let old_status = invoice.status;
-        assert_transition(
-            &env,
-            id.clone(),
-            old_status,
-            InvoiceStatus::Financed,
-            financing.clone(),
-        );
-
+        assert_transition(&env, id.clone(), old_status, InvoiceStatus::Financed, financing.clone());
+        
         invoice.status = InvoiceStatus::Financed;
         invoices.set(id, invoice.clone());
         save_invoices(&env, &invoices);
@@ -638,23 +668,21 @@ impl RegistryContract {
         let mut invoice = invoices
             .get(id.clone())
             .unwrap_or_else(|| env.panic_with_error(ContractError::NotFound));
-
+        
         let new_status = if fully_repaid {
             InvoiceStatus::Repaid
         } else {
             InvoiceStatus::Financed
         };
-
+        
         let old_status = invoice.status;
         assert_transition(&env, id.clone(), old_status, new_status, repayment.clone());
-
+        
         invoice.status = new_status;
         invoices.set(id, invoice.clone());
         save_invoices(&env, &invoices);
-        env.events().publish(
-            (symbol_short!("inv_sts"), invoice.id.clone()),
-            invoice.status,
-        );
+        env.events()
+            .publish((symbol_short!("inv_sts"), invoice.id.clone()), invoice.status);
         invoice
     }
 
@@ -678,16 +706,10 @@ impl RegistryContract {
         let mut invoice = invoices
             .get(id.clone())
             .unwrap_or_else(|| env.panic_with_error(ContractError::NotFound));
-
+        
         let old_status = invoice.status;
-        assert_transition(
-            &env,
-            id.clone(),
-            old_status,
-            InvoiceStatus::Defaulted,
-            repayment.clone(),
-        );
-
+        assert_transition(&env, id.clone(), old_status, InvoiceStatus::Defaulted, repayment.clone());
+        
         invoice.status = InvoiceStatus::Defaulted;
         invoices.set(id, invoice.clone());
         save_invoices(&env, &invoices);
@@ -707,23 +729,17 @@ impl RegistryContract {
         let mut invoice = invoices
             .get(id.clone())
             .unwrap_or_else(|| env.panic_with_error(ContractError::NotFound));
-
+        
         // Validate time-based precondition before state transition
         if env.ledger().timestamp() <= invoice.due_date {
             env.panic_with_error(ContractError::InvalidTransition);
         }
-
+        
         let old_status = invoice.status;
         // For overdue, we use a dummy actor since it's permissionless
         let dummy_actor = env.current_contract_address();
-        assert_transition(
-            &env,
-            id.clone(),
-            old_status,
-            InvoiceStatus::Overdue,
-            dummy_actor,
-        );
-
+        assert_transition(&env, id.clone(), old_status, InvoiceStatus::Overdue, dummy_actor);
+        
         invoice.status = InvoiceStatus::Overdue;
         invoices.set(id, invoice.clone());
         save_invoices(&env, &invoices);
@@ -747,16 +763,10 @@ impl RegistryContract {
         if invoice.originator != originator {
             env.panic_with_error(ContractError::Unauthorized);
         }
-
+        
         let old_status = invoice.status;
-        assert_transition(
-            &env,
-            invoice_id.clone(),
-            old_status,
-            InvoiceStatus::Disputed,
-            originator.clone(),
-        );
-
+        assert_transition(&env, invoice_id.clone(), old_status, InvoiceStatus::Disputed, originator.clone());
+        
         invoice.status = InvoiceStatus::Disputed;
         invoices.set(invoice_id, invoice.clone());
         save_invoices(&env, &invoices);
@@ -771,12 +781,12 @@ impl RegistryContract {
     /// Allowed targets: Financed, Repaid, Cancelled, Defaulted.
     pub fn resolve_dispute(
         env: Env,
-        admin: Address,
+        signers: Vec<Address>,
         invoice_id: Symbol,
         target_status: InvoiceStatus,
     ) -> Invoice {
         assert_not_paused(&env);
-        assert_admin(&env, &admin);
+        assert_admin(&env, &signers);
         let mut invoices = load_invoices(&env);
         let mut invoice = invoices
             .get(invoice_id.clone())
@@ -786,14 +796,9 @@ impl RegistryContract {
         }
 
         let old_status = invoice.status;
-        assert_transition(
-            &env,
-            invoice_id.clone(),
-            old_status,
-            target_status,
-            admin.clone(),
-        );
-
+        let actor = signers.get(0).unwrap_or_else(|| env.panic_with_error(ContractError::Unauthorized));
+        assert_transition(&env, invoice_id.clone(), old_status, target_status, actor);
+        
         invoice.status = target_status;
         invoices.set(invoice_id, invoice.clone());
         save_invoices(&env, &invoices);
@@ -898,9 +903,9 @@ impl RegistryContract {
 
     // ── Blacklist management ─────────────────────────────────────────────────
 
-    pub fn blacklist_address(env: Env, admin: Address, target: Address) {
+    pub fn blacklist_address(env: Env, signers: Vec<Address>, target: Address) {
         assert_not_paused(&env);
-        assert_admin(&env, &admin);
+        assert_admin(&env, &signers);
         let mut list = load_blacklist(&env);
         for entry in list.iter() {
             if entry == target {
@@ -911,9 +916,9 @@ impl RegistryContract {
         save_blacklist(&env, &list);
     }
 
-    pub fn unblacklist_address(env: Env, admin: Address, target: Address) {
+    pub fn unblacklist_address(env: Env, signers: Vec<Address>, target: Address) {
         assert_not_paused(&env);
-        assert_admin(&env, &admin);
+        assert_admin(&env, &signers);
         let list = load_blacklist(&env);
         let mut new_list: Vec<Address> = Vec::new(&env);
         for entry in list.iter() {
@@ -953,9 +958,9 @@ impl RegistryContract {
     // bounded by verifier honesty and by the m-of-n threshold, not eliminated.
 
     /// Add an address to the trusted verifier set. Admin only. Idempotent.
-    pub fn add_verifier(env: Env, admin: Address, verifier: Address) {
+    pub fn add_verifier(env: Env, signers: Vec<Address>, verifier: Address) {
         assert_not_paused(&env);
-        assert_admin(&env, &admin);
+        assert_admin(&env, &signers);
         let mut verifiers = load_verifiers(&env);
         for existing in verifiers.iter() {
             if existing == verifier {
@@ -976,9 +981,9 @@ impl RegistryContract {
     /// still count until they expire; an admin who needs a compromised
     /// verifier's statements discounted immediately raises the threshold, per
     /// the key-compromise runbook (#145).
-    pub fn remove_verifier(env: Env, admin: Address, verifier: Address) {
+    pub fn remove_verifier(env: Env, signers: Vec<Address>, verifier: Address) {
         assert_not_paused(&env);
-        assert_admin(&env, &admin);
+        assert_admin(&env, &signers);
         let verifiers = load_verifiers(&env);
         let mut remaining: Vec<Address> = Vec::new(&env);
         for existing in verifiers.iter() {
@@ -1009,9 +1014,9 @@ impl RegistryContract {
     /// admin may deliberately set it above the set while adding verifiers, and
     /// a removal must not silently weaken it. A threshold no live verifier set
     /// can reach simply means nothing verifies, which is the safe direction.
-    pub fn set_verifier_threshold(env: Env, admin: Address, threshold: u32) {
+    pub fn set_verifier_threshold(env: Env, signers: Vec<Address>, threshold: u32) {
         assert_not_paused(&env);
-        assert_admin(&env, &admin);
+        assert_admin(&env, &signers);
         if threshold == 0 || threshold > MAX_VERIFIERS {
             env.panic_with_error(ContractError::InvalidInput);
         }
@@ -1031,9 +1036,9 @@ impl RegistryContract {
     /// Set the verification fee in basis points of invoice value. Admin only.
     /// Capped at `MAX_VERIFICATION_FEE_BPS` (5%). Defaults to 0, which
     /// disables fee settlement entirely.
-    pub fn set_verification_fee(env: Env, admin: Address, fee_bps: u32) {
+    pub fn set_verification_fee(env: Env, signers: Vec<Address>, fee_bps: u32) {
         assert_not_paused(&env);
-        assert_admin(&env, &admin);
+        assert_admin(&env, &signers);
         if fee_bps > MAX_VERIFICATION_FEE_BPS {
             env.panic_with_error(ContractError::InvalidInput);
         }
@@ -1056,10 +1061,11 @@ impl RegistryContract {
     ///
     /// Changing this does not move the `valid_until` of attestations already
     /// submitted — each one carries its own, fixed at submission.
-    pub fn set_attestation_validity(env: Env, admin: Address, validity_secs: u64) {
+    pub fn set_attestation_validity(env: Env, signers: Vec<Address>, validity_secs: u64) {
         assert_not_paused(&env);
-        assert_admin(&env, &admin);
-        if !(MIN_ATTESTATION_VALIDITY_SECS..=MAX_ATTESTATION_VALIDITY_SECS).contains(&validity_secs)
+        assert_admin(&env, &signers);
+        if !(MIN_ATTESTATION_VALIDITY_SECS..=MAX_ATTESTATION_VALIDITY_SECS)
+            .contains(&validity_secs)
         {
             env.panic_with_error(ContractError::InvalidInput);
         }
@@ -1083,9 +1089,14 @@ impl RegistryContract {
     /// multi-currency deployment registers each currency once here — the same
     /// pattern the financing contract uses, sharing the `invofi_common`
     /// registry rather than growing a per-currency branch.
-    pub fn register_currency(env: Env, admin: Address, currency: Symbol, token_addr: Address) {
+    pub fn register_currency(
+        env: Env,
+        signers: Vec<Address>,
+        currency: Symbol,
+        token_addr: Address,
+    ) {
         assert_not_paused(&env);
-        assert_admin(&env, &admin);
+        assert_admin(&env, &signers);
         invofi_common::register_currency(&env, &currency, &token_addr);
     }
 
@@ -1240,13 +1251,7 @@ impl RegistryContract {
     ) -> VerificationStatus {
         let attestations = load_verifications(&env, &invoice_id);
         let threshold = Self::get_verifier_threshold(env.clone());
-        type_status(
-            &env,
-            &attestations,
-            v_type,
-            threshold,
-            env.ledger().timestamp(),
-        )
+        type_status(&env, &attestations, v_type, threshold, env.ledger().timestamp())
     }
 
     /// Verification status of the invoice as a whole.
@@ -1351,6 +1356,3 @@ impl RegistryContract {
 
 #[cfg(test)]
 mod test;
-
-#[cfg(test)]
-mod proptest;

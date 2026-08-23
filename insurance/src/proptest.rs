@@ -10,6 +10,15 @@ use soroban_sdk::{
     token, Address, Env,
 };
 
+/// Wrap a single signer in the one-element `Vec<Address>` the threshold-gated
+/// admin API expects (ADR-0010). Single-admin/bootstrap deployments pass
+/// exactly this.
+fn one(env: &Env, signer: &Address) -> soroban_sdk::Vec<Address> {
+    let mut v = soroban_sdk::Vec::new(env);
+    v.push_back(signer.clone());
+    v
+}
+
 proptest! {
     #![proptest_config(ProptestConfig::with_cases(2000))]
 
@@ -102,10 +111,10 @@ proptest! {
 
         // Stand-in for the real repayment contract's address.
         let repayment_stub = Address::generate(&env);
-        ins.set_payout_caller(&admin, &repayment_stub);
-        ins.set_registry(&admin, &registry_id);
-        reg.set_financing_contract(&admin, &repayment_stub);
-        reg.set_repayment_contract(&admin, &repayment_stub);
+        ins.set_payout_caller(&one(&env, &admin), &repayment_stub);
+        ins.set_registry(&one(&env, &admin), &registry_id);
+        reg.set_financing_contract(&one(&env, &admin), &repayment_stub);
+        reg.set_repayment_contract(&one(&env, &admin), &repayment_stub);
 
         let staker_a = Address::generate(&env);
         let staker_b = Address::generate(&env);

@@ -38,7 +38,13 @@
 
 use soroban_sdk::{contract, contractimpl, symbol_short, token, Address, Env, Map, Symbol, Vec};
 
-use invofi_common::{assert_not_paused, ContractError, InvoiceStatus, RegistryClient};
+use invofi_common::{assert_not_paused, AdminConfig, ContractError, InvoiceStatus, RegistryClient};
+
+/// Threshold-gated admin check (ADR-0010). See `invofi_common::assert_threshold`.
+fn assert_admin(env: &Env, signers: &Vec<Address>) {
+    let cfg = invofi_common::load_admin_config(env);
+    invofi_common::assert_threshold(env, &cfg, signers);
+}
 
 // ─── Constants ────────────────────────────────────────────────────────────────
 
@@ -264,54 +270,77 @@ impl InsuranceContract {
     /// of the deploy operation, which only the deployer can authorize. There
     /// is therefore no separate initialize() call to front-run (issue #75).
     pub fn __constructor(env: Env, admin: Address, token: Address) {
-        if env.storage().instance().has(&symbol_short!("admin")) {
-            panic!("Already initialized");
-        }
-        env.storage()
-            .instance()
-            .set(&symbol_short!("admin"), &admin);
+        invofi_common::init_admin_config(&env, &admin);
         env.storage()
             .instance()
             .set(&symbol_short!("token"), &token);
     }
 
+    /// Returns the primary admin address (the first configured signer). See
+    /// `RegistryContract::get_admin` for the same caveat under true M-of-N.
     pub fn get_admin(env: Env) -> Address {
-        env.storage()
-            .instance()
-            .get(&symbol_short!("admin"))
+        invofi_common::load_admin_config(&env)
+            .signers
+            .get(0)
             .unwrap_or_else(|| panic!("Not initialized"))
     }
 
-    /// Transfers admin rights. Only current admin.
-    pub fn transfer_admin(env: Env, admin: Address, new_admin: Address) {
+    /// The full M-of-N admin governance config. See ADR-0010.
+    pub fn get_admin_config(env: Env) -> AdminConfig {
+        invofi_common::load_admin_config(&env)
+    }
+
+    /// The current signer set.
+    pub fn get_signers(env: Env) -> Vec<Address> {
+        invofi_common::load_admin_config(&env).signers
+    }
+
+    /// The current approval threshold.
+    pub fn get_threshold(env: Env) -> u32 {
+        invofi_common::load_admin_config(&env).threshold
+    }
+
+    /// Reconfigure the admin signer set and threshold. See
+    /// `RegistryContract::set_signers`.
+    pub fn set_signers(
+        env: Env,
+        signers: Vec<Address>,
+        new_signers: Vec<Address>,
+        new_threshold: u32,
+    ) {
         assert_not_paused(&env);
-        admin.require_auth();
-        let current: Address = env
-            .storage()
-            .instance()
-            .get(&symbol_short!("admin"))
-            .unwrap_or_else(|| panic!("Not initialized"));
-        if current != admin {
-            env.panic_with_error(ContractError::Unauthorized);
-        }
-        env.storage()
-            .instance()
-            .set(&symbol_short!("admin"), &new_admin);
+        assert_admin(&env, &signers);
+        invofi_common::validate_signers(&env, &new_signers, new_threshold);
+        invofi_common::save_admin_config(
+            &env,
+            &AdminConfig {
+                signers: new_signers,
+                threshold: new_threshold,
+            },
+        );
+    }
+
+    /// Transfers admin rights, collapsing the config back to a single new
+    /// admin. See `RegistryContract::transfer_admin`.
+    pub fn transfer_admin(env: Env, signers: Vec<Address>, new_admin: Address) {
+        assert_not_paused(&env);
+        assert_admin(&env, &signers);
+        let mut new_signers = Vec::new(&env);
+        new_signers.push_back(new_admin);
+        invofi_common::save_admin_config(
+            &env,
+            &AdminConfig {
+                signers: new_signers,
+                threshold: 1,
+            },
+        );
     }
 
     /// Swap the staking token. Admin only. Existing stakes are not migrated —
     /// set this before opening the pool to stakers.
-    pub fn set_staking_token(env: Env, admin: Address, token: Address) {
+    pub fn set_staking_token(env: Env, signers: Vec<Address>, token: Address) {
         assert_not_paused(&env);
-        admin.require_auth();
-        let current: Address = env
-            .storage()
-            .instance()
-            .get(&symbol_short!("admin"))
-            .unwrap_or_else(|| panic!("Not initialized"));
-        if current != admin {
-            env.panic_with_error(ContractError::Unauthorized);
-        }
+        assert_admin(&env, &signers);
         env.storage()
             .instance()
             .set(&symbol_short!("token"), &token);
@@ -324,17 +353,9 @@ impl InsuranceContract {
     /// Configure the address allowed to trigger payouts — this is the
     /// repayment contract. Admin only. Payouts are disabled until a caller
     /// is configured (fail-closed).
-    pub fn set_payout_caller(env: Env, admin: Address, payout_caller: Address) {
+    pub fn set_payout_caller(env: Env, signers: Vec<Address>, payout_caller: Address) {
         assert_not_paused(&env);
-        admin.require_auth();
-        let current: Address = env
-            .storage()
-            .instance()
-            .get(&symbol_short!("admin"))
-            .unwrap_or_else(|| panic!("Not initialized"));
-        if current != admin {
-            env.panic_with_error(ContractError::Unauthorized);
-        }
+        assert_admin(&env, &signers);
         env.storage()
             .instance()
             .set(&symbol_short!("paycall"), &payout_caller);
@@ -348,16 +369,8 @@ impl InsuranceContract {
     /// `pay_out`. Admin only. Payouts on Defaulted invoices are rejected
     /// with a clear error if the registry is not configured or if the
     /// invoice is not in the Defaulted state (fail-closed).
-    pub fn set_registry(env: Env, admin: Address, registry: Address) {
-        admin.require_auth();
-        let current: Address = env
-            .storage()
-            .instance()
-            .get(&symbol_short!("admin"))
-            .unwrap_or_else(|| panic!("Not initialized"));
-        if current != admin {
-            env.panic_with_error(ContractError::Unauthorized);
-        }
+    pub fn set_registry(env: Env, signers: Vec<Address>, registry: Address) {
+        assert_admin(&env, &signers);
         env.storage()
             .instance()
             .set(&symbol_short!("registry"), &registry);
@@ -379,17 +392,9 @@ impl InsuranceContract {
     /// yield accrued at the new rate since this call.
     ///
     /// Admin only. Rate may be set to 0 to disable yield entirely.
-    pub fn set_yield_rate(env: Env, admin: Address, rate_bps: u32) {
+    pub fn set_yield_rate(env: Env, signers: Vec<Address>, rate_bps: u32) {
         assert_not_paused(&env);
-        admin.require_auth();
-        let current: Address = env
-            .storage()
-            .instance()
-            .get(&symbol_short!("admin"))
-            .unwrap_or_else(|| panic!("Not initialized"));
-        if current != admin {
-            env.panic_with_error(ContractError::Unauthorized);
-        }
+        assert_admin(&env, &signers);
 
         // Bank outstanding yield for every staker at the current rate before
         // the new rate takes effect. This is the key invariant: rate changes
@@ -415,31 +420,15 @@ impl InsuranceContract {
 
     // ── Pause / unpause (Task 4A circuit breaker) ───────────────────────────
 
-    pub fn pause(env: Env, admin: Address) {
-        admin.require_auth();
-        let current: Address = env
-            .storage()
-            .instance()
-            .get(&symbol_short!("admin"))
-            .unwrap_or_else(|| panic!("Not initialized"));
-        if current != admin {
-            env.panic_with_error(ContractError::Unauthorized);
-        }
+    pub fn pause(env: Env, signers: Vec<Address>) {
+        assert_admin(&env, &signers);
         env.storage()
             .instance()
             .set(&symbol_short!("paused"), &true);
     }
 
-    pub fn unpause(env: Env, admin: Address) {
-        admin.require_auth();
-        let current: Address = env
-            .storage()
-            .instance()
-            .get(&symbol_short!("admin"))
-            .unwrap_or_else(|| panic!("Not initialized"));
-        if current != admin {
-            env.panic_with_error(ContractError::Unauthorized);
-        }
+    pub fn unpause(env: Env, signers: Vec<Address>) {
+        assert_admin(&env, &signers);
         env.storage()
             .instance()
             .set(&symbol_short!("paused"), &false);
