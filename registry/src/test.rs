@@ -608,7 +608,10 @@ fn test_constructor_cannot_be_reinvoked() {
         &soroban_sdk::Symbol::new(&env, "__constructor"),
         args,
     );
-    assert!(result.is_err(), "constructor must not be re-invokable post-deploy");
+    assert!(
+        result.is_err(),
+        "constructor must not be re-invokable post-deploy"
+    );
 }
 
 #[test]
@@ -699,7 +702,10 @@ fn test_multisig_requires_threshold_distinct_signatures() {
 
     // A single signer is no longer enough once threshold is 2.
     let result = client.try_pause(&one(&env, &admin));
-    assert!(result.is_err(), "one of two required signatures must not pause");
+    assert!(
+        result.is_err(),
+        "one of two required signatures must not pause"
+    );
     assert!(!client.contract_is_paused());
 
     // Two distinct configured signers together clear the threshold.
@@ -731,7 +737,10 @@ fn test_multisig_rejects_non_signer_address() {
     bad.push_back(admin.clone());
     bad.push_back(outsider);
     let result = client.try_pause(&bad);
-    assert!(result.is_err(), "a non-signer address must not count toward the threshold");
+    assert!(
+        result.is_err(),
+        "a non-signer address must not count toward the threshold"
+    );
 }
 
 #[test]
@@ -753,7 +762,10 @@ fn test_multisig_rejects_duplicate_signer_in_same_call() {
     dup.push_back(admin.clone());
     dup.push_back(admin.clone());
     let result = client.try_pause(&dup);
-    assert!(result.is_err(), "a duplicated signer must not satisfy a threshold of two");
+    assert!(
+        result.is_err(),
+        "a duplicated signer must not satisfy a threshold of two"
+    );
 }
 
 #[test]
@@ -767,7 +779,10 @@ fn test_set_signers_unauthorized_panics() {
     let new_signers = one(&env, &Address::generate(&env));
 
     let result = client.try_set_signers(&one(&env, &outsider), &new_signers, &1u32);
-    assert!(result.is_err(), "a non-signer must not be able to reconfigure the admin set");
+    assert!(
+        result.is_err(),
+        "a non-signer must not be able to reconfigure the admin set"
+    );
 }
 
 #[test]
@@ -807,7 +822,10 @@ fn test_set_signers_rejects_empty_and_duplicate_signers() {
     dup_signers.push_back(admin.clone());
     dup_signers.push_back(admin.clone());
     let result = client.try_set_signers(&one(&env, &admin), &dup_signers, &2u32);
-    assert!(result.is_err(), "a duplicate address would let one key count twice");
+    assert!(
+        result.is_err(),
+        "a duplicate address would let one key count twice"
+    );
 }
 
 #[test]
@@ -837,6 +855,178 @@ fn test_transfer_admin_collapses_multisig_back_to_single_admin() {
     // Single-admin bootstrap behavior is restored: one signature suffices.
     client.pause(&one(&env, &new_admin));
     assert!(client.contract_is_paused());
+}
+
+// ─── Threshold boundary tests (issue #128 acceptance criteria) ─────────────────
+//
+// These tests explicitly cover the "exactly N, N-1, N+1" threshold
+// boundary: a 2-of-3 set, a 1-of-1 set, and a 3-of-3 set. Each case
+// verifies that exactly N signers succeed, N-1 signers fail, and
+// (where applicable) N+1 signers also succeed.
+
+/// 2-of-3 threshold: exactly 2 signers (N) must authorize, 1 (N-1) must not,
+/// and 3 (N+1) must also succeed.
+#[test]
+fn test_threshold_2_of_3_boundary() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let admin = Address::generate(&env);
+    let contract_id = env.register(RegistryContract, (admin.clone(),));
+    let client = super::RegistryContractClient::new(&env, &contract_id);
+
+    let b = Address::generate(&env);
+    let c = Address::generate(&env);
+    let mut signers_3 = soroban_sdk::Vec::new(&env);
+    signers_3.push_back(admin.clone());
+    signers_3.push_back(b.clone());
+    signers_3.push_back(c.clone());
+    client.set_signers(&one(&env, &admin), &signers_3, &2u32);
+
+    // N-1 (1 of 2 required) must fail.
+    let result = client.try_set_fee(&one(&env, &admin), &100u32);
+    assert!(
+        result.is_err(),
+        "N-1 (1 of 2) must not authorize a fee change"
+    );
+
+    // N (exactly 2 of 2 required) must succeed.
+    let mut exactly_2 = soroban_sdk::Vec::new(&env);
+    exactly_2.push_back(admin.clone());
+    exactly_2.push_back(b.clone());
+    client.set_fee(&exactly_2, &100u32);
+    assert_eq!(client.get_fee(), 100);
+
+    // N+1 (3 of 2 required) must also succeed.
+    let mut all_3 = soroban_sdk::Vec::new(&env);
+    all_3.push_back(admin.clone());
+    all_3.push_back(b.clone());
+    all_3.push_back(c.clone());
+    client.set_fee(&all_3, &200u32);
+    assert_eq!(client.get_fee(), 200);
+}
+
+/// 1-of-1 threshold: exactly 1 signer (N) must authorize, 0 (N-1) must not.
+#[test]
+fn test_threshold_1_of_1_boundary() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let admin = Address::generate(&env);
+    let contract_id = env.register(RegistryContract, (admin.clone(),));
+    let client = super::RegistryContractClient::new(&env, &contract_id);
+
+    // Bootstrap mode is already 1-of-1.
+    // N-1 (0 signers) must fail.
+    let empty: soroban_sdk::Vec<Address> = soroban_sdk::Vec::new(&env);
+    let result = client.try_set_fee(&empty, &50u32);
+    assert!(
+        result.is_err(),
+        "N-1 (0 of 1) must not authorize a fee change"
+    );
+
+    // N (exactly 1 of 1 required) must succeed.
+    client.set_fee(&one(&env, &admin), &50u32);
+    assert_eq!(client.get_fee(), 50);
+}
+
+/// 3-of-3 threshold: exactly 3 signers (N) must authorize, 2 (N-1) must not.
+#[test]
+fn test_threshold_3_of_3_boundary() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let admin = Address::generate(&env);
+    let contract_id = env.register(RegistryContract, (admin.clone(),));
+    let client = super::RegistryContractClient::new(&env, &contract_id);
+
+    let b = Address::generate(&env);
+    let c = Address::generate(&env);
+    let mut signers_3 = soroban_sdk::Vec::new(&env);
+    signers_3.push_back(admin.clone());
+    signers_3.push_back(b.clone());
+    signers_3.push_back(c.clone());
+    client.set_signers(&one(&env, &admin), &signers_3, &3u32);
+
+    // N-1 (2 of 3 required) must fail.
+    let mut two = soroban_sdk::Vec::new(&env);
+    two.push_back(admin.clone());
+    two.push_back(b.clone());
+    let result = client.try_set_fee(&two, &100u32);
+    assert!(
+        result.is_err(),
+        "N-1 (2 of 3) must not authorize a fee change"
+    );
+
+    // N (exactly 3 of 3 required) must succeed.
+    let mut all_3 = soroban_sdk::Vec::new(&env);
+    all_3.push_back(admin.clone());
+    all_3.push_back(b.clone());
+    all_3.push_back(c.clone());
+    client.set_fee(&all_3, &100u32);
+    assert_eq!(client.get_fee(), 100);
+}
+
+/// 2-of-3 threshold tested on a non-pause admin op (set_rate) to verify
+/// the threshold check is applied uniformly across all admin-gated functions.
+#[test]
+fn test_threshold_boundary_on_set_rate() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let admin = Address::generate(&env);
+    let contract_id = env.register(RegistryContract, (admin.clone(),));
+    let client = super::RegistryContractClient::new(&env, &contract_id);
+
+    let b = Address::generate(&env);
+    let c = Address::generate(&env);
+    let mut signers_3 = soroban_sdk::Vec::new(&env);
+    signers_3.push_back(admin.clone());
+    signers_3.push_back(b.clone());
+    signers_3.push_back(c.clone());
+    client.set_signers(&one(&env, &admin), &signers_3, &2u32);
+
+    // N-1 (1 of 2) must fail.
+    let result = client.try_set_rate(&one(&env, &admin), &RiskTier::A, &500u32);
+    assert!(result.is_err(), "N-1 must not authorize a rate change");
+
+    // N (exactly 2 of 2) must succeed.
+    let mut exactly_2 = soroban_sdk::Vec::new(&env);
+    exactly_2.push_back(admin.clone());
+    exactly_2.push_back(c.clone());
+    client.set_rate(&exactly_2, &RiskTier::A, &500u32);
+    assert_eq!(client.get_rate(&RiskTier::A), 500);
+}
+
+/// set_signers itself is threshold-gated by the current config. Test that
+/// N-1 signers cannot reconfigure the admin set.
+#[test]
+fn test_threshold_boundary_on_set_signers() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let admin = Address::generate(&env);
+    let contract_id = env.register(RegistryContract, (admin.clone(),));
+    let client = super::RegistryContractClient::new(&env, &contract_id);
+
+    let b = Address::generate(&env);
+    let c = Address::generate(&env);
+    let mut signers_3 = soroban_sdk::Vec::new(&env);
+    signers_3.push_back(admin.clone());
+    signers_3.push_back(b.clone());
+    signers_3.push_back(c.clone());
+    client.set_signers(&one(&env, &admin), &signers_3, &2u32);
+
+    let new_admin = Address::generate(&env);
+    let new_signers = one(&env, &new_admin);
+
+    // N-1 (1 of 2) must fail.
+    let result = client.try_set_signers(&one(&env, &admin), &new_signers, &1u32);
+    assert!(result.is_err(), "N-1 must not authorize set_signers");
+
+    // N (exactly 2 of 2) must succeed.
+    let mut exactly_2 = soroban_sdk::Vec::new(&env);
+    exactly_2.push_back(admin.clone());
+    exactly_2.push_back(b.clone());
+    client.set_signers(&exactly_2, &new_signers, &1u32);
+    let cfg = client.get_admin_config();
+    assert_eq!(cfg.threshold, 1);
+    assert_eq!(cfg.signers.get(0).unwrap(), new_admin);
 }
 
 // ─── Pause tests ──────────────────────────────────────────────────────────────
@@ -923,7 +1113,10 @@ fn test_pause_blocks_all_registry_state_changes() {
 
     fn assert_paused<F: FnOnce()>(f: F) {
         let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(f));
-        assert!(result.is_err(), "state-changing function should panic while paused");
+        assert!(
+            result.is_err(),
+            "state-changing function should panic while paused"
+        );
     }
 
     assert_paused(|| {
@@ -967,7 +1160,11 @@ fn test_pause_blocks_all_registry_state_changes() {
         client.raise_dispute(&invoice_id, &originator);
     });
     assert_paused(|| {
-        client.resolve_dispute(&one(&env, &admin), &invoice_id, &invofi_common::InvoiceStatus::Cancelled);
+        client.resolve_dispute(
+            &one(&env, &admin),
+            &invoice_id,
+            &invofi_common::InvoiceStatus::Cancelled,
+        );
     });
     assert_paused(|| {
         client.blacklist_address(&one(&env, &admin), &other);
@@ -1521,14 +1718,16 @@ fn test_state_machine_financed_to_disputed_to_resolved() {
     assert_eq!(disputed.status, InvoiceStatus::Disputed);
 
     // Disputed -> Financed (admin resolution)
-    let resolved = client.resolve_dispute(&one(&env, &admin), &invoice_id, &InvoiceStatus::Financed);
+    let resolved =
+        client.resolve_dispute(&one(&env, &admin), &invoice_id, &InvoiceStatus::Financed);
     assert_eq!(resolved.status, InvoiceStatus::Financed);
 
     // Financed -> Disputed (again)
     client.raise_dispute(&invoice_id, &originator);
 
     // Disputed -> Cancelled (admin resolution)
-    let resolved2 = client.resolve_dispute(&one(&env, &admin), &invoice_id, &InvoiceStatus::Cancelled);
+    let resolved2 =
+        client.resolve_dispute(&one(&env, &admin), &invoice_id, &InvoiceStatus::Cancelled);
     assert_eq!(resolved2.status, InvoiceStatus::Cancelled);
 }
 
@@ -1670,7 +1869,10 @@ fn test_transition_history_recorded() {
 
     // Query transition history
     let history = client.get_transition_history(&invoice_id);
-    assert!(!history.is_empty(), "Transition history should not be empty");
+    assert!(
+        !history.is_empty(),
+        "Transition history should not be empty"
+    );
     assert_eq!(history.len(), 1, "Should have one transition recorded");
 
     let first = history.first().unwrap();
@@ -1790,10 +1992,7 @@ fn test_transition_events_emitted() {
 
     let events = env.events().all();
     // Should have transition events
-    assert!(
-        !events.is_empty(),
-        "Should emit events on state transition"
-    );
+    assert!(!events.is_empty(), "Should emit events on state transition");
 }
 
 // ─── Verification oracle (issue #181) ────────────────────────────────────────
@@ -2866,7 +3065,10 @@ fn test_eviction_cannot_fire_without_a_departed_record_to_take() {
         let mut found = 0u32;
         for a in c.get_verifications(&invoice_id).iter() {
             if a.verifier == first && a.v_type == VerificationType::BusinessRegistration {
-                assert!(a.valid_until < env.ledger().timestamp(), "record must be lapsed");
+                assert!(
+                    a.valid_until < env.ledger().timestamp(),
+                    "record must be lapsed"
+                );
                 found += 1;
             }
         }
@@ -2983,7 +3185,6 @@ fn count_events(env: &Env, name: Symbol) -> u32 {
     count
 }
 
-
 #[test]
 fn test_live_approval_below_threshold_reads_pending_not_expired() {
     let env = Env::default();
@@ -3004,8 +3205,7 @@ fn test_live_approval_below_threshold_reads_pending_not_expired() {
         &evidence_hash(&env, 1),
         &true,
     );
-    env.ledger()
-        .set_timestamp(1_000_000 + 7_776_000 + 1);
+    env.ledger().set_timestamp(1_000_000 + 7_776_000 + 1);
 
     // Verifier two now attests, so the type holds one live approval against a
     // threshold of two.
@@ -3058,8 +3258,7 @@ fn test_expired_reads_only_when_no_live_statement_remains() {
         &evidence_hash(&env, 1),
         &true,
     );
-    env.ledger()
-        .set_timestamp(1_000_000 + 7_776_000 + 1);
+    env.ledger().set_timestamp(1_000_000 + 7_776_000 + 1);
 
     assert_eq!(
         client.get_verification_status(&invoice_id, &VerificationType::TaxCompliance),
@@ -3124,4 +3323,3 @@ fn test_rotated_out_verifiers_cannot_lock_an_invoice() {
         VerificationStatus::Verified
     );
 }
-

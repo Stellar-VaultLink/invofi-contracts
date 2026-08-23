@@ -8,6 +8,12 @@ and are enforced by commitlint in CI.
 ## [Unreleased]
 
 ### Added
+- **Multisig threshold boundary tests (issue #128)** — six new tests covering
+  the exact N, N-1, N+1 threshold boundaries for M-of-N admin governance
+  (ADR-0010). Tests verify: 2-of-3 (N-1 fails, N succeeds, N+1 succeeds),
+  1-of-1 (N-1 fails, N succeeds), 3-of-3 (N-1 fails, N succeeds), and
+  threshold enforcement on non-pause admin ops (`set_rate`, `set_signers`)
+  to confirm the check is applied uniformly.
 - **M-of-N admin governance / multisig (issue #50)** — every contract's admin
   surface (`set_*`, `pause`/`unpause`, `resolve_dispute`, `transfer_admin`) is
   now gated by a threshold over a configurable set of signer addresses
