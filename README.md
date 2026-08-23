@@ -372,6 +372,13 @@ Thanks to everyone who has contributed to InvoFi — the list below is generated
                 </a>
             </td>
             <td align="center">
+                <a href="https://github.com/Sendi0011">
+                    <img src="https://avatars.githubusercontent.com/u/175633768?v=4" width="100;" alt="Sendi0011"/>
+                    <br />
+                    <sub><b>Sendi John</b></sub>
+                </a>
+            </td>
+            <td align="center">
                 <a href="https://github.com/Emmanuellsensai">
                     <img src="https://avatars.githubusercontent.com/u/86744981?v=4" width="100;" alt="Emmanuellsensai"/>
                     <br />
@@ -399,6 +406,8 @@ Thanks to everyone who has contributed to InvoFi — the list below is generated
                     <sub><b>Ajibose Ibrahim</b></sub>
                 </a>
             </td>
+		</tr>
+		<tr>
             <td align="center">
                 <a href="https://github.com/Just-Bamford">
                     <img src="https://avatars.githubusercontent.com/u/233368823?v=4" width="100;" alt="Just-Bamford"/>
@@ -406,13 +415,18 @@ Thanks to everyone who has contributed to InvoFi — the list below is generated
                     <sub><b>Bamford</b></sub>
                 </a>
             </td>
-		</tr>
-		<tr>
             <td align="center">
                 <a href="https://github.com/DevSolex">
                     <img src="https://avatars.githubusercontent.com/u/220715997?v=4" width="100;" alt="DevSolex"/>
                     <br />
                     <sub><b>Dev solex</b></sub>
+                </a>
+            </td>
+            <td align="center">
+                <a href="https://github.com/EneGab">
+                    <img src="https://avatars.githubusercontent.com/u/157655503?v=4" width="100;" alt="EneGab"/>
+                    <br />
+                    <sub><b>EneGab</b></sub>
                 </a>
             </td>
             <td align="center">
@@ -436,6 +450,8 @@ Thanks to everyone who has contributed to InvoFi — the list below is generated
                     <sub><b>Raw_Nuke</b></sub>
                 </a>
             </td>
+		</tr>
+		<tr>
             <td align="center">
                 <a href="https://github.com/Wetshakat">
                     <img src="https://avatars.githubusercontent.com/u/182114004?v=4" width="100;" alt="Wetshakat"/>
