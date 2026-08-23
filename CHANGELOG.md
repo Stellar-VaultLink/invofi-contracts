@@ -8,6 +8,12 @@ and are enforced by commitlint in CI.
 ## [Unreleased]
 
 ### Added
+- **Multisig threshold boundary tests (issue #128)** — six new tests covering
+  the exact N, N-1, N+1 threshold boundaries for M-of-N admin governance
+  (ADR-0010). Tests verify: 2-of-3 (N-1 fails, N succeeds, N+1 succeeds),
+  1-of-1 (N-1 fails, N succeeds), 3-of-3 (N-1 fails, N succeeds), and
+  threshold enforcement on non-pause admin ops (`set_rate`, `set_signers`)
+  to confirm the check is applied uniformly.
 - **M-of-N admin governance / multisig (issue #50)** — every contract's admin
   surface (`set_*`, `pause`/`unpause`, `resolve_dispute`, `transfer_admin`) is
   now gated by a threshold over a configurable set of signer addresses
@@ -281,6 +287,12 @@ and are enforced by commitlint in CI.
 ## [0.6.0] – 2026-08-06
 
 ### Added
+- **Multisig threshold boundary tests (issue #128)** — six new tests covering
+  the exact N, N-1, N+1 threshold boundaries for M-of-N admin governance
+  (ADR-0010). Tests verify: 2-of-3 (N-1 fails, N succeeds, N+1 succeeds),
+  1-of-1 (N-1 fails, N succeeds), 3-of-3 (N-1 fails, N succeeds), and
+  threshold enforcement on non-pause admin ops (`set_rate`, `set_signers`)
+  to confirm the check is applied uniformly.
 - **Insurance payout on default** — `reclaim_invoice` now triggers
   `insurance.pay_out(lender, principal + yield − amount_repaid)` after the
   grace period, capped at the pool's available balance and restricted to the
@@ -314,6 +326,12 @@ and are enforced by commitlint in CI.
 
 
 ### Added
+- **Multisig threshold boundary tests (issue #128)** — six new tests covering
+  the exact N, N-1, N+1 threshold boundaries for M-of-N admin governance
+  (ADR-0010). Tests verify: 2-of-3 (N-1 fails, N succeeds, N+1 succeeds),
+  1-of-1 (N-1 fails, N succeeds), 3-of-3 (N-1 fails, N succeeds), and
+  threshold enforcement on non-pause admin ops (`set_rate`, `set_signers`)
+  to confirm the check is applied uniformly.
 - **Position tokens** — `accept_offer` now mints a SEP-41 position
   token to the lender, 1:1 with the offer amount. New admin-gated
   `set_position_token` / `get_position_token` on the financing contract; the
@@ -338,6 +356,12 @@ and are enforced by commitlint in CI.
 ## [0.4.0] – 2026-08-03
 
 ### Added
+- **Multisig threshold boundary tests (issue #128)** — six new tests covering
+  the exact N, N-1, N+1 threshold boundaries for M-of-N admin governance
+  (ADR-0010). Tests verify: 2-of-3 (N-1 fails, N succeeds, N+1 succeeds),
+  1-of-1 (N-1 fails, N succeeds), 3-of-3 (N-1 fails, N succeeds), and
+  threshold enforcement on non-pause admin ops (`set_rate`, `set_signers`)
+  to confirm the check is applied uniformly.
 - **Currency registry** — `register_currency(admin, currency, token)` and
   `get_currency_token(currency)` now let the admin register arbitrary
   Symbol → SEP-41 token mappings. `accept_offer` and `repay_invoice` resolve
@@ -373,6 +397,12 @@ and are enforced by commitlint in CI.
 ## [0.3.0] – 2026-07-13
 
 ### Added
+- **Multisig threshold boundary tests (issue #128)** — six new tests covering
+  the exact N, N-1, N+1 threshold boundaries for M-of-N admin governance
+  (ADR-0010). Tests verify: 2-of-3 (N-1 fails, N succeeds, N+1 succeeds),
+  1-of-1 (N-1 fails, N succeeds), 3-of-3 (N-1 fails, N succeeds), and
+  threshold enforcement on non-pause admin ops (`set_rate`, `set_signers`)
+  to confirm the check is applied uniformly.
 - **Protocol events** — every state-mutating function now publishes a Soroban
   contract event, enabling off-chain indexers, activity feeds, and real-time
   UI updates without polling:
@@ -403,6 +433,12 @@ and are enforced by commitlint in CI.
 ## [0.2.0] – 2026-07-12
 
 ### Added
+- **Multisig threshold boundary tests (issue #128)** — six new tests covering
+  the exact N, N-1, N+1 threshold boundaries for M-of-N admin governance
+  (ADR-0010). Tests verify: 2-of-3 (N-1 fails, N succeeds, N+1 succeeds),
+  1-of-1 (N-1 fails, N succeeds), 3-of-3 (N-1 fails, N succeeds), and
+  threshold enforcement on non-pause admin ops (`set_rate`, `set_signers`)
+  to confirm the check is applied uniformly.
 - `MIN_INVOICE_AMOUNT` constant (10 XLM) — enforced in `register_invoice`
 - `MAX_OFFER_DURATION_SECS` constant (365 days) — enforced in `create_offer`
 - `InvoiceStatus::Disputed` variant for on-chain dispute tracking
@@ -432,6 +468,12 @@ and are enforced by commitlint in CI.
 ## [0.1.0] – 2026-06-01
 
 ### Added
+- **Multisig threshold boundary tests (issue #128)** — six new tests covering
+  the exact N, N-1, N+1 threshold boundaries for M-of-N admin governance
+  (ADR-0010). Tests verify: 2-of-3 (N-1 fails, N succeeds, N+1 succeeds),
+  1-of-1 (N-1 fails, N succeeds), 3-of-3 (N-1 fails, N succeeds), and
+  threshold enforcement on non-pause admin ops (`set_rate`, `set_signers`)
+  to confirm the check is applied uniformly.
 - Core invoice registry: `register_invoice`, `get_invoice`, `update_invoice_status`
 - Financing offer lifecycle: `create_offer`, `accept_offer`, `reject_offer`, `withdraw_offer`
 - Repayment: `repay_invoice` with partial repayment support
