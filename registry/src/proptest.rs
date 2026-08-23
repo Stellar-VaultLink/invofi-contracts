@@ -90,10 +90,16 @@ proptest! {
         let original = reg.register_invoice(&id, &originator, &principal, &symbol_short!("USD"), &due_date);
         prop_assert_eq!(original.due_date, due_date);
 
+        // Only Financed invoices may go Overdue (Pending -> Overdue is illegal
+        // per common::validate_transition), so hop to Financed first using the
+        // same stand-in wiring the frozen-amount test relies on.
+        reg.financing_marks_invoice_financed(&id);
+
         // Warp past due_date and mark overdue — a state-mutating call that
-        // touches the same struct.
+        // touches the same struct, now as a legal Financed -> Overdue move.
         env.ledger().set_timestamp(due_date + 1);
-        reg.mark_invoice_overdue(&id);
+        let overdue = reg.mark_invoice_overdue(&id);
+        prop_assert_eq!(overdue.status, InvoiceStatus::Overdue);
 
         let after = reg.get_invoice(&id);
         prop_assert_eq!(after.due_date, due_date, "due_date must never change post-registration");
