@@ -404,11 +404,8 @@ impl RepaymentContract {
         // interest = remaining * rate_bps * days_elapsed / 3_650_000
         let now = env.ledger().timestamp();
         let days_since_funded = ((now - offer.funded_at) / SECS_PER_DAY) as i128;
-        let accrued_interest = pro_rata_interest(
-            remaining_principal,
-            offer.interest_rate,
-            days_since_funded,
-        );
+        let accrued_interest =
+            pro_rata_interest(remaining_principal, offer.interest_rate, days_since_funded);
 
         // Overdue penalty (ADR-0007). Accrues from the invoice due date, on a
         // base frozen at principal + flat yield. Zero unless an admin has
@@ -510,7 +507,12 @@ impl RepaymentContract {
         if fully_repaid {
             env.events().publish(
                 (symbol_short!("inv_frp"), invoice_id.clone()),
-                (offer_id.clone(), amount, principal_portion, interest_portion),
+                (
+                    offer_id.clone(),
+                    amount,
+                    principal_portion,
+                    interest_portion,
+                ),
             );
         } else {
             env.events().publish(

@@ -33,8 +33,10 @@ fn setup_contracts<'a>(
     let registry_id = env.register(RegistryContract, (admin.clone(),));
     let registry_client = invofi_registry::RegistryContractClient::new(env, &registry_id);
 
-    let financing_id =
-        env.register(FinancingContract, (admin.clone(), registry_id.clone(), token.clone()));
+    let financing_id = env.register(
+        FinancingContract,
+        (admin.clone(), registry_id.clone(), token.clone()),
+    );
     let financing_client = super::FinancingContractClient::new(env, &financing_id);
 
     // Register financing as a trusted caller on the registry so its
@@ -45,7 +47,7 @@ fn setup_contracts<'a>(
 }
 
 /// Deploy a fresh test SEP-41 token and return its contract address.
-fn create_token(env: &Env) -> Address {
+pub(crate) fn create_token(env: &Env) -> Address {
     let token_admin = Address::generate(env);
     let sac = env.register_stellar_asset_contract_v2(token_admin);
     sac.address()
@@ -53,13 +55,7 @@ fn create_token(env: &Env) -> Address {
 
 /// Mint `amount` to `who` and approve `spender` to move those funds (the same
 /// flow a real lender runs on-chain before `accept_offer`).
-fn mint_and_approve(
-    env: &Env,
-    token_id: &Address,
-    spender: &Address,
-    who: &Address,
-    amount: i128,
-) {
+fn mint_and_approve(env: &Env, token_id: &Address, spender: &Address, who: &Address, amount: i128) {
     let asset_client = token::StellarAssetClient::new(env, token_id);
     asset_client.mint(who, &amount);
 
@@ -1018,7 +1014,10 @@ fn test_pause_blocks_all_financing_state_changes() {
 
     fn assert_paused<F: FnOnce()>(f: F) {
         let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(f));
-        assert!(result.is_err(), "state-changing function should panic while paused");
+        assert!(
+            result.is_err(),
+            "state-changing function should panic while paused"
+        );
     }
 
     assert_paused(|| {
@@ -1066,7 +1065,10 @@ fn test_pause_blocks_all_financing_state_changes() {
         fin.update_stats_repaid(&1_000i128, &50i128);
     });
 
-    assert_eq!(fin.get_offer_duration_limits().0, invofi_common::MIN_OFFER_DURATION_SECS);
+    assert_eq!(
+        fin.get_offer_duration_limits().0,
+        invofi_common::MIN_OFFER_DURATION_SECS
+    );
     assert_eq!(fin.get_stats().total_offers, 0);
 }
 
@@ -1283,8 +1285,8 @@ fn test_installment_math_matches_documented_model() {
     );
 
     // Documented model: principal_slice + yield_on_slice
-    let expected_principal_slice = 1_200_000_000i128 / 12;       // 100_000_000
-    let expected_yield = expected_principal_slice * 500 / 10_000;  // 5_000_000
+    let expected_principal_slice = 1_200_000_000i128 / 12; // 100_000_000
+    let expected_yield = expected_principal_slice * 500 / 10_000; // 5_000_000
     let expected_installment = expected_principal_slice + expected_yield; // 105_000_000
 
     assert_eq!(sched.installment_amount, expected_installment);
@@ -1709,7 +1711,10 @@ fn test_amend_offer_rewrites_terms_and_opens_negotiation() {
     assert_eq!(round.duration, 2_592_000);
     assert_eq!(round.timestamp, 1_000_000);
 
-    assert_eq!(fin.get_negotiation_status(&offer_id), NegotiationStatus::Open);
+    assert_eq!(
+        fin.get_negotiation_status(&offer_id),
+        NegotiationStatus::Open
+    );
     // 72-hour default window, frozen at open.
     assert_eq!(fin.get_negotiation_deadline(&offer_id), 1_000_000 + 259_200);
 
@@ -1962,7 +1967,10 @@ fn test_near_miss_terms_do_not_auto_accept() {
     assert_eq!(reg.get_invoice(&invoice_id).status, InvoiceStatus::Pending);
     let token_client = token::TokenClient::new(&env, &token_id);
     assert_eq!(token_client.balance(&originator), 0);
-    assert_eq!(fin.get_negotiation_status(&offer_id), NegotiationStatus::Open);
+    assert_eq!(
+        fin.get_negotiation_status(&offer_id),
+        NegotiationStatus::Open
+    );
 }
 
 #[test]
@@ -2002,7 +2010,10 @@ fn test_superseded_counter_offer_is_not_executable() {
 
     assert_eq!(result.status, OfferStatus::Pending);
     assert_eq!(reg.get_invoice(&invoice_id).status, InvoiceStatus::Pending);
-    assert_eq!(token::TokenClient::new(&env, &token_id).balance(&originator), 0);
+    assert_eq!(
+        token::TokenClient::new(&env, &token_id).balance(&originator),
+        0
+    );
 }
 
 // ── Optimistic concurrency ───────────────────────────────────────────────────
@@ -2097,7 +2108,10 @@ fn test_negotiation_status_expires_on_read_without_any_call() {
 
     // On the deadline itself the negotiation is still open.
     env.ledger().set_timestamp(1_000_000 + 259_200);
-    assert_eq!(fin.get_negotiation_status(&offer_id), NegotiationStatus::Open);
+    assert_eq!(
+        fin.get_negotiation_status(&offer_id),
+        NegotiationStatus::Open
+    );
 
     // One second later it is expired — derived, with nothing having been
     // called in between.
@@ -2337,7 +2351,14 @@ fn test_amend_after_acceptance_panics() {
         setup_negotiation(&env, &invoice_id, &offer_id, amount);
 
     fin.accept_offer(&offer_id, &originator);
-    fin.amend_offer(&offer_id, &lender, &0u32, &(amount), &400u32, &(1_296_000u64));
+    fin.amend_offer(
+        &offer_id,
+        &lender,
+        &0u32,
+        &(amount),
+        &400u32,
+        &(1_296_000u64),
+    );
 }
 
 #[test]
@@ -2733,5 +2754,8 @@ fn test_plain_accept_without_a_negotiation_emits_no_closure() {
         0,
         "an offer with no negotiation must not emit neg_clsd"
     );
-    assert_eq!(fin.get_negotiation_status(&offer_id), NegotiationStatus::None);
+    assert_eq!(
+        fin.get_negotiation_status(&offer_id),
+        NegotiationStatus::None
+    );
 }

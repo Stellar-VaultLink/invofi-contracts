@@ -163,7 +163,10 @@ fn test_pause_blocks_all_reputation_state_changes() {
     client.pause(&one(&env, &admin));
     fn assert_paused<F: FnOnce()>(f: F) {
         let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(f));
-        assert!(result.is_err(), "state-changing function should panic while paused");
+        assert!(
+            result.is_err(),
+            "state-changing function should panic while paused"
+        );
     }
 
     assert_paused(|| {

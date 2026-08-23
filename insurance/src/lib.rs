@@ -190,9 +190,7 @@ fn save_paid(env: &Env, offer_id: &Symbol, amount: i128) {
     } else {
         map.set(offer_id.clone(), amount);
     }
-    env.storage()
-        .persistent()
-        .set(&symbol_short!("paid"), &map);
+    env.storage().persistent().set(&symbol_short!("paid"), &map);
 }
 
 // ── Yield math ────────────────────────────────────────────────────────────────
@@ -481,14 +479,7 @@ impl InsuranceContract {
         // the new principal doesn't inflate historical accrual.
         let existing = stakes.get(staker.clone()).unwrap_or(0);
         if existing > 0 {
-            bank_accrued_yield(
-                &env,
-                &staker,
-                &stakes,
-                &mut timestamps,
-                &mut accruals,
-                now,
-            );
+            bank_accrued_yield(&env, &staker, &stakes, &mut timestamps, &mut accruals, now);
         } else {
             // First stake — just record the start time.
             timestamps.set(staker.clone(), now);
@@ -534,14 +525,7 @@ impl InsuranceContract {
         let mut accruals = load_yield_acc(&env);
         let now = env.ledger().timestamp();
 
-        bank_accrued_yield(
-            &env,
-            &staker,
-            &stakes,
-            &mut timestamps,
-            &mut accruals,
-            now,
-        );
+        bank_accrued_yield(&env, &staker, &stakes, &mut timestamps, &mut accruals, now);
         let yield_payout = accruals.get(staker.clone()).unwrap_or(0);
 
         // ── Principal accounting ───────────────────────────────────────────
@@ -576,10 +560,8 @@ impl InsuranceContract {
         // tokens to cover accrued yield on top of staked principal.
         if yield_payout > 0 {
             token_client.transfer(&env.current_contract_address(), &staker, &yield_payout);
-            env.events().publish(
-                (symbol_short!("pool_yld"), staker.clone()),
-                yield_payout,
-            );
+            env.events()
+                .publish((symbol_short!("pool_yld"), staker.clone()), yield_payout);
         }
 
         env.events()
@@ -721,10 +703,8 @@ impl InsuranceContract {
         save_reserved(&env, &offer_id, load_reserved(&env, &offer_id) + reserved);
         save_total_outstanding(&env, total_outstanding + reserved);
 
-        env.events().publish(
-            (symbol_short!("ins_rsrv"), offer_id.clone()),
-            reserved,
-        );
+        env.events()
+            .publish((symbol_short!("ins_rsrv"), offer_id.clone()), reserved);
         reserved
     }
 
@@ -737,12 +717,7 @@ impl InsuranceContract {
     ///
     /// Returns (paid, remaining_reserved) where paid is the amount actually
     /// transferred and remaining_reserved is what's still locked for this offer.
-    pub fn claim_payout(
-        env: Env,
-        offer_id: Symbol,
-        lender: Address,
-        amount: i128,
-    ) -> (i128, i128) {
+    pub fn claim_payout(env: Env, offer_id: Symbol, lender: Address, amount: i128) -> (i128, i128) {
         assert_not_paused(&env);
         let payout_caller: Address = env
             .storage()
@@ -881,3 +856,6 @@ impl InsuranceContract {
 
 #[cfg(test)]
 mod test;
+
+#[cfg(test)]
+mod proptest;

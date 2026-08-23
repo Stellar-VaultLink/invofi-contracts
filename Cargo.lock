@@ -781,6 +781,7 @@ version = "0.7.0"
 dependencies = [
  "invofi-common",
  "invofi-registry",
+ "proptest",
  "soroban-sdk",
 ]
 
@@ -794,6 +795,7 @@ dependencies = [
  "invofi-registry",
  "invofi-repayment",
  "invofi-reputation",
+ "proptest",
  "soroban-sdk",
 ]
 
@@ -802,6 +804,7 @@ name = "invofi-registry"
 version = "0.7.0"
 dependencies = [
  "invofi-common",
+ "proptest",
  "soroban-sdk",
 ]
 
@@ -823,6 +826,7 @@ name = "invofi-reputation"
 version = "0.7.0"
 dependencies = [
  "invofi-common",
+ "proptest",
  "soroban-sdk",
 ]
 
