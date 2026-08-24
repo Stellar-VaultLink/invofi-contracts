@@ -535,21 +535,22 @@ impl FinancingContract {
             );
         }
 
+        // Update state before external call (CEI pattern)
+        offer.status = OfferStatus::Accepted;
+        offer.funded_at = env.ledger().timestamp();
+        offers.set(offer_id, offer.clone());
+        save_offers(&env, &offers);
+
         // Pull the lender's principal and pay it straight to the business.
         let token_id = resolve_token(&env, &offer.currency);
         let token_client = token::TokenClient::new(&env, &token_id);
-        // CEI: External interaction before state writes. Safe because token is a standard Soroban token without reentrant hooks.
+        // CEI: External interaction after state writes. Safe from reentrancy.
         token_client.transfer_from(
             &env.current_contract_address(),
             &offer.lender,
             &invoice.originator,
             &offer.amount,
         );
-
-        offer.status = OfferStatus::Accepted;
-        offer.funded_at = env.ledger().timestamp();
-        offers.set(offer_id, offer.clone());
-        save_offers(&env, &offers);
 
         // Cross-contract: mark the invoice Financed in the registry via the
         // system transition (the financing contract is the authorized caller;
@@ -1299,8 +1300,7 @@ impl FinancingContract {
         // installment but the helper only reports whole installments — that
         // is explicitly in-scope per the issue.
         let installment_principal = offer.amount / (count as i128);
-        let installment_yield =
-            installment_principal * (offer.interest_rate as i128) / 10_000;
+        let installment_yield = installment_principal * (offer.interest_rate as i128) / 10_000;
         let installment_amount = installment_principal + installment_yield;
 
         assert!(

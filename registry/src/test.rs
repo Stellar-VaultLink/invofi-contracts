@@ -599,7 +599,10 @@ fn test_constructor_cannot_be_reinvoked() {
         &soroban_sdk::Symbol::new(&env, "__constructor"),
         args,
     );
-    assert!(result.is_err(), "constructor must not be re-invokable post-deploy");
+    assert!(
+        result.is_err(),
+        "constructor must not be re-invokable post-deploy"
+    );
 }
 
 #[test]
@@ -713,7 +716,10 @@ fn test_pause_blocks_all_registry_state_changes() {
 
     fn assert_paused<F: FnOnce()>(f: F) {
         let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(f));
-        assert!(result.is_err(), "state-changing function should panic while paused");
+        assert!(
+            result.is_err(),
+            "state-changing function should panic while paused"
+        );
     }
 
     assert_paused(|| {
@@ -757,7 +763,11 @@ fn test_pause_blocks_all_registry_state_changes() {
         client.raise_dispute(&invoice_id, &originator);
     });
     assert_paused(|| {
-        client.resolve_dispute(&admin, &invoice_id, &invofi_common::InvoiceStatus::Cancelled);
+        client.resolve_dispute(
+            &admin,
+            &invoice_id,
+            &invofi_common::InvoiceStatus::Cancelled,
+        );
     });
     assert_paused(|| {
         client.blacklist_address(&admin, &other);
@@ -1460,7 +1470,10 @@ fn test_transition_history_recorded() {
 
     // Query transition history
     let history = client.get_transition_history(&invoice_id);
-    assert!(!history.is_empty(), "Transition history should not be empty");
+    assert!(
+        !history.is_empty(),
+        "Transition history should not be empty"
+    );
     assert_eq!(history.len(), 1, "Should have one transition recorded");
 
     let first = history.first().unwrap();
@@ -1580,8 +1593,5 @@ fn test_transition_events_emitted() {
 
     let events = env.events().all();
     // Should have transition events
-    assert!(
-        !events.is_empty(),
-        "Should emit events on state transition"
-    );
+    assert!(!events.is_empty(), "Should emit events on state transition");
 }

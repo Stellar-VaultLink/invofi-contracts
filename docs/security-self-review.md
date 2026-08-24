@@ -123,7 +123,7 @@ already constrained. **Verdict: acceptable; no change required.**
 
 Soroban has no native reentrancy guard; the mitigation is ordering and authorization. A full cross-contract walk confirmed that all state writes happen before external interactions, with specific documented exceptions:
 
-- **accept_offer (financing)** performs the external token pull **before** persisting the offer state. A malicious token could attempt reentry, but the pull uses `transfer_from` against the **lender's allowance** — an allowance is consumed by the transfer, so a reentrant call cannot double-pull, and the offer/invoice status guards still hold during reentry. Additionally, `load_stats` and `load_lender_stats` are read *after* this external call, but the callee (a standard Soroban token) cannot mutate financing state, preserving invariant clarity.
+- **accept_offer (financing)** performs the external token pull **after** persisting the offer state to `Accepted`, adhering to the checks-effects-interactions pattern and neutralizing reentrancy. `load_stats` and `load_lender_stats` are read *after* this external call, but the callee (a standard Soroban token) cannot mutate financing state, preserving invariant clarity.
 - **repay_invoice (repayment)** transfers **out of the repayer's own balance** (direct `transfer`, repayer-authenticated). Reentry cannot spend funds the caller did not authorize. Repayment acts only as a router and has no local state to protect, so CEI is trivially satisfied.
 - **stake (insurance)** performs the external `transfer_from` before updating local stake balances. Similar to `accept_offer`, this exception is safe because standard tokens lack reentrant hooks, and even if they did, `stake` requires pre-allowance and hasn't yet credited the staker's local balance, neutralizing double-spend exploits. `load_stakes` and `load_pool_total` are read *after* this external call; because the token contract is a distinct and standard asset contract, it cannot mutate the insurance contract's state, preserving invariants.
 - Cross-contract *writer* callbacks (registry/financing/repayment) are **caller-guarded to the registered contract address** (commit `cfa5d41`), so a third-party contract cannot invoke system transitions.
@@ -145,10 +145,7 @@ Three hardening follow-ups are noted for the audit phase (§7).
 
 ## 7. Follow-ups for the audit phase (not blocking)
 
-1. Consider **checks-effects-interactions** reordering in `accept_offer`
-   (persist `Accepted` before the external transfer) once the token
-   contract is itself audited — currently protected by allowance
-   consumption, but the reorder removes reliance on that property.
+1. (Resolved) **checks-effects-interactions** reordering in `accept_offer` has been implemented (persist `Accepted` before the external transfer) to remove reliance on allowance consumption properties.
 2. Cap `interest_rate` at a documented maximum (e.g. `MAX_INTEREST_BPS`) in
    `create_offer` to bound `yield_amount` arithmetic from input, not just
    overflow-checks.

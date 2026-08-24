@@ -2,8 +2,8 @@
 extern crate std;
 
 use invofi_common::{InvoiceStatus, OfferStatus};
-use invofi_insurance::InsuranceContract;
 use invofi_financing::FinancingContract;
+use invofi_insurance::InsuranceContract;
 use invofi_registry::RegistryContract;
 use invofi_repayment::RepaymentContract;
 use invofi_reputation::ReputationContract;
@@ -222,7 +222,8 @@ fn test_registry_financing_offer_on_financed_invoice_panics() {
         &3_000_000u64,
     );
     // Use the originator escape hatch to move it to Financed.
-    p.reg.update_invoice_status(&invoice_id, &p.originator, &InvoiceStatus::Financed);
+    p.reg
+        .update_invoice_status(&invoice_id, &p.originator, &InvoiceStatus::Financed);
 
     // Try to create an offer on the already-Financed invoice — must panic.
     p.fin.create_offer(
@@ -290,7 +291,9 @@ fn test_financing_repayment_full_repay_syncs_state() {
     asset.mint(&p.originator, &total_due);
 
     // Repay in full via the Repayment contract.
-    let repaid = p.rep.repay_invoice(&invoice_id, &offer_id, &p.originator, &total_due);
+    let repaid = p
+        .rep
+        .repay_invoice(&invoice_id, &offer_id, &p.originator, &total_due);
     assert_eq!(repaid.status, InvoiceStatus::Repaid);
 
     // Offer must be Repaid in Financing (cross-crate state sync).
@@ -341,7 +344,9 @@ fn test_financing_repayment_partial_keeps_financed() {
     let partial = amount / 10;
     let asset = token::StellarAssetClient::new(&env, &p.token_id);
     asset.mint(&p.originator, &partial);
-    let repaid = p.rep.repay_invoice(&invoice_id, &offer_id, &p.originator, &partial);
+    let repaid = p
+        .rep
+        .repay_invoice(&invoice_id, &offer_id, &p.originator, &partial);
     assert_eq!(repaid.status, InvoiceStatus::Financed);
 
     let offer_after = p.fin.get_offer(&offer_id);
@@ -549,7 +554,8 @@ fn test_repayment_reputation_success_on_full_repay() {
     // Fund originator + full repayment.
     let asset = token::StellarAssetClient::new(&env, &p.token_id);
     asset.mint(&p.originator, &total_due);
-    p.rep.repay_invoice(&invoice_id, &offer_id, &p.originator, &total_due);
+    p.rep
+        .repay_invoice(&invoice_id, &offer_id, &p.originator, &total_due);
 
     // Reputation: one success → score 1.
     assert_eq!(p.repu.get_score(&p.originator), 1);
@@ -579,16 +585,42 @@ fn test_repayment_reputation_default_on_reclaim() {
 
     // We'll do two quick repay cycles to build score, then one default.
     for i in 0u32..2 {
-        let inv_id = soroban_sdk::Symbol::new(&env, match i { 0 => "inv_s1", _ => "inv_s2" });
-        let off_id = soroban_sdk::Symbol::new(&env, match i { 0 => "off_s1", _ => "off_s2" });
+        let inv_id = soroban_sdk::Symbol::new(
+            &env,
+            match i {
+                0 => "inv_s1",
+                _ => "inv_s2",
+            },
+        );
+        let off_id = soroban_sdk::Symbol::new(
+            &env,
+            match i {
+                0 => "off_s1",
+                _ => "off_s2",
+            },
+        );
         let due: u64 = 3_000_000 + i as u64;
 
         let asset = token::StellarAssetClient::new(&env, &p.token_id);
         asset.mint(&p.lender, &amount);
         mint_and_approve(&env, &p.token_id, &p.financing_id, &p.lender, amount);
 
-        p.reg.register_invoice(&inv_id, &p.originator, &amount, &symbol_short!("USDC"), &due);
-        p.fin.create_offer(&off_id, &inv_id, &p.lender, &amount, &symbol_short!("USDC"), &500u32, &2_592_000u64);
+        p.reg.register_invoice(
+            &inv_id,
+            &p.originator,
+            &amount,
+            &symbol_short!("USDC"),
+            &due,
+        );
+        p.fin.create_offer(
+            &off_id,
+            &inv_id,
+            &p.lender,
+            &amount,
+            &symbol_short!("USDC"),
+            &500u32,
+            &2_592_000u64,
+        );
         p.fin.accept_offer(&off_id, &p.originator);
 
         // Advance 365 days so pro-rata interest = flat yield.
@@ -773,7 +805,9 @@ fn test_full_lifecycle_register_offer_accept_repay() {
     // ── Step 5: Repay in full (Repayment → Financing → Registry → Reputation)
     let asset = token::StellarAssetClient::new(&env, &p.token_id);
     asset.mint(&p.originator, &total_due);
-    let repaid = p.rep.repay_invoice(&invoice_id, &offer_id, &p.originator, &total_due);
+    let repaid = p
+        .rep
+        .repay_invoice(&invoice_id, &offer_id, &p.originator, &total_due);
     assert_eq!(repaid.status, InvoiceStatus::Repaid);
 
     // Offer Repaid in Financing.

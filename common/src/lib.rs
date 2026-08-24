@@ -7,7 +7,9 @@
 
 #![no_std]
 
-use soroban_sdk::{contractclient, contracterror, contracttype, symbol_short, Address, Env, Map, Symbol};
+use soroban_sdk::{
+    contractclient, contracterror, contracttype, symbol_short, Address, Env, Map, Symbol,
+};
 
 // ─── Constants ───────────────────────────────────────────────────────────────
 
@@ -541,12 +543,7 @@ pub trait InsuranceInterface {
     /// Claim a partial payout from the insurance pool for a specific offer.
     /// The claim amount is bounded by the reserved amount for this offer and
     /// the pool's available balance. Returns (paid, remaining_reserved).
-    fn claim_payout(
-        env: Env,
-        offer_id: Symbol,
-        lender: Address,
-        amount: i128,
-    ) -> (i128, i128);
+    fn claim_payout(env: Env, offer_id: Symbol, lender: Address, amount: i128) -> (i128, i128);
 }
 
 // ─── Reputation Cross-Contract Interface ─────────────────────────────────────
@@ -573,13 +570,13 @@ pub trait ReputationInterface {
 
 use soroban_sdk::Vec;
 
-/// Validates and executes an invoice state transition. Emits a structured 
+/// Validates and executes an invoice state transition. Emits a structured
 /// transition event and records the transition in the history log.
-/// 
+///
 /// This is the single point of authority for all invoice status changes across
 /// the protocol. All entry points (registry, financing, repayment) must route
 /// through this function.
-/// 
+///
 /// # Panics
 /// - If the transition is invalid for the current state
 /// - If the transition would violate business rules (e.g., due_date check for Overdue)
@@ -604,7 +601,7 @@ pub fn assert_transition(
 }
 
 /// Validates that a transition from `from_status` to `to_status` is allowed.
-/// 
+///
 /// Valid transitions:
 /// - Pending -> Cancelled (originator cancellation)
 /// - Pending -> Financed (offer acceptance)
