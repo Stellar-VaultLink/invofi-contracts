@@ -1,0 +1,13 @@
+# cargo-nextest configuration for InvoFi Contracts.
+# https://nexte.st/docs/configuration/
+
+[profile.default]
+# Parallel by default; CI also sets PROPTEST_CASES for property tests.
+test-threads = "num-cpus"
+
+[profile.ci]
+# Used optionally via: cargo nextest run --profile ci
+# Do not terminate slow property tests — PROPTEST_CASES=2000 can take minutes.
+test-threads = "num-cpus"
+failure-output = "immediate-final"
+slow-timeout = { period = "120s" }

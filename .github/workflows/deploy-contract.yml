@@ -69,6 +69,9 @@ jobs:
           XLM_TOKEN=$(stellar contract id asset --asset native --network ${{ inputs.network }})
           USDC_TOKEN=$(stellar contract id asset --asset USDC:GBBD47IF6LWK7P7MDEVSCWR7DPUWV3NY3DTQEVFL4NAT4AQH3ZLLFLA5 --network ${{ inputs.network }})
 
+          # Constructors still take a single --admin: they only ever bind
+          # single-admin bootstrap mode (ADR-0010). Multisig, if wanted, is
+          # opted into post-deploy via set_signers.
           REGISTRY_ID=$(stellar contract deploy --wasm target/wasm32v1-none/release/invofi_registry.wasm --source invofi-deployer --network ${{ inputs.network }} -- --admin "$ADMIN_PUBLIC")
           FINANCING_ID=$(stellar contract deploy --wasm target/wasm32v1-none/release/invofi_financing.wasm --source invofi-deployer --network ${{ inputs.network }} -- --admin "$ADMIN_PUBLIC" --registry "$REGISTRY_ID" --token "$XLM_TOKEN")
           REPAYMENT_ID=$(stellar contract deploy --wasm target/wasm32v1-none/release/invofi_repayment.wasm --source invofi-deployer --network ${{ inputs.network }} -- --admin "$ADMIN_PUBLIC" --registry "$REGISTRY_ID" --financing "$FINANCING_ID" --token "$XLM_TOKEN")
@@ -114,12 +117,18 @@ jobs:
 
           # No initialize() calls: constructors already bound admin/wiring at
           # deploy. Only the admin-gated cross-contract wiring remains.
+          #
+          # Every admin-gated entry point now takes --signers, a JSON array of
+          # signer addresses (ADR-0010). A freshly deployed contract is in
+          # single-admin bootstrap mode, so a one-element array containing the
+          # constructor's admin is both necessary and sufficient here.
+          SIGNERS="[\"$ADMIN_PUBLIC\"]"
 
-          stellar contract invoke --id "$REGISTRY_ID" --source invofi-deployer --network ${{ inputs.network }} -- set_financing_contract --admin "$ADMIN_PUBLIC" --financing "$FINANCING_ID"
-          stellar contract invoke --id "$REGISTRY_ID" --source invofi-deployer --network ${{ inputs.network }} -- set_repayment_contract --admin "$ADMIN_PUBLIC" --repayment "$REPAYMENT_ID"
-          stellar contract invoke --id "$FINANCING_ID" --source invofi-deployer --network ${{ inputs.network }} -- set_repayment_contract --admin "$ADMIN_PUBLIC" --repayment "$REPAYMENT_ID"
-          stellar contract invoke --id "$FINANCING_ID" --source invofi-deployer --network ${{ inputs.network }} -- register_currency --admin "$ADMIN_PUBLIC" --currency XLM --token_addr "$XLM_TOKEN"
-          stellar contract invoke --id "$FINANCING_ID" --source invofi-deployer --network ${{ inputs.network }} -- register_currency --admin "$ADMIN_PUBLIC" --currency USDC --token_addr "$USDC_TOKEN"
+          stellar contract invoke --id "$REGISTRY_ID" --source invofi-deployer --network ${{ inputs.network }} -- set_financing_contract --signers "$SIGNERS" --financing "$FINANCING_ID"
+          stellar contract invoke --id "$REGISTRY_ID" --source invofi-deployer --network ${{ inputs.network }} -- set_repayment_contract --signers "$SIGNERS" --repayment "$REPAYMENT_ID"
+          stellar contract invoke --id "$FINANCING_ID" --source invofi-deployer --network ${{ inputs.network }} -- set_repayment_contract --signers "$SIGNERS" --repayment "$REPAYMENT_ID"
+          stellar contract invoke --id "$FINANCING_ID" --source invofi-deployer --network ${{ inputs.network }} -- register_currency --signers "$SIGNERS" --currency XLM --token_addr "$XLM_TOKEN"
+          stellar contract invoke --id "$FINANCING_ID" --source invofi-deployer --network ${{ inputs.network }} -- register_currency --signers "$SIGNERS" --currency USDC --token_addr "$USDC_TOKEN"
 
           # Position token: POS is deterministic per issuer, so compute its ID and
           # only deploy if missing (a re-run with the same deployer reuses the
@@ -133,14 +142,14 @@ jobs:
           # to an older financing contract, the step fails loudly with a clear
           # message rather than silently minting from the wrong admin.
           stellar contract invoke --id "$POS_ID" --source invofi-deployer --network ${{ inputs.network }} -- set_admin --new_admin "$FINANCING_ID"
-          stellar contract invoke --id "$FINANCING_ID" --source invofi-deployer --network ${{ inputs.network }} -- set_position_token --admin "$ADMIN_PUBLIC" --token "$POS_ID"
+          stellar contract invoke --id "$FINANCING_ID" --source invofi-deployer --network ${{ inputs.network }} -- set_position_token --signers "$SIGNERS" --token "$POS_ID"
 
           # Insurance payout caller + reputation recorder: repayment is the only
           # authorized caller on both.
-          stellar contract invoke --id "$REPAYMENT_ID" --source invofi-deployer --network ${{ inputs.network }} -- set_insurance --admin "$ADMIN_PUBLIC" --insurance "$INSURANCE_ID"
-          stellar contract invoke --id "$REPAYMENT_ID" --source invofi-deployer --network ${{ inputs.network }} -- set_reputation --admin "$ADMIN_PUBLIC" --reputation "$REPUTATION_ID"
-          stellar contract invoke --id "$INSURANCE_ID" --source invofi-deployer --network ${{ inputs.network }} -- set_payout_caller --admin "$ADMIN_PUBLIC" --payout_caller "$REPAYMENT_ID"
-          stellar contract invoke --id "$REPUTATION_ID" --source invofi-deployer --network ${{ inputs.network }} -- set_recorder --admin "$ADMIN_PUBLIC" --recorder "$REPAYMENT_ID"
+          stellar contract invoke --id "$REPAYMENT_ID" --source invofi-deployer --network ${{ inputs.network }} -- set_insurance --signers "$SIGNERS" --insurance "$INSURANCE_ID"
+          stellar contract invoke --id "$REPAYMENT_ID" --source invofi-deployer --network ${{ inputs.network }} -- set_reputation --signers "$SIGNERS" --reputation "$REPUTATION_ID"
+          stellar contract invoke --id "$INSURANCE_ID" --source invofi-deployer --network ${{ inputs.network }} -- set_payout_caller --signers "$SIGNERS" --payout_caller "$REPAYMENT_ID"
+          stellar contract invoke --id "$REPUTATION_ID" --source invofi-deployer --network ${{ inputs.network }} -- set_recorder --signers "$SIGNERS" --recorder "$REPAYMENT_ID"
 
           echo "position_token_id=$POS_ID" >> "$GITHUB_OUTPUT"
           echo "position_token=$POS_ID" >> "$GITHUB_STEP_SUMMARY"

@@ -12,10 +12,21 @@
 //! `score = successful_repayments * 1 - defaults * 2`, floored at 0.
 //! A richer weighted model (amount-weighted, recency decay) is tracked as a
 //! follow-up issue; see ADR-0004.
+//!
+//! Disputes (issue #134): a default that is later overturned by a dispute
+//! resolving in the originator's favour is neutralized via the admin-only
+//! `resolve_dispute` — the `-2` penalty stops counting against them. The
+//! rule is documented in ADR-0004 §7.
 
-use soroban_sdk::{contract, contractimpl, contracttype, symbol_short, Address, Env, Map};
+use soroban_sdk::{contract, contractimpl, contracttype, symbol_short, Address, Env, Map, Vec};
 
-use invofi_common::assert_not_paused;
+use invofi_common::{assert_not_paused, AdminConfig, ContractError};
+
+/// Threshold-gated admin check (ADR-0010). See `invofi_common::assert_threshold`.
+fn assert_admin(env: &Env, signers: &Vec<Address>) {
+    let cfg = invofi_common::load_admin_config(env);
+    invofi_common::assert_threshold(env, &cfg, signers);
+}
 
 /// Outcome discriminant for a successful full repayment.
 pub const OUTCOME_REPAID: u32 = 0;
@@ -60,35 +71,75 @@ impl ReputationContract {
     /// of the deploy operation, which only the deployer can authorize. There
     /// is therefore no separate initialize() call to front-run (issue #75).
     pub fn __constructor(env: Env, admin: Address) {
-        if env.storage().instance().has(&symbol_short!("admin")) {
-            panic!("Already initialized");
-        }
-        env.storage()
-            .instance()
-            .set(&symbol_short!("admin"), &admin);
+        invofi_common::init_admin_config(&env, &admin);
     }
 
+    /// Returns the primary admin address (the first configured signer). See
+    /// `RegistryContract::get_admin` for the same caveat under true M-of-N.
     pub fn get_admin(env: Env) -> Address {
-        env.storage()
-            .instance()
-            .get(&symbol_short!("admin"))
+        invofi_common::load_admin_config(&env)
+            .signers
+            .get(0)
             .unwrap_or_else(|| panic!("Not initialized"))
+    }
+
+    /// The full M-of-N admin governance config. See ADR-0010.
+    pub fn get_admin_config(env: Env) -> AdminConfig {
+        invofi_common::load_admin_config(&env)
+    }
+
+    /// The current signer set.
+    pub fn get_signers(env: Env) -> Vec<Address> {
+        invofi_common::load_admin_config(&env).signers
+    }
+
+    /// The current approval threshold.
+    pub fn get_threshold(env: Env) -> u32 {
+        invofi_common::load_admin_config(&env).threshold
+    }
+
+    /// Reconfigure the admin signer set and threshold. See
+    /// `RegistryContract::set_signers`.
+    pub fn set_signers(
+        env: Env,
+        signers: Vec<Address>,
+        new_signers: Vec<Address>,
+        new_threshold: u32,
+    ) {
+        assert_not_paused(&env);
+        assert_admin(&env, &signers);
+        invofi_common::validate_signers(&env, &new_signers, new_threshold);
+        invofi_common::save_admin_config(
+            &env,
+            &AdminConfig {
+                signers: new_signers,
+                threshold: new_threshold,
+            },
+        );
+    }
+
+    /// Transfers admin rights, collapsing the config back to a single new
+    /// admin. See `RegistryContract::transfer_admin`.
+    pub fn transfer_admin(env: Env, signers: Vec<Address>, new_admin: Address) {
+        assert_not_paused(&env);
+        assert_admin(&env, &signers);
+        let mut new_signers = Vec::new(&env);
+        new_signers.push_back(new_admin);
+        invofi_common::save_admin_config(
+            &env,
+            &AdminConfig {
+                signers: new_signers,
+                threshold: 1,
+            },
+        );
     }
 
     /// Configure the address allowed to record outcomes — this is the
     /// repayment contract. Admin only. Recording is disabled until a
     /// recorder is configured (fail-closed).
-    pub fn set_recorder(env: Env, admin: Address, recorder: Address) {
+    pub fn set_recorder(env: Env, signers: Vec<Address>, recorder: Address) {
         assert_not_paused(&env);
-        admin.require_auth();
-        let current: Address = env
-            .storage()
-            .instance()
-            .get(&symbol_short!("admin"))
-            .unwrap_or_else(|| panic!("Not initialized"));
-        if current != admin {
-            panic!("Only the current admin can set the recorder");
-        }
+        assert_admin(&env, &signers);
         env.storage()
             .instance()
             .set(&symbol_short!("recorder"), &recorder);
@@ -100,31 +151,15 @@ impl ReputationContract {
 
     // ── Pause / unpause (Task 4A circuit breaker) ───────────────────────────
 
-    pub fn pause(env: Env, admin: Address) {
-        admin.require_auth();
-        let current: Address = env
-            .storage()
-            .instance()
-            .get(&symbol_short!("admin"))
-            .unwrap_or_else(|| panic!("Not initialized"));
-        if current != admin {
-            panic!("Only admin can pause");
-        }
+    pub fn pause(env: Env, signers: Vec<Address>) {
+        assert_admin(&env, &signers);
         env.storage()
             .instance()
             .set(&symbol_short!("paused"), &true);
     }
 
-    pub fn unpause(env: Env, admin: Address) {
-        admin.require_auth();
-        let current: Address = env
-            .storage()
-            .instance()
-            .get(&symbol_short!("admin"))
-            .unwrap_or_else(|| panic!("Not initialized"));
-        if current != admin {
-            panic!("Only admin can unpause");
-        }
+    pub fn unpause(env: Env, signers: Vec<Address>) {
+        assert_admin(&env, &signers);
         env.storage()
             .instance()
             .set(&symbol_short!("paused"), &false);
@@ -155,10 +190,9 @@ impl ReputationContract {
             .get(&symbol_short!("recorder"))
             .unwrap_or_else(|| panic!("No recorder configured"));
         recorder.require_auth();
-        assert!(
-            outcome == OUTCOME_REPAID || outcome == OUTCOME_DEFAULTED,
-            "outcome must be 0 (repaid) or 1 (defaulted)"
-        );
+        if outcome != OUTCOME_REPAID && outcome != OUTCOME_DEFAULTED {
+            env.panic_with_error(ContractError::InvalidInput);
+        }
 
         let mut records = load_records(&env);
         let mut record = records.get(originator.clone()).unwrap_or(ReputationRecord {
@@ -175,6 +209,47 @@ impl ReputationContract {
 
         env.events()
             .publish((symbol_short!("reputn"), originator.clone()), outcome);
+    }
+
+    /// Adjust an originator's recorded outcome after a dispute resolution.
+    /// Admin only — mirrors the admin-only `resolve_dispute` in the
+    /// registry. After the admin resolves a disputed invoice, they call
+    /// this so the resolution is reflected in the originator's score.
+    ///
+    /// Documented rule (ADR-0004 §7): when `originator_favourable` is
+    /// true, one previously-recorded default is neutralized — `defaults`
+    /// decrements by one (floored at 0) — so the `-2` penalty stops
+    /// counting against the originator. When false, the recorded outcome
+    /// stands unchanged: the penalty, if already applied by
+    /// `record_outcome`, remains.
+    ///
+    /// Emits `ReputationChanged` (topic `rep_chg`) with the corrected
+    /// score when a default was neutralized. `get_score` stays public and
+    /// read-only. Returns the originator's corrected score.
+    pub fn resolve_dispute(
+        env: Env,
+        signers: Vec<Address>,
+        originator: Address,
+        originator_favourable: bool,
+    ) -> i128 {
+        assert_not_paused(&env);
+        assert_admin(&env, &signers);
+
+        let mut records = load_records(&env);
+        let mut record = records.get(originator.clone()).unwrap_or(ReputationRecord {
+            repayments: 0,
+            defaults: 0,
+        });
+        let mut score = (record.repayments as i128 - 2 * record.defaults as i128).max(0);
+        if originator_favourable && record.defaults > 0 {
+            record.defaults -= 1;
+            score = (record.repayments as i128 - 2 * record.defaults as i128).max(0);
+            records.set(originator.clone(), record);
+            save_records(&env, &records);
+            env.events()
+                .publish((symbol_short!("rep_chg"), originator.clone()), score);
+        }
+        score
     }
 
     // ── Query helpers (public, read-only) ───────────────────────────────────
@@ -209,3 +284,6 @@ impl ReputationContract {
 
 #[cfg(test)]
 mod test;
+
+#[cfg(test)]
+mod proptest;

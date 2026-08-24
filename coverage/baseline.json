@@ -1,0 +1,14 @@
+{
+  "workspace_lines_pct": 94.9,
+  "updated": "2026-08-21",
+  "policy": "Soft gate: PRs must not reduce line coverage on touched crates relative to this baseline. Regressions produce a PR comment and ::warning:: annotations but do not fail CI yet. There is no repo-wide hard percentage gate. Update this file (and coverage/badge.json) when you intentionally raise the bar after adding tests.",
+  "crates": {
+    "invofi-common": 81.36,
+    "invofi-registry": 98.68,
+    "invofi-financing": 96.39,
+    "invofi-repayment": 94.86,
+    "invofi-insurance": 83.38,
+    "invofi-reputation": 88.27,
+    "invofi-integration": 100.0
+  }
+}

@@ -1,0 +1,28 @@
+# CodeRabbit AI code review configuration.
+# Full reference: https://docs.coderabbit.ai/reference/configuration
+language: en-US
+
+reviews:
+  # chill profile: focused on real issues, fewer false positives.
+  profile: chill
+  request_changes_workflow: false
+  high_level_summary: true
+  poem: false
+  collapse_walkthrough: true
+  review_status: true
+  auto_review:
+    enabled: true
+    drafts: false
+    base_branches:
+      - master
+
+path_rules:
+  # Ignore auto-generated files and build artifacts
+  - patterns:
+      - "target/**"
+      - "*.wasm"
+      - "Cargo.lock"
+    status: skip
+
+chat:
+  auto_reply: true

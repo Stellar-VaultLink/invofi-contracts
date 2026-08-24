@@ -8,6 +8,186 @@ and are enforced by commitlint in CI.
 ## [Unreleased]
 
 ### Added
+- **Multisig threshold boundary tests (issue #128)** — six new tests covering
+  the exact N, N-1, N+1 threshold boundaries for M-of-N admin governance
+  (ADR-0010). Tests verify: 2-of-3 (N-1 fails, N succeeds, N+1 succeeds),
+  1-of-1 (N-1 fails, N succeeds), 3-of-3 (N-1 fails, N succeeds), and
+  threshold enforcement on non-pause admin ops (`set_rate`, `set_signers`)
+  to confirm the check is applied uniformly.
+- **M-of-N admin governance / multisig (issue #50)** — every contract's admin
+  surface (`set_*`, `pause`/`unpause`, `resolve_dispute`, `transfer_admin`) is
+  now gated by a threshold over a configurable set of signer addresses
+  (`AdminConfig { signers, threshold }` in `invofi_common`) instead of a
+  single stored `Address`. A call is authorized once `threshold` distinct
+  configured signers each `require_auth` within the same transaction — no
+  on-chain proposal queue, same "same-block" philosophy as the pause
+  mechanism (ADR-0001). Every constructor still takes one `admin: Address`
+  and boots into single-admin mode (`signers: [admin], threshold: 1`), which
+  behaves identically to the old single-admin check; a deployment opts into
+  true M-of-N post-deploy via the new `set_signers`. Design, alternatives,
+  and the redeploy-based migration path for already-deployed instances are in
+  `docs/adr/0010-multisig-admin-governance.md`.
+  - **Breaking ABI change**: every admin-gated function's first argument
+    changes from `admin: Address` to `signers: Vec<Address>`. CLI callers
+    (`deploy-contract.yml`, `scripts/deploy.sh`) pass a one-element JSON array
+    (`--signers '["G..."]'`) for bootstrap-mode deployments.
+  - New per-contract getters: `get_admin_config`, `get_signers`,
+    `get_threshold`. `get_admin` is kept for backward compatibility and now
+    returns the primary signer (`signers[0]`).
+- **CI: cargo-nextest + line coverage** — the Test job runs the full suite under
+  [nextest](https://nexte.st/) (parallel, same assertions). A Coverage job uses
+  `cargo llvm-cov nextest`, publishes LCOV/Codecov artifacts, and soft-checks
+  touched crates against `coverage/baseline.json` (PR comment + annotations, no
+  hard fail yet). README badge + CONTRIBUTING document local test/coverage flows.
+- **`MAX_INTEREST_BPS` constant (10 000 bps = 100%)** — `create_offer` now
+  rejects interest rates above the cap with a clear panic message, bounding
+  `yield_amount = amount * rate / 10_000` so pathological rates cannot grow
+  the yield arbitrarily large (issue #39).
+- **Offer amendment and counter-offer protocol (issue #180)** — financing
+  offers are no longer take-it-or-leave-it. A lender can revise their own terms
+  with `amend_offer`, an originator can name theirs with `counter_offer`, and
+  when the two sides land on the same terms the offer settles in that same
+  transaction. Design in `docs/adr/0008-offer-negotiation.md`.
+  - **Auto-accept matches two pre-existing commitments** rather than spending
+    on a counterparty's behalf. Agreement is exact equality of the canonical
+    term tuple `(amount, interest_rate, duration)` — no tolerance, no rounding.
+    When the originator counters at the lender's standing terms, their own
+    `require_auth` covers the settlement; when the lender amends onto the
+    originator's live counter-offer, what authorizes financing them is the
+    counter-offer they themselves recorded on-chain. Settlement runs the
+    extracted `settle_acceptance`, the same code path `accept_offer` uses, so
+    the two can never drift.
+  - **Every round is version-guarded.** `amend_offer` / `counter_offer` take
+    `expected_round`, the history length the caller believes it is amending. A
+    round written against a negotiation that moved underneath it reverts with
+    `InvalidInput` instead of applying to terms the caller never saw — which is
+    what would otherwise let a stale counter-offer auto-execute.
+  - **A recorded counter-offer is bounded and revocable.** It stays executable
+    only inside the negotiation window (default 72 h, admin-configurable within
+    1 h – 30 days via `set_negotiation_window`); the deadline is frozen when
+    the negotiation opens, so later rounds never push it out; proposing again
+    supersedes, since only a party's most recent record is live; and either
+    party can end the negotiation outright with `close_negotiation`.
+  - **Expiry is derived on read**, since Soroban has no scheduler:
+    `get_negotiation_status` computes `Expired` from the deadline whether or
+    not anyone has called anything. `close_negotiation` is the poke that
+    persists the outcome and emits the event — permissionless after the
+    deadline, restricted to the two parties before it.
+  - New storage keyed `("negot", offer_id)` as a `Vec<NegotiationRecord>`, capped
+    at 20 rounds so the entry stays bounded. New reads `get_negotiation`,
+    `get_negotiation_status`, `get_negotiation_deadline`,
+    `get_negotiation_window`. New events `off_amd`, `ctr_off`, `neg_clsd`.
+  - Amended terms are validated against the same bounds `create_offer`
+    enforces, so a negotiation cannot reach terms the offer could not have been
+    created with.
+  - 26 new tests, driven through the contract client and asserting on real
+    settlement effects (token balances, registry invoice status): both
+    auto-accept directions, the near-miss that must not settle, a superseded
+    counter-offer that must not execute, stale-round rejection from both sides,
+    derived expiry at the deadline boundary, an expired counter-offer that can
+    no longer be taken, revocation, permissionless post-deadline close, the
+    round cap, the pause and authorization guards, and the events.
+  - `amend_offer` also satisfies issue #131 (lender-only amendment of a
+    Pending offer's amount/rate/duration, with bounds re-validated and a
+    clear panic on a non-Pending offer) — #131 was left open when this
+    landed even though #180 listed it as related.
+- **Invoice verification oracle (issue #181)** — `registry` now records
+  attestations from a trusted verifier set about off-chain invoice facts:
+  document hash, business registration, and tax compliance. Design in
+  `docs/adr/0009-verification-oracle.md`.
+  - **The trust boundary is verifier authentication, not fact verification.**
+    A contract cannot check that a PDF hash corresponds to a real invoice or
+    that a tax filing is current. `attest` authenticates that a verifier in
+    the admin-governed set signed a claim and stores that verifier's current
+    attestation tamper-evidently; the truth of the claim rests on verifier
+    honesty, bounded by the m-of-n threshold.
+    The ADR states this explicitly so "trust-minimised" is not read as
+    on-chain fact-checking.
+  - **m-of-n over distinct verifiers.** `set_verifier_threshold` sets how
+    many *distinct* verifiers must approve before a type reads `Verified`;
+    re-attesting replaces a verifier's own prior record, so no single
+    verifier can reach the threshold alone. A live rejection dominates
+    approvals — one honest verifier can block a fraudulent invoice that
+    others waved through.
+  - **Removing a verifier revokes their statements.** Only the current
+    verifier set is counted when deriving status, so a removed verifier's
+    approvals stop satisfying a threshold immediately — otherwise removal
+    would not revoke anything, which is the whole point of removing a
+    compromised key. Their records stay readable through
+    `get_verifications`: the history of who said what is preserved, it just
+    no longer votes — until the invoice reaches its attestation cap, where
+    departed verifiers' records are the first slots reclaimed. Retention is
+    best-effort against a bounded store, not a permanent guarantee.
+  - **Status is derived per verification type**, with
+    `get_invoice_verification_status` returning the conjunction across all
+    three. `Verified` requires every type to have cleared its threshold.
+  - **Expiry is derived on read** (default 90 days, admin-configurable
+    within 1–365 days). Soroban has no scheduler, so an attestation past
+    `valid_until` reads as `Expired` whether or not anyone has called
+    anything; the permissionless `expire_verifications` poke persists that
+    outcome and emits `ver_exp` exactly once per attestation. Validity is
+    stamped at attest time and later admin changes are not retroactive.
+  - **The fee is charged on rejection as well as approval.** It pays for the
+    verification work, and refunding it on rejection would pay verifiers
+    only for approving — a direct incentive to rubber-stamp. Documented as a
+    deliberate answer to a case the issue left open.
+  - `fee = invoice_amount * verification_fee_bps / 10_000`, computed with
+    `checked_mul` and dividing last, transferred from the originator to the
+    verifier in the same transaction that stores the attestation, so there
+    is no charge without a record and no record without a charge.
+  - New admin entrypoints `add_verifier`, `remove_verifier`,
+    `set_verifier_threshold`, `set_verification_fee`,
+    `set_attestation_validity`, and `register_currency` (fee settlement
+    token), all pause-guarded and admin-only. **`verification_fee_bps`
+    defaults to 0, which disables the transfer entirely** — this change is
+    behaviourally inert until an admin enables it.
+  - 28 new tests covering all three verification types, the m-of-n
+    threshold, fee math and its overflow guard, fee-on-rejection, expiry and
+    re-attestation, non-retroactive validity changes, the removed-verifier
+    case, and the three events.
+- **Dispute-aware reputation adjustment (issue #134)** — a default that a
+  dispute later overturns no longer keeps punishing the originator.
+  `reputation` gains an admin-only `resolve_dispute(admin, originator,
+  originator_favourable)` mirroring the registry's admin-only
+  `resolve_dispute`: when the resolution is in the originator's favour, one
+  previously-recorded default is **neutralized** (`defaults` decrements by
+  one, floored at 0) so the `-2` penalty stops counting against them. A
+  resolution against the originator leaves the recorded outcome unchanged.
+  - The documented rule lives in ADR-0004 §7. The scoring formula itself is
+    untouched — `get_score` stays `repayments − 2×defaults`, floored at 0,
+    public and read-only, and non-disputed outcomes are unaffected.
+  - The adjustment emits a `ReputationChanged` event (topic `rep_chg`, new
+    to the canonical events table) carrying the corrected score.
+  - The recorder restriction is unchanged: only the repayment contract can
+    record new outcomes; only the admin can adjust them after a dispute.
+  - 6 new tests: favourable neutralization, favourable no-op with no
+    recorded default, unfavourable no-op, non-admin rejection
+    (`E_UNAUTHORIZED`), pause guard, and the emitted event payload.
+
+- **Partial repayment with pro-rata interest (issue #176)** — originators
+  can now make partial payments against an invoice, with interest calculated
+  pro-rata on the remaining principal: `interest = remaining × rate_bps ×
+  days_elapsed / 3_650_000`. The offer stays `Financed` until the remaining
+  principal reaches zero, at which point the final payment triggers full
+  settlement.
+  - New `PaymentRecord` struct in `common/src/lib.rs` tracks each payment's
+    id, amount, interest_paid, principal_paid, timestamp, and payer.
+  - Payment history stored on-chain as `Vec<PaymentRecord>` per invoice
+    (storage key `("pays", invoice_id)`), queryable via
+    `get_payment_history(invoice_id)`.
+  - Minimum partial payment enforced: each payment must be ≥ 1% of the
+    original principal unless it fully settles the remaining balance.
+  - `get_remaining_principal(offer_id)` and
+    `calculate_accrued_interest(offer_id)` read-only queries added.
+  - Two new Soroban events: `parpay` (partial payment received, carrying
+    offer_id, amount, principal_portion, interest_portion, remaining) and
+    `inv_frp` (invoice fully repaid, carrying offer_id, amount,
+    principal_portion, interest_portion). The legacy `inv_rep` event is
+    preserved for backward compatibility.
+  - `calculate_total_due` now returns `remaining_principal + pro-rata
+    interest + penalty` instead of the previous flat-yield model.
+  - All existing tests updated for the new interest model; proptest
+    (2 000 cases) validates the math invariants.
 - **Cross-crate integration test harness** — new `integration/` workspace crate
   that deploys all five contracts (registry, financing, repayment, insurance,
   reputation) with mock tokens and drives the full invoice lifecycle across
@@ -17,6 +197,49 @@ and are enforced by commitlint in CI.
   and registry ↔ repayment (overdue/delegate). At least one happy-path and
   one negative test per boundary. Existing per-crate unit tests are untouched
   (issue #103).
+- **Overdue penalty interest (issue #49)** — `repayment` now accrues a
+  penalty on obligations past their invoice due date, threaded through
+  `calculate_total_due`, `repay_invoice`, and the `reclaim_invoice` payout
+  math. Design in `docs/adr/0007-overdue-penalty-interest.md`.
+  - Accrual is anchored on `invoice.due_date` (not the permissionless
+    Overdue status transition, which would be gameable by withholding a
+    keeper call) and runs in whole elapsed days, truncated — the partial day
+    in progress is not charged, so rounding favours the borrower.
+  - The accrual base is **frozen** at principal + yield and does not shrink
+    as repayments land. This is deliberate: a base tracking the outstanding
+    balance would let a large late partial payment retroactively erase
+    penalty already accrued, since a read-time recomputation would apply the
+    reduced principal across the entire elapsed window.
+  - Total accrued penalty is capped at `penalty_cap_bps` of that base, so
+    worst-case liability is a fixed multiple of the original obligation
+    rather than a function of how long the invoice went unattended.
+  - New admin entrypoint `set_penalty(admin, penalty_bps, cap_bps)`
+    (pause-guarded, admin-only, `penalty_bps` ≤ 500 = 5%/day, `cap_bps` ≤
+    10 000), with getters `get_penalty_bps` / `get_penalty_cap_bps`. **Both
+    parameters default to 0, which disables accrual entirely** — this change
+    is behaviourally inert until an admin enables it per network.
+  - New read-only `calculate_penalty(offer_id)` exposes the penalty
+    component on its own, for UIs that show it separately from the combined
+    figure.
+  - The insurance pool does **not** cover accrued penalty: the claim in
+    `reclaim_invoice` remains principal + yield − repaid, per ADR-0003.
+    Penalty is a punitive charge owed by the originator, not an insured
+    credit loss, and covering it would make staker losses grow with the time
+    a defaulted invoice went unreclaimed.
+  - 16 new tests cover per-day accrual, the truncation boundary, the cap
+    boundary (days 299/300/400/5 000), the frozen base across a 95% partial
+    repayment, penalty-must-be-settled-for-full-repayment, accrual continuing
+    across the Overdue transition, exclusion from the insurance payout, and
+    the admin/range/pause guards on `set_penalty`.
+
+### Changed
+- **`calculate_total_due` now reads the registry.** It previously read only
+  the offer from financing; it needs `invoice.due_date` to compute accrued
+  penalty, so this query now also depends on the registry being reachable.
+- **The `off_def` event gained a fourth element** (accrued penalty, `i128`),
+  emitted by `reclaim_invoice` so indexers can track the portion of the
+  lender's claim the pool did not cover. Consumers that destructure the
+  payload positionally need updating.
 
 ### Docs
 - **Migration runbook**: add `docs/migration-runbook.md` with the snapshot
