@@ -591,6 +591,19 @@ pub fn calculate_offer_score(
     // Combined score = base_score * time_bonus * amount_factor / scale
     // Scale down by 100_000_000 to prevent overflow (10000 * 10000)
     (base_score * time_bonus * amount_factor) / 100_000_000
+/// An event record stored in the on-chain event index.
+///
+/// Lightweight summary that mirrors a Soroban event log entry, enabling
+/// efficient querying by event type, time range, and actor address.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct EventRecord {
+    pub event_id: u64,
+    pub event_type: Symbol,
+    pub timestamp: u64,
+    pub actor: Address,
+    pub contract_id: Address,
+    pub data_key: Symbol,
 }
 
 // ─── Currency Registry ───────────────────────────────────────────────────────
