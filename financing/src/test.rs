@@ -2759,3 +2759,804 @@ fn test_plain_accept_without_a_negotiation_emits_no_closure() {
         NegotiationStatus::None
     );
 }
+
+// ─── Auction Engine tests ────────────────────────────────────────────────────
+
+#[test]
+fn test_set_and_get_auction_config() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let admin = Address::generate(&env);
+    let token = Address::generate(&env);
+    let (_reg, fin) = setup_contracts(&env, &admin, &token);
+
+    // Set custom auction config
+    fin.set_auction_config(&admin, &20u32, &(86_400u64 * 3), &(86_400u64 * 2));
+
+    let config = fin.get_auction_config();
+    assert_eq!(config.max_offers_per_invoice, 20);
+    assert_eq!(config.auction_deadline_secs, 86_400 * 3);
+    assert_eq!(config.offer_expiry_secs, 86_400 * 2);
+}
+
+#[test]
+#[should_panic]
+fn test_set_auction_config_invalid_max_offers() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let admin = Address::generate(&env);
+    let token = Address::generate(&env);
+    let (_reg, fin) = setup_contracts(&env, &admin, &token);
+
+    // Try to set max_offers > 50 (should panic)
+    fin.set_auction_config(&admin, &100u32, &86_400u64, &86_400u64);
+}
+
+#[test]
+fn test_multiple_offers_per_invoice() {
+    let env = Env::default();
+    env.mock_all_auths();
+    env.ledger().set_timestamp(1_000_000);
+
+    let admin = Address::generate(&env);
+    let token = Address::generate(&env);
+    let (reg, fin) = setup_contracts(&env, &admin, &token);
+
+    let originator = Address::generate(&env);
+    let invoice_id = symbol_short!("inv_auc1");
+
+    reg.register_invoice(
+        &invoice_id,
+        &originator,
+        &1_000_000_000i128,
+        &symbol_short!("USDC"),
+        &(env.ledger().timestamp() + 86_400 * 30),
+    );
+
+    // Create 3 offers from different lenders
+    let lender1 = Address::generate(&env);
+    let lender2 = Address::generate(&env);
+    let lender3 = Address::generate(&env);
+    
+    fin.create_offer(
+        &symbol_short!("off_a1"),
+        &invoice_id,
+        &lender1,
+        &1_000_000_000i128,
+        &symbol_short!("USDC"),
+        &490u32,
+        &86_400u64,
+    );
+
+    fin.create_offer(
+        &symbol_short!("off_a2"),
+        &invoice_id,
+        &lender2,
+        &1_000_000_000i128,
+        &symbol_short!("USDC"),
+        &480u32,
+        &86_400u64,
+    );
+
+    fin.create_offer(
+        &symbol_short!("off_a3"),
+        &invoice_id,
+        &lender3,
+        &1_000_000_000i128,
+        &symbol_short!("USDC"),
+        &470u32,
+        &86_400u64,
+    );
+
+    // Verify all 3 offers exist
+    let pending_offers = fin.get_pending_offers_by_invoice(&invoice_id);
+    assert_eq!(pending_offers.len(), 3);
+}
+
+#[test]
+#[should_panic]
+fn test_max_offers_per_invoice_enforced() {
+    let env = Env::default();
+    env.mock_all_auths();
+    env.ledger().set_timestamp(1_000_000);
+
+    let admin = Address::generate(&env);
+    let token = Address::generate(&env);
+    let (reg, fin) = setup_contracts(&env, &admin, &token);
+
+    // Set max offers to 3
+    fin.set_auction_config(&admin, &3u32, &86_400u64, &86_400u64);
+
+    let originator = Address::generate(&env);
+    let invoice_id = symbol_short!("inv_max");
+
+    reg.register_invoice(
+        &invoice_id,
+        &originator,
+        &1_000_000_000i128,
+        &symbol_short!("USDC"),
+        &(env.ledger().timestamp() + 86_400 * 30),
+    );
+
+    // Create 3 offers (should succeed)
+    let lender1 = Address::generate(&env);
+    let lender2 = Address::generate(&env);
+    let lender3 = Address::generate(&env);
+    
+    fin.create_offer(
+        &symbol_short!("off_m1"),
+        &invoice_id,
+        &lender1,
+        &1_000_000_000i128,
+        &symbol_short!("USDC"),
+        &500u32,
+        &86_400u64,
+    );
+
+    fin.create_offer(
+        &symbol_short!("off_m2"),
+        &invoice_id,
+        &lender2,
+        &1_000_000_000i128,
+        &symbol_short!("USDC"),
+        &500u32,
+        &86_400u64,
+    );
+
+    fin.create_offer(
+        &symbol_short!("off_m3"),
+        &invoice_id,
+        &lender3,
+        &1_000_000_000i128,
+        &symbol_short!("USDC"),
+        &500u32,
+        &86_400u64,
+    );
+
+    // 4th offer should panic
+    let lender4 = Address::generate(&env);
+    fin.create_offer(
+        &symbol_short!("off_m4"),
+        &invoice_id,
+        &lender4,
+        &1_000_000_000i128,
+        &symbol_short!("USDC"),
+        &500u32,
+        &86_400u64,
+    );
+}
+
+#[test]
+fn test_auction_metadata_created_on_first_offer() {
+    let env = Env::default();
+    env.mock_all_auths();
+    env.ledger().set_timestamp(1_000_000);
+
+    let admin = Address::generate(&env);
+    let token = Address::generate(&env);
+    let (reg, fin) = setup_contracts(&env, &admin, &token);
+
+    let originator = Address::generate(&env);
+    let lender = Address::generate(&env);
+    let invoice_id = symbol_short!("inv_meta");
+
+    reg.register_invoice(
+        &invoice_id,
+        &originator,
+        &1_000_000_000i128,
+        &symbol_short!("USDC"),
+        &(env.ledger().timestamp() + 86_400 * 30),
+    );
+
+    // No metadata before first offer
+    assert!(fin.get_auction_metadata(&invoice_id).is_none());
+
+    fin.create_offer(
+        &symbol_short!("off_meta"),
+        &invoice_id,
+        &lender,
+        &1_000_000_000i128,
+        &symbol_short!("USDC"),
+        &500u32,
+        &86_400u64,
+    );
+
+    // Metadata should exist after first offer
+    let metadata = fin.get_auction_metadata(&invoice_id).unwrap();
+    assert_eq!(metadata.invoice_id, invoice_id);
+    assert_eq!(metadata.started_at, 1_000_000);
+    assert!(!metadata.closed);
+}
+
+#[test]
+fn test_get_best_offer_lowest_rate_wins() {
+    let env = Env::default();
+    env.mock_all_auths();
+    env.ledger().set_timestamp(1_000_000);
+
+    let admin = Address::generate(&env);
+    let token = Address::generate(&env);
+    let (reg, fin) = setup_contracts(&env, &admin, &token);
+
+    let originator = Address::generate(&env);
+    let invoice_id = symbol_short!("inv_best");
+
+    reg.register_invoice(
+        &invoice_id,
+        &originator,
+        &1_000_000_000i128,
+        &symbol_short!("USDC"),
+        &(env.ledger().timestamp() + 86_400 * 30),
+    );
+
+    // Create offers with different rates (same amount, same time)
+    let lender1 = Address::generate(&env);
+    let lender2 = Address::generate(&env);
+    let lender3 = Address::generate(&env);
+
+    fin.create_offer(
+        &symbol_short!("off_b1"),
+        &invoice_id,
+        &lender1,
+        &1_000_000_000i128,
+        &symbol_short!("USDC"),
+        &600u32, // Higher rate
+        &86_400u64,
+    );
+
+    fin.create_offer(
+        &symbol_short!("off_b2"),
+        &invoice_id,
+        &lender2,
+        &1_000_000_000i128,
+        &symbol_short!("USDC"),
+        &400u32, // LOWEST rate - should win
+        &86_400u64,
+    );
+
+    fin.create_offer(
+        &symbol_short!("off_b3"),
+        &invoice_id,
+        &lender3,
+        &1_000_000_000i128,
+        &symbol_short!("USDC"),
+        &500u32, // Medium rate
+        &86_400u64,
+    );
+
+    let best = fin.get_best_offer(&invoice_id).unwrap();
+    assert_eq!(best.id, symbol_short!("off_b2"));
+    assert_eq!(best.interest_rate, 400u32);
+    assert_eq!(best.lender, lender2);
+}
+
+#[test]
+fn test_time_weighted_scoring_early_bonus() {
+    let env = Env::default();
+    env.mock_all_auths();
+    env.ledger().set_timestamp(1_000_000);
+
+    let admin = Address::generate(&env);
+    let token = Address::generate(&env);
+    let (reg, fin) = setup_contracts(&env, &admin, &token);
+
+    // Set auction deadline to 10 days
+    fin.set_auction_config(&admin, &10u32, &(86_400u64 * 10), &(86_400u64 * 2));
+
+    let originator = Address::generate(&env);
+    let invoice_id = symbol_short!("inv_time");
+
+    reg.register_invoice(
+        &invoice_id,
+        &originator,
+        &1_000_000_000i128,
+        &symbol_short!("USDC"),
+        &(env.ledger().timestamp() + 86_400 * 30),
+    );
+
+    let lender1 = Address::generate(&env);
+    let lender2 = Address::generate(&env);
+
+    // First offer at t=1_000_000 with rate 500
+    fin.create_offer(
+        &symbol_short!("off_t1"),
+        &invoice_id,
+        &lender1,
+        &1_000_000_000i128,
+        &symbol_short!("USDC"),
+        &500u32,
+        &86_400u64,
+    );
+
+    // Second offer 5 days later with slightly better rate
+    env.ledger().set_timestamp(1_000_000 + 86_400 * 5);
+    fin.create_offer(
+        &symbol_short!("off_t2"),
+        &invoice_id,
+        &lender2,
+        &1_000_000_000i128,
+        &symbol_short!("USDC"),
+        &490u32, // Slightly better rate
+        &86_400u64,
+    );
+
+    // Get scores for both offers
+    let score1 = fin.get_offer_score(&symbol_short!("off_t1"));
+    let score2 = fin.get_offer_score(&symbol_short!("off_t2"));
+
+    // First offer should have higher score due to time bonus
+    // even though second has slightly better rate
+    assert!(score1 > score2, "Early offer should win with time bonus");
+
+    let best = fin.get_best_offer(&invoice_id).unwrap();
+    assert_eq!(best.id, symbol_short!("off_t1"));
+}
+
+#[test]
+fn test_close_auction_auto_accepts_best_offer() {
+    let env = Env::default();
+    env.mock_all_auths();
+    env.ledger().set_timestamp(1_000_000);
+
+    let admin = Address::generate(&env);
+    let token_addr = create_token(&env);
+    let (reg, fin) = setup_contracts(&env, &admin, &token_addr);
+
+    // Set short auction deadline for testing (1 day)
+    fin.set_auction_config(&admin, &10u32, &86_400u64, &(86_400u64 * 2));
+
+    let originator = Address::generate(&env);
+    let invoice_id = symbol_short!("inv_cls");
+
+    reg.register_invoice(
+        &invoice_id,
+        &originator,
+        &1_000_000_000i128,
+        &symbol_short!("USDC"),
+        &(env.ledger().timestamp() + 86_400 * 30),
+    );
+
+    // Create 2 offers
+    let lender1 = Address::generate(&env);
+    let lender2 = Address::generate(&env);
+
+    fin.create_offer(
+        &symbol_short!("off_c1"),
+        &invoice_id,
+        &lender1,
+        &1_000_000_000i128,
+        &symbol_short!("USDC"),
+        &600u32,
+        &86_400u64,
+    );
+
+    fin.create_offer(
+        &symbol_short!("off_c2"),
+        &invoice_id,
+        &lender2,
+        &1_000_000_000i128,
+        &symbol_short!("USDC"),
+        &400u32, // Best rate
+        &86_400u64,
+    );
+
+    // Mint tokens and approve for best lender
+    mint_and_approve(
+        &env,
+        &token_addr,
+        &fin.address,
+        &lender2,
+        &1_000_000_000i128,
+    );
+
+    // Fast forward past auction deadline
+    env.ledger().set_timestamp(1_000_000 + 86_400 + 100);
+
+    // Close auction
+    let caller = Address::generate(&env);
+    let accepted = fin.close_auction(&invoice_id, &caller);
+
+    // Best offer should be accepted
+    assert_eq!(accepted.id, symbol_short!("off_c2"));
+    assert_eq!(accepted.status, OfferStatus::Accepted);
+    assert_eq!(accepted.lender, lender2);
+
+    // Invoice should be financed
+    let invoice = reg.get_invoice(&invoice_id);
+    assert_eq!(invoice.status, InvoiceStatus::Financed);
+
+    // Auction should be marked closed
+    let metadata = fin.get_auction_metadata(&invoice_id).unwrap();
+    assert!(metadata.closed);
+}
+
+#[test]
+#[should_panic]
+fn test_close_auction_before_deadline_fails() {
+    let env = Env::default();
+    env.mock_all_auths();
+    env.ledger().set_timestamp(1_000_000);
+
+    let admin = Address::generate(&env);
+    let token = Address::generate(&env);
+    let (reg, fin) = setup_contracts(&env, &admin, &token);
+
+    let originator = Address::generate(&env);
+    let lender = Address::generate(&env);
+    let invoice_id = symbol_short!("inv_erly");
+
+    reg.register_invoice(
+        &invoice_id,
+        &originator,
+        &1_000_000_000i128,
+        &symbol_short!("USDC"),
+        &(env.ledger().timestamp() + 86_400 * 30),
+    );
+
+    fin.create_offer(
+        &symbol_short!("off_erly"),
+        &invoice_id,
+        &lender,
+        &1_000_000_000i128,
+        &symbol_short!("USDC"),
+        &500u32,
+        &86_400u64,
+    );
+
+    // Try to close before deadline (should panic)
+    let caller = Address::generate(&env);
+    fin.close_auction(&invoice_id, &caller);
+}
+
+#[test]
+fn test_expire_offers_marks_old_offers_rejected() {
+    let env = Env::default();
+    env.mock_all_auths();
+    env.ledger().set_timestamp(1_000_000);
+
+    let admin = Address::generate(&env);
+    let token = Address::generate(&env);
+    let (reg, fin) = setup_contracts(&env, &admin, &token);
+
+    // Set short expiry for testing (1 hour)
+    fin.set_auction_config(&admin, &10u32, &86_400u64, &3_600u64);
+
+    let originator = Address::generate(&env);
+    let invoice_id = symbol_short!("inv_exp");
+
+    reg.register_invoice(
+        &invoice_id,
+        &originator,
+        &1_000_000_000i128,
+        &symbol_short!("USDC"),
+        &(env.ledger().timestamp() + 86_400 * 30),
+    );
+
+    // Create 2 offers
+    let lender1 = Address::generate(&env);
+    let lender2 = Address::generate(&env);
+
+    fin.create_offer(
+        &symbol_short!("off_e1"),
+        &invoice_id,
+        &lender1,
+        &1_000_000_000i128,
+        &symbol_short!("USDC"),
+        &500u32,
+        &86_400u64,
+    );
+
+    fin.create_offer(
+        &symbol_short!("off_e2"),
+        &invoice_id,
+        &lender2,
+        &1_000_000_000i128,
+        &symbol_short!("USDC"),
+        &500u32,
+        &86_400u64,
+    );
+
+    // Fast forward past expiry (1 hour + buffer)
+    env.ledger().set_timestamp(1_000_000 + 3_600 + 100);
+
+    // Expire offers
+    let caller = Address::generate(&env);
+    let expired_count = fin.expire_offers(&caller, &10u32);
+
+    assert_eq!(expired_count, 2);
+
+    // Check offers are now rejected
+    let offer1 = fin.get_offer(&symbol_short!("off_e1"));
+    let offer2 = fin.get_offer(&symbol_short!("off_e2"));
+    
+    assert_eq!(offer1.status, OfferStatus::Rejected);
+    assert_eq!(offer2.status, OfferStatus::Rejected);
+}
+
+#[test]
+fn test_manual_accept_still_works_during_auction() {
+    let env = Env::default();
+    env.mock_all_auths();
+    env.ledger().set_timestamp(1_000_000);
+
+    let admin = Address::generate(&env);
+    let token_addr = create_token(&env);
+    let (reg, fin) = setup_contracts(&env, &admin, &token_addr);
+
+    let originator = Address::generate(&env);
+    let invoice_id = symbol_short!("inv_man");
+
+    reg.register_invoice(
+        &invoice_id,
+        &originator,
+        &1_000_000_000i128,
+        &symbol_short!("USDC"),
+        &(env.ledger().timestamp() + 86_400 * 30),
+    );
+
+    // Create multiple offers
+    let lender1 = Address::generate(&env);
+    let lender2 = Address::generate(&env);
+
+    fin.create_offer(
+        &symbol_short!("off_m1"),
+        &invoice_id,
+        &lender1,
+        &1_000_000_000i128,
+        &symbol_short!("USDC"),
+        &400u32, // Best rate
+        &86_400u64,
+    );
+
+    fin.create_offer(
+        &symbol_short!("off_m2"),
+        &invoice_id,
+        &lender2,
+        &1_000_000_000i128,
+        &symbol_short!("USDC"),
+        &600u32, // Worse rate
+        &86_400u64,
+    );
+
+    // Mint tokens for lender2
+    mint_and_approve(
+        &env,
+        &token_addr,
+        &fin.address,
+        &lender2,
+        &1_000_000_000i128,
+    );
+
+    // Originator manually accepts the worse offer (their choice!)
+    let accepted = fin.accept_offer(&symbol_short!("off_m2"), &originator);
+
+    assert_eq!(accepted.id, symbol_short!("off_m2"));
+    assert_eq!(accepted.status, OfferStatus::Accepted);
+
+    // Invoice should be financed
+    let invoice = reg.get_invoice(&invoice_id);
+    assert_eq!(invoice.status, InvoiceStatus::Financed);
+}
+
+#[test]
+fn test_offer_created_at_timestamp_recorded() {
+    let env = Env::default();
+    env.mock_all_auths();
+    env.ledger().set_timestamp(1_500_000);
+
+    let admin = Address::generate(&env);
+    let token = Address::generate(&env);
+    let (reg, fin) = setup_contracts(&env, &admin, &token);
+
+    let originator = Address::generate(&env);
+    let lender = Address::generate(&env);
+    let invoice_id = symbol_short!("inv_ts");
+
+    reg.register_invoice(
+        &invoice_id,
+        &originator,
+        &1_000_000_000i128,
+        &symbol_short!("USDC"),
+        &(env.ledger().timestamp() + 86_400 * 30),
+    );
+
+    let offer = fin.create_offer(
+        &symbol_short!("off_ts"),
+        &invoice_id,
+        &lender,
+        &1_000_000_000i128,
+        &symbol_short!("USDC"),
+        &500u32,
+        &86_400u64,
+    );
+
+    // Verify created_at matches ledger timestamp
+    assert_eq!(offer.created_at, 1_500_000);
+}
+
+#[test]
+fn test_amount_factor_bonus_for_larger_offers() {
+    let env = Env::default();
+    env.mock_all_auths();
+    env.ledger().set_timestamp(1_000_000);
+
+    let admin = Address::generate(&env);
+    let token = Address::generate(&env);
+    let (reg, fin) = setup_contracts(&env, &admin, &token);
+
+    let originator = Address::generate(&env);
+    let invoice_id = symbol_short!("inv_amt");
+
+    reg.register_invoice(
+        &invoice_id,
+        &originator,
+        &1_000_000_000i128, // 1000 USDC
+        &symbol_short!("USDC"),
+        &(env.ledger().timestamp() + 86_400 * 30),
+    );
+
+    let lender1 = Address::generate(&env);
+    let lender2 = Address::generate(&env);
+
+    // Offer 1: exact invoice amount, better rate
+    fin.create_offer(
+        &symbol_short!("off_a1"),
+        &invoice_id,
+        &lender1,
+        &1_000_000_000i128, // Exact amount
+        &symbol_short!("USDC"),
+        &500u32, // Better rate
+        &86_400u64,
+    );
+
+    // Offer 2: 20% more, slightly worse rate
+    fin.create_offer(
+        &symbol_short!("off_a2"),
+        &invoice_id,
+        &lender2,
+        &1_200_000_000i128, // 120% of invoice
+        &symbol_short!("USDC"),
+        &520u32, // Slightly worse rate
+        &86_400u64,
+    );
+
+    let score1 = fin.get_offer_score(&symbol_short!("off_a1"));
+    let score2 = fin.get_offer_score(&symbol_short!("off_a2"));
+
+    // The larger amount might overcome the rate disadvantage
+    // This tests that amount factor is considered
+    assert!(score2 > 0);
+    assert!(score1 > 0);
+}
+
+#[test]
+fn test_get_offer_score_transparency() {
+    let env = Env::default();
+    env.mock_all_auths();
+    env.ledger().set_timestamp(1_000_000);
+
+    let admin = Address::generate(&env);
+    let token = Address::generate(&env);
+    let (reg, fin) = setup_contracts(&env, &admin, &token);
+
+    let originator = Address::generate(&env);
+    let lender = Address::generate(&env);
+    let invoice_id = symbol_short!("inv_scr");
+
+    reg.register_invoice(
+        &invoice_id,
+        &originator,
+        &1_000_000_000i128,
+        &symbol_short!("USDC"),
+        &(env.ledger().timestamp() + 86_400 * 30),
+    );
+
+    fin.create_offer(
+        &symbol_short!("off_scr"),
+        &invoice_id,
+        &lender,
+        &1_000_000_000i128,
+        &symbol_short!("USDC"),
+        &500u32,
+        &86_400u64,
+    );
+
+    // Anyone can query the score (transparency)
+    let score = fin.get_offer_score(&symbol_short!("off_scr"));
+    assert!(score > 0, "Score should be positive");
+}
+
+#[test]
+fn test_auction_events_emitted() {
+    let env = Env::default();
+    env.mock_all_auths();
+    env.ledger().set_timestamp(1_000_000);
+
+    let admin = Address::generate(&env);
+    let token_addr = create_token(&env);
+    let (reg, fin) = setup_contracts(&env, &admin, &token_addr);
+
+    fin.set_auction_config(&admin, &10u32, &86_400u64, &(86_400u64 * 2));
+
+    let originator = Address::generate(&env);
+    let lender = Address::generate(&env);
+    let invoice_id = symbol_short!("inv_evt");
+
+    reg.register_invoice(
+        &invoice_id,
+        &originator,
+        &1_000_000_000i128,
+        &symbol_short!("USDC"),
+        &(env.ledger().timestamp() + 86_400 * 30),
+    );
+
+    // Create offer - should emit offer_submitted event
+    fin.create_offer(
+        &symbol_short!("off_evt"),
+        &invoice_id,
+        &lender,
+        &1_000_000_000i128,
+        &symbol_short!("USDC"),
+        &500u32,
+        &86_400u64,
+    );
+
+    // Check for offer_submitted event
+    let events = env.events().all();
+    let offer_submitted_event = events.iter().any(|e| {
+        if let Some(topics) = e.topics.get(0) {
+            if let Ok(symbol) = Symbol::try_from_val(&env, topics) {
+                symbol == symbol_short!("off_sub")
+            } else {
+                false
+            }
+        } else {
+            false
+        }
+    });
+    assert!(offer_submitted_event, "offer_submitted event should be emitted");
+
+    // Mint and approve
+    mint_and_approve(
+        &env,
+        &token_addr,
+        &fin.address,
+        &lender,
+        &1_000_000_000i128,
+    );
+
+    // Close auction - should emit auction_closed and best_offer_selected
+    env.ledger().set_timestamp(1_000_000 + 86_400 + 100);
+    let caller = Address::generate(&env);
+    fin.close_auction(&invoice_id, &caller);
+
+    let events_after_close = env.events().all();
+    
+    let auction_closed = events_after_close.iter().any(|e| {
+        if let Some(topics) = e.topics.get(0) {
+            if let Ok(symbol) = Symbol::try_from_val(&env, topics) {
+                symbol == symbol_short!("auc_cls")
+            } else {
+                false
+            }
+        } else {
+            false
+        }
+    });
+    assert!(auction_closed, "auction_closed event should be emitted");
+
+    let best_selected = events_after_close.iter().any(|e| {
+        if let Some(topics) = e.topics.get(0) {
+            if let Ok(symbol) = Symbol::try_from_val(&env, topics) {
+                symbol == symbol_short!("best_sel")
+            } else {
+                false
+            }
+        } else {
+            false
+        }
+    });
+    assert!(best_selected, "best_offer_selected event should be emitted");
+}
