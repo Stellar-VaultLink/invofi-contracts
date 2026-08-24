@@ -5,7 +5,7 @@ use super::{EventIndexerContract, EventIndexerContractClient};
 use soroban_sdk::{
     symbol_short,
     testutils::{Address as _, Events as _, Ledger as _},
-    Address, Env, IntoVal, Symbol,
+    Address, Env, Symbol,
 };
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
@@ -40,7 +40,7 @@ fn record(
 
 #[test]
 fn test_constructor_sets_admin() {
-    let (env, client, admin) = setup();
+    let (_env, client, admin) = setup();
     assert_eq!(client.get_admin(), admin);
 }
 
@@ -207,7 +207,7 @@ fn test_record_event_unauthorized_recorder() {
 
 #[test]
 fn test_event_count_starts_at_zero() {
-    let (env, client, _admin, _recorder) = setup_with_recorder();
+    let (_env, client, _admin, _recorder) = setup_with_recorder();
     assert_eq!(client.get_event_count(), 0);
 }
 
@@ -239,7 +239,7 @@ fn test_event_count_increments() {
 #[test]
 #[should_panic(expected = "Event not found")]
 fn test_get_nonexistent_event() {
-    let (env, client, _admin, _recorder) = setup_with_recorder();
+    let (_env, client, _admin, _recorder) = setup_with_recorder();
     client.get_event(&999);
 }
 
@@ -247,7 +247,7 @@ fn test_get_nonexistent_event() {
 
 #[test]
 fn test_get_events_by_type_empty() {
-    let (env, client, _admin, _recorder) = setup_with_recorder();
+    let (_env, client, _admin, _recorder) = setup_with_recorder();
     let result = client.get_events_by_type(&symbol_short!("inv_reg"), &0, &10);
     assert_eq!(result.len(), 0);
 }
@@ -278,7 +278,7 @@ fn test_get_events_by_type_pagination() {
     env.ledger().set_timestamp(1000);
 
     let actor = Address::generate(&env);
-    for i in 0..5u32 {
+    for _i in 0..5u32 {
         let key = Symbol::new(&env, "inv");
         record(&client, &recorder, &symbol_short!("inv_reg"), &actor, &key);
     }
@@ -312,7 +312,7 @@ fn test_get_events_by_type_count() {
 
 #[test]
 fn test_get_events_by_time_empty() {
-    let (env, client, _admin, _recorder) = setup_with_recorder();
+    let (_env, client, _admin, _recorder) = setup_with_recorder();
     let result = client.get_events_by_time(&100, &200, &0, &10);
     assert_eq!(result.len(), 0);
 }
@@ -369,7 +369,7 @@ fn test_get_events_by_time_pagination() {
 #[test]
 #[should_panic(expected = "start must be <= end")]
 fn test_get_events_by_time_invalid_range() {
-    let (env, client, _admin, _recorder) = setup_with_recorder();
+    let (_env, client, _admin, _recorder) = setup_with_recorder();
     client.get_events_by_time(&300, &100, &0, &10);
 }
 
@@ -409,7 +409,7 @@ fn test_get_events_by_actor_pagination() {
     env.ledger().set_timestamp(1000);
 
     let actor = Address::generate(&env);
-    for i in 0..5u32 {
+    for _i in 0..5u32 {
         let key = Symbol::new(&env, "evt");
         record(&client, &recorder, &symbol_short!("inv_reg"), &actor, &key);
     }
@@ -563,7 +563,7 @@ fn test_prune_events_emits_event() {
 #[test]
 #[should_panic(expected = "Only the current admin can perform this action")]
 fn test_prune_events_unauthorized() {
-    let (env, client, _admin, recorder) = setup_with_recorder();
+    let (env, client, _admin, _recorder) = setup_with_recorder();
     let not_admin = Address::generate(&env);
     client.prune_events(&not_admin, &1000);
 }
@@ -572,7 +572,7 @@ fn test_prune_events_unauthorized() {
 
 #[test]
 fn test_version_returns_nonempty_string() {
-    let (env, client, _admin, _recorder) = setup_with_recorder();
+    let (_env, client, _admin, _recorder) = setup_with_recorder();
     let ver = client.version();
     assert!(!ver.is_empty());
 }
