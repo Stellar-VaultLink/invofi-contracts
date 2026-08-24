@@ -1,0 +1,45 @@
+# InvoFi Contracts Code Owners
+# Automatically requested for review on PRs that touch their areas.
+# https://docs.github.com/en/repositories/managing-your-repositorys-settings-and-features/customizing-your-repository/about-code-owners
+
+# ── Global fallback ───────────────────────────────────────────────────────────
+# Maintainer reviews everything not claimed by a more specific rule below.
+*                                   @samjay8
+
+# ── Common (shared types, error enums, currency registry) ─────────────────────
+/common/                            @samjay8
+
+# ── Registry (invoice state machine, verification oracle) ─────────────────────
+/registry/                          @samjay8
+
+# ── Financing (offers, accept/reject, position tokens) ────────────────────────
+/financing/                         @samjay8
+
+# ── Repayment (repay, mark_overdue, installments) ─────────────────────────────
+/repayment/                         @samjay8
+
+# ── Insurance (stake/unstake, claims, payouts) ────────────────────────────────
+/insurance/                         @samjay8
+
+# ── Reputation (scoring, dispute adjustment) ──────────────────────────────────
+/reputation/                        @samjay8
+
+# ── Integration tests (cross-crate) ───────────────────────────────────────────
+/integration/                       @samjay8
+
+# ── CI / GitHub Actions ───────────────────────────────────────────────────────
+/.github/workflows/                 @samjay8
+/.github/ISSUE_TEMPLATE/            @samjay8
+/.github/PULL_REQUEST_TEMPLATE.md   @samjay8
+
+# ── Documentation ─────────────────────────────────────────────────────────────
+/docs/                              @samjay8
+/README.md                          @samjay8
+/CHANGELOG.md                       @samjay8
+
+# ── Scripts (deploy, coverage, etc.) ──────────────────────────────────────────
+/scripts/                           @samjay8
+
+# ── Config files ──────────────────────────────────────────────────────────────
+/Cargo.toml                         @samjay8
+/.coderrabbit.yaml                  @samjay8

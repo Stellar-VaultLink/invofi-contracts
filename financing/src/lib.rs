@@ -6,10 +6,19 @@
 use soroban_sdk::{contract, contractimpl, symbol_short, token, Address, Env, Map, Symbol, Vec};
 
 use invofi_common::{
-    assert_not_paused, resolve_token, ContractError, FinancingOffer, Invoice, InvoiceStatus,
-    LenderStats, OfferStatus, ProtocolStats, RegistryClient, RepaymentSchedule,
-    ScheduleFrequency, MAX_OFFER_DURATION_SECS, MIN_OFFER_DURATION_SECS,
+    assert_not_paused, resolve_token, AdminConfig, ContractError, FinancingOffer, Invoice,
+    InvoiceStatus, LenderStats, NegotiationParty, NegotiationRecord, NegotiationStatus,
+    OfferStatus, ProtocolStats, RegistryClient, RepaymentSchedule, ScheduleFrequency,
+    DEFAULT_NEGOTIATION_WINDOW_SECS, MAX_INTEREST_BPS, MAX_NEGOTIATION_ROUNDS,
+    MAX_NEGOTIATION_WINDOW_SECS, MAX_OFFER_DURATION_SECS, MIN_NEGOTIATION_WINDOW_SECS,
+    MIN_OFFER_DURATION_SECS,
 };
+
+/// Threshold-gated admin check (ADR-0010). See `invofi_common::assert_threshold`.
+fn assert_admin(env: &Env, signers: &Vec<Address>) {
+    let cfg = invofi_common::load_admin_config(env);
+    invofi_common::assert_threshold(env, &cfg, signers);
+}
 
 // ─── Storage Helpers ─────────────────────────────────────────────────────────
 
@@ -71,6 +80,82 @@ fn save_schedules(env: &Env, map: &Map<Symbol, RepaymentSchedule>) {
         .set(&symbol_short!("scheds"), map);
 }
 
+// ─── Negotiation Storage Helpers (issue #180) ────────────────────────────────
+//
+// Negotiation state is keyed per offer rather than held in one map, so a busy
+// offer never makes every other offer's negotiation more expensive to read.
+//
+//   ("negot", offer_id)  -> Vec<NegotiationRecord>  the round-by-round history
+//   ("negdl", offer_id)  -> u64                     window deadline, frozen at open
+//   ("negend", offer_id) -> NegotiationStatus       persisted terminal outcome
+
+fn load_negotiation(env: &Env, offer_id: &Symbol) -> Vec<NegotiationRecord> {
+    env.storage()
+        .persistent()
+        .get(&(symbol_short!("negot"), offer_id.clone()))
+        .unwrap_or(Vec::new(env))
+}
+
+fn save_negotiation(env: &Env, offer_id: &Symbol, history: &Vec<NegotiationRecord>) {
+    env.storage()
+        .persistent()
+        .set(&(symbol_short!("negot"), offer_id.clone()), history);
+}
+
+fn load_deadline(env: &Env, offer_id: &Symbol) -> u64 {
+    env.storage()
+        .persistent()
+        .get(&(symbol_short!("negdl"), offer_id.clone()))
+        .unwrap_or(0)
+}
+
+fn save_deadline(env: &Env, offer_id: &Symbol, deadline: u64) {
+    env.storage()
+        .persistent()
+        .set(&(symbol_short!("negdl"), offer_id.clone()), &deadline);
+}
+
+fn load_outcome(env: &Env, offer_id: &Symbol) -> Option<NegotiationStatus> {
+    env.storage()
+        .persistent()
+        .get(&(symbol_short!("negend"), offer_id.clone()))
+}
+
+fn save_outcome(env: &Env, offer_id: &Symbol, outcome: NegotiationStatus) {
+    env.storage()
+        .persistent()
+        .set(&(symbol_short!("negend"), offer_id.clone()), &outcome);
+}
+
+/// The most recent round proposed by `party`, if that side has proposed at all.
+///
+/// "Most recent" is what makes a counter-offer revocable-by-replacement: only
+/// a party's latest proposal is live, so an earlier one can never be executed
+/// against them after they have moved off it.
+fn last_proposal_by(
+    history: &Vec<NegotiationRecord>,
+    party: NegotiationParty,
+) -> Option<NegotiationRecord> {
+    let mut latest: Option<NegotiationRecord> = None;
+    for record in history.iter() {
+        if record.party == party {
+            latest = Some(record);
+        }
+    }
+    latest
+}
+
+/// Validate a proposed term tuple against the same bounds `create_offer`
+/// enforces. A negotiation must not be a way to reach terms the offer could
+/// not have been created with in the first place.
+fn assert_terms_valid(env: &Env, amount: i128, interest_rate: u32, duration: u64) {
+    let rate_ok = (1..=MAX_INTEREST_BPS).contains(&interest_rate);
+    let duration_ok = (MIN_OFFER_DURATION_SECS..=MAX_OFFER_DURATION_SECS).contains(&duration);
+    if amount <= 0 || !rate_ok || !duration_ok {
+        env.panic_with_error(ContractError::InvalidInput);
+    }
+}
+
 fn assert_not_blacklisted(env: &Env, address: &Address) {
     // Cross-contract: check blacklist via the registry contract
     let registry_addr: Address = env
@@ -103,12 +188,7 @@ impl FinancingContract {
     /// fresh deployment can never be hijacked by a third party setting
     /// themselves as admin.
     pub fn __constructor(env: Env, admin: Address, registry: Address, token: Address) {
-        if env.storage().instance().has(&symbol_short!("admin")) {
-            panic!("Already initialized");
-        }
-        env.storage()
-            .instance()
-            .set(&symbol_short!("admin"), &admin);
+        invofi_common::init_admin_config(&env, &admin);
         env.storage()
             .instance()
             .set(&symbol_short!("registry"), &registry);
@@ -120,27 +200,56 @@ impl FinancingContract {
     /// Register the repayment contract address. Only admin.
     /// The repayment contract is the only caller authorized to invoke
     /// callback methods (update_offer_status, update_offer_amount_repaid, etc.).
-    pub fn set_repayment_contract(env: Env, admin: Address, repayment: Address) {
+    pub fn set_repayment_contract(env: Env, signers: Vec<Address>, repayment: Address) {
         assert_not_paused(&env);
-        admin.require_auth();
-        let current: Address = env
-            .storage()
-            .instance()
-            .get(&symbol_short!("admin"))
-            .unwrap_or_else(|| panic!("Not initialized"));
-        if current != admin {
-            env.panic_with_error(ContractError::Unauthorized);
-        }
+        assert_admin(&env, &signers);
         env.storage()
             .instance()
             .set(&symbol_short!("repayment"), &repayment);
     }
 
+    /// Returns the primary admin address (the first configured signer). See
+    /// `RegistryContract::get_admin` for the same caveat under true M-of-N.
     pub fn get_admin(env: Env) -> Address {
-        env.storage()
-            .instance()
-            .get(&symbol_short!("admin"))
+        invofi_common::load_admin_config(&env)
+            .signers
+            .get(0)
             .unwrap_or_else(|| panic!("Not initialized"))
+    }
+
+    /// The full M-of-N admin governance config. See ADR-0010.
+    pub fn get_admin_config(env: Env) -> AdminConfig {
+        invofi_common::load_admin_config(&env)
+    }
+
+    /// The current signer set.
+    pub fn get_signers(env: Env) -> Vec<Address> {
+        invofi_common::load_admin_config(&env).signers
+    }
+
+    /// The current approval threshold.
+    pub fn get_threshold(env: Env) -> u32 {
+        invofi_common::load_admin_config(&env).threshold
+    }
+
+    /// Reconfigure the admin signer set and threshold. See
+    /// `RegistryContract::set_signers`.
+    pub fn set_signers(
+        env: Env,
+        signers: Vec<Address>,
+        new_signers: Vec<Address>,
+        new_threshold: u32,
+    ) {
+        assert_not_paused(&env);
+        assert_admin(&env, &signers);
+        invofi_common::validate_signers(&env, &new_signers, new_threshold);
+        invofi_common::save_admin_config(
+            &env,
+            &AdminConfig {
+                signers: new_signers,
+                threshold: new_threshold,
+            },
+        );
     }
 
     pub fn get_registry(env: Env) -> Address {
@@ -150,37 +259,33 @@ impl FinancingContract {
             .unwrap_or_else(|| panic!("Not initialized"))
     }
 
-    /// Transfers admin rights. Only current admin.
-    pub fn transfer_admin(env: Env, admin: Address, new_admin: Address) {
+    /// Transfers admin rights, collapsing the config back to a single new
+    /// admin. See `RegistryContract::transfer_admin`.
+    pub fn transfer_admin(env: Env, signers: Vec<Address>, new_admin: Address) {
         assert_not_paused(&env);
-        admin.require_auth();
-        let current: Address = env
-            .storage()
-            .instance()
-            .get(&symbol_short!("admin"))
-            .unwrap_or_else(|| panic!("Not initialized"));
-        if current != admin {
-            env.panic_with_error(ContractError::Unauthorized);
-        }
-        env.storage()
-            .instance()
-            .set(&symbol_short!("admin"), &new_admin);
+        assert_admin(&env, &signers);
+        let mut new_signers = Vec::new(&env);
+        new_signers.push_back(new_admin);
+        invofi_common::save_admin_config(
+            &env,
+            &AdminConfig {
+                signers: new_signers,
+                threshold: 1,
+            },
+        );
     }
 
     // ── Currency registry ────────────────────────────────────────────────────
 
     /// Register a currency → token mapping. Admin only.
-    pub fn register_currency(env: Env, admin: Address, currency: Symbol, token_addr: Address) {
+    pub fn register_currency(
+        env: Env,
+        signers: Vec<Address>,
+        currency: Symbol,
+        token_addr: Address,
+    ) {
         assert_not_paused(&env);
-        admin.require_auth();
-        let current: Address = env
-            .storage()
-            .instance()
-            .get(&symbol_short!("admin"))
-            .unwrap_or_else(|| panic!("Not initialized"));
-        if current != admin {
-            env.panic_with_error(ContractError::Unauthorized);
-        }
+        assert_admin(&env, &signers);
         invofi_common::register_currency(&env, &currency, &token_addr);
     }
 
@@ -197,17 +302,9 @@ impl FinancingContract {
     /// its admin, so accept_offer can mint claim tokens on the lender's
     /// behalf (the token's admin.require_auth() resolves via implicit
     /// contract-invoker auth — see ADR-0002).
-    pub fn set_position_token(env: Env, admin: Address, token: Address) {
+    pub fn set_position_token(env: Env, signers: Vec<Address>, token: Address) {
         assert_not_paused(&env);
-        admin.require_auth();
-        let current: Address = env
-            .storage()
-            .instance()
-            .get(&symbol_short!("admin"))
-            .unwrap_or_else(|| panic!("Not initialized"));
-        if current != admin {
-            env.panic_with_error(ContractError::Unauthorized);
-        }
+        assert_admin(&env, &signers);
         env.storage()
             .instance()
             .set(&symbol_short!("postok"), &token);
@@ -220,31 +317,15 @@ impl FinancingContract {
 
     // ── Pause / unpause ──────────────────────────────────────────────────────
 
-    pub fn pause(env: Env, admin: Address) {
-        admin.require_auth();
-        let current: Address = env
-            .storage()
-            .instance()
-            .get(&symbol_short!("admin"))
-            .unwrap_or_else(|| panic!("Not initialized"));
-        if current != admin {
-            env.panic_with_error(ContractError::Unauthorized);
-        }
+    pub fn pause(env: Env, signers: Vec<Address>) {
+        assert_admin(&env, &signers);
         env.storage()
             .instance()
             .set(&symbol_short!("paused"), &true);
     }
 
-    pub fn unpause(env: Env, admin: Address) {
-        admin.require_auth();
-        let current: Address = env
-            .storage()
-            .instance()
-            .get(&symbol_short!("admin"))
-            .unwrap_or_else(|| panic!("Not initialized"));
-        if current != admin {
-            env.panic_with_error(ContractError::Unauthorized);
-        }
+    pub fn unpause(env: Env, signers: Vec<Address>) {
+        assert_admin(&env, &signers);
         env.storage()
             .instance()
             .set(&symbol_short!("paused"), &false);
@@ -276,7 +357,7 @@ impl FinancingContract {
         assert!(amount > 0, "offer amount must be greater than zero");
         assert!(interest_rate > 0, "interest_rate must be greater than zero");
         assert!(
-            interest_rate <= 10_000,
+            interest_rate <= MAX_INTEREST_BPS,
             "interest_rate must be at most 10000 bps"
         );
         assert!(
@@ -304,6 +385,11 @@ impl FinancingContract {
         assert!(
             lender != invoice.originator,
             "lender cannot finance their own invoice"
+        );
+
+        assert!(
+            amount <= invoice.amount,
+            "offer amount cannot exceed invoice amount"
         );
 
         let mut offers = load_offers(&env);
@@ -369,8 +455,9 @@ impl FinancingContract {
             env.panic_with_error(ContractError::InvalidTransition);
         }
         offer.status = OfferStatus::Rejected;
-        offers.set(offer_id, offer.clone());
+        offers.set(offer_id.clone(), offer.clone());
         save_offers(&env, &offers);
+        Self::close_negotiation_on_offer_exit(&env, &offer_id, &lender);
         env.events().publish(
             (symbol_short!("off_wdr"), offer.id.clone()),
             offer.lender.clone(),
@@ -386,8 +473,8 @@ impl FinancingContract {
         assert_not_paused(&env);
         invoice_originator.require_auth();
 
-        let mut offers = load_offers(&env);
-        let mut offer = offers
+        let offers = load_offers(&env);
+        let offer = offers
             .get(offer_id.clone())
             .unwrap_or_else(|| env.panic_with_error(ContractError::NotFound));
         if offer.status != OfferStatus::Pending {
@@ -409,6 +496,51 @@ impl FinancingContract {
         }
         if invoice.status != InvoiceStatus::Pending {
             env.panic_with_error(ContractError::InvalidTransition);
+        }
+
+        Self::settle_acceptance(
+            &env,
+            offer_id,
+            offer,
+            &registry_client,
+            &invoice,
+            &invoice_originator,
+        )
+    }
+
+    /// Move the money and flip every piece of state that an accepted offer
+    /// implies: principal to the business, invoice to Financed, position token
+    /// minted, stats updated, `off_acc` emitted.
+    ///
+    /// Split out of `accept_offer` so the auto-accept path in `amend_offer` /
+    /// `counter_offer` executes the *same* settlement rather than a parallel
+    /// copy that could drift from it. Every caller is responsible for its own
+    /// authorization and for checking that the offer is Pending and the
+    /// invoice is Pending before calling in.
+    fn settle_acceptance(
+        env: &Env,
+        offer_id: Symbol,
+        offer: FinancingOffer,
+        registry_client: &RegistryClient,
+        invoice: &Invoice,
+        closer: &Address,
+    ) -> FinancingOffer {
+        let env = env.clone();
+        let mut offers = load_offers(&env);
+        let mut offer = offer;
+
+        // Settlement ends any negotiation that was still running, whichever
+        // route reached it: term convergence in amend/counter, or the
+        // originator accepting the standing offer outright. Recording it here
+        // rather than in each caller is what keeps the two routes from
+        // diverging on the negotiation's final state.
+        if !load_negotiation(&env, &offer_id).is_empty() && load_outcome(&env, &offer_id).is_none()
+        {
+            save_outcome(&env, &offer_id, NegotiationStatus::Accepted);
+            env.events().publish(
+                (symbol_short!("neg_clsd"), offer_id.clone()),
+                (NegotiationStatus::Accepted, closer.clone()),
+            );
         }
 
         // Pull the lender's principal and pay it straight to the business.
@@ -494,14 +626,434 @@ impl FinancingContract {
         }
 
         offer.status = OfferStatus::Rejected;
-        offers.set(offer_id, offer.clone());
+        offers.set(offer_id.clone(), offer.clone());
         save_offers(&env, &offers);
+        Self::close_negotiation_on_offer_exit(&env, &offer_id, &invoice_originator);
 
         env.events().publish(
             (symbol_short!("off_rej"), offer.id.clone()),
             offer.invoice_id.clone(),
         );
         offer
+    }
+
+    // ── Offer negotiation: amendment & counter-offer (issue #180) ────────────
+    //
+    // The protocol used to be take-it-or-leave-it: a lender posted terms and
+    // the originator could only accept or reject them. These entrypoints let
+    // the two sides converge instead, with every round recorded on-chain.
+    //
+    // Design notes that are easy to get wrong, in full in
+    // `docs/adr/0008-offer-negotiation.md`:
+    //
+    // * **Auto-accept is not unilateral.** Settlement moves the lender's
+    //   funds, which Soroban will only do with the lender's authorization.
+    //   The lender's commitment is their SEP-41 allowance to this contract,
+    //   granted before acceptance is possible at all; the originator's
+    //   commitment is the counter-offer they recorded in a transaction they
+    //   signed. Auto-accept fires only when the *canonical term tuple* of one
+    //   side's live proposal is exactly equal to the other's, so neither party
+    //   is ever bound to terms they did not themselves put on the table.
+    //
+    // * **Every round is version-guarded.** `expected_round` is the history
+    //   length the caller believes it is amending. A round that lands after
+    //   the other side moved is rejected rather than silently applied to terms
+    //   the caller never saw — which is what would otherwise let a stale
+    //   counter-offer auto-execute.
+
+    /// Configure the negotiation window, in seconds. Admin only.
+    ///
+    /// The window bounds how long a recorded counter-offer stays executable
+    /// against the party who made it, so it is deliberately clamped to
+    /// [`MIN_NEGOTIATION_WINDOW_SECS`, `MAX_NEGOTIATION_WINDOW_SECS`] — an
+    /// admin cannot set it to something effectively unbounded. Deployments
+    /// that never call this run on the 72-hour default.
+    ///
+    /// Changing the window does not move the deadline of a negotiation that
+    /// is already open: each deadline is frozen when its negotiation opens.
+    pub fn set_negotiation_window(env: Env, signers: Vec<Address>, window_secs: u64) {
+        assert_not_paused(&env);
+        assert_admin(&env, &signers);
+        if !(MIN_NEGOTIATION_WINDOW_SECS..=MAX_NEGOTIATION_WINDOW_SECS).contains(&window_secs) {
+            env.panic_with_error(ContractError::InvalidInput);
+        }
+        env.storage()
+            .instance()
+            .set(&symbol_short!("negwin"), &window_secs);
+    }
+
+    /// The configured negotiation window in seconds (default: 72 hours).
+    pub fn get_negotiation_window(env: Env) -> u64 {
+        env.storage()
+            .instance()
+            .get(&symbol_short!("negwin"))
+            .unwrap_or(DEFAULT_NEGOTIATION_WINDOW_SECS)
+    }
+
+    /// Amend a Pending offer's terms. Only the lender who created the offer.
+    ///
+    /// The amended terms are written onto the offer itself: the offer is
+    /// always the lender's standing position, so an originator who calls
+    /// `accept_offer` after an amendment accepts the amended terms, and there
+    /// is no second place where "the current terms" could disagree.
+    ///
+    /// `expected_round` must equal the current number of recorded rounds
+    /// (`0` opens the negotiation). If the originator appended a counter-offer
+    /// after the lender read state, the amendment is rejected with
+    /// `InvalidInput` rather than applied on top of terms the lender never saw.
+    ///
+    /// **Auto-accept:** if `(amount, interest_rate, duration)` exactly equals
+    /// the originator's live counter-offer — their most recent
+    /// `NegotiationParty::Originator` round — the sides have agreed and the
+    /// offer settles in this same transaction. The returned offer's status is
+    /// `Accepted` when that happened and `Pending` when it did not.
+    pub fn amend_offer(
+        env: Env,
+        offer_id: Symbol,
+        lender: Address,
+        expected_round: u32,
+        amount: i128,
+        interest_rate: u32,
+        duration: u64,
+    ) -> FinancingOffer {
+        assert_not_paused(&env);
+        lender.require_auth();
+        assert_not_blacklisted(&env, &lender);
+        assert_terms_valid(&env, amount, interest_rate, duration);
+
+        let mut offers = load_offers(&env);
+        let mut offer = offers
+            .get(offer_id.clone())
+            .unwrap_or_else(|| env.panic_with_error(ContractError::NotFound));
+        if offer.lender != lender {
+            env.panic_with_error(ContractError::Unauthorized);
+        }
+
+        let history = Self::assert_negotiable(&env, &offer_id, &offer, expected_round);
+
+        // Agreement is exact equality with the originator's *live* proposal.
+        // Only their latest round counts: a superseded counter-offer must not
+        // remain executable against them.
+        let agreed = match last_proposal_by(&history, NegotiationParty::Originator) {
+            Some(counter) => {
+                counter.amount == amount
+                    && counter.interest_rate == interest_rate
+                    && counter.duration == duration
+            }
+            None => false,
+        };
+
+        // Keep `total_offered` coherent: it was credited with the original
+        // amount at create_offer, so an amendment moves it by the delta rather
+        // than double-counting the offer.
+        let mut lstats = load_lender_stats(&env, &lender);
+        lstats.total_offered += amount - offer.amount;
+        save_lender_stats(&env, &lender, &lstats);
+
+        offer.amount = amount;
+        offer.interest_rate = interest_rate;
+        offer.duration = duration;
+        offers.set(offer_id.clone(), offer.clone());
+        save_offers(&env, &offers);
+
+        Self::record_round(
+            &env,
+            &offer_id,
+            &history,
+            NegotiationParty::Lender,
+            amount,
+            interest_rate,
+            duration,
+        );
+
+        env.events().publish(
+            (symbol_short!("off_amd"), offer_id.clone()),
+            (lender.clone(), amount, interest_rate, duration),
+        );
+
+        if agreed {
+            return Self::execute_agreement(&env, &offer_id, &lender);
+        }
+        offer
+    }
+
+    /// Propose different terms on a Pending offer. Only the invoice
+    /// originator.
+    ///
+    /// A counter-offer does **not** rewrite the offer — the offer belongs to
+    /// the lender. It records the originator's position, which the lender can
+    /// then meet by amending to the identical term tuple.
+    ///
+    /// `expected_round` is the same optimistic-concurrency guard as
+    /// `amend_offer`.
+    ///
+    /// **Auto-accept:** proposing exactly the lender's standing terms *is*
+    /// agreement, so the offer settles in this same transaction — the
+    /// originator's own `require_auth` covers it, exactly as `accept_offer`
+    /// would. The returned offer's status is `Accepted` when that happened.
+    pub fn counter_offer(
+        env: Env,
+        offer_id: Symbol,
+        originator: Address,
+        expected_round: u32,
+        amount: i128,
+        interest_rate: u32,
+        duration: u64,
+    ) -> FinancingOffer {
+        assert_not_paused(&env);
+        originator.require_auth();
+        assert_not_blacklisted(&env, &originator);
+        assert_terms_valid(&env, amount, interest_rate, duration);
+
+        let offers = load_offers(&env);
+        let offer = offers
+            .get(offer_id.clone())
+            .unwrap_or_else(|| env.panic_with_error(ContractError::NotFound));
+
+        // Cross-contract: only the invoice's originator may counter.
+        // CEI: Read-only cross-contract call before state mutations.
+        let registry_addr: Address = env
+            .storage()
+            .instance()
+            .get(&symbol_short!("registry"))
+            .unwrap_or_else(|| panic!("Not initialized"));
+        let registry_client = RegistryClient::new(&env, &registry_addr);
+        let invoice: Invoice = registry_client.get_invoice(&offer.invoice_id);
+        if invoice.originator != originator {
+            env.panic_with_error(ContractError::Unauthorized);
+        }
+
+        let history = Self::assert_negotiable(&env, &offer_id, &offer, expected_round);
+
+        // The lender's live proposal is the offer itself.
+        let agreed = amount == offer.amount
+            && interest_rate == offer.interest_rate
+            && duration == offer.duration;
+
+        Self::record_round(
+            &env,
+            &offer_id,
+            &history,
+            NegotiationParty::Originator,
+            amount,
+            interest_rate,
+            duration,
+        );
+
+        env.events().publish(
+            (symbol_short!("ctr_off"), offer_id.clone()),
+            (originator.clone(), amount, interest_rate, duration),
+        );
+
+        if agreed {
+            return Self::execute_agreement(&env, &offer_id, &originator);
+        }
+        offer
+    }
+
+    /// End an open negotiation without agreement.
+    ///
+    /// Before the deadline this is a withdrawal of consent and only the lender
+    /// or the invoice originator may call it — an originator uses it to revoke
+    /// a counter-offer they no longer want executed against them.
+    ///
+    /// After the deadline the negotiation is already `Expired` by derivation;
+    /// this call is the poke that persists the outcome and emits
+    /// `neg_clsd`, and any authenticated address may make it. Soroban has no
+    /// scheduler, so an expiry event cannot fire on its own — that is why the
+    /// event is emitted by whoever next touches the negotiation, and why
+    /// `get_negotiation_status` never depends on someone having called this.
+    pub fn close_negotiation(env: Env, offer_id: Symbol, caller: Address) -> NegotiationStatus {
+        assert_not_paused(&env);
+        caller.require_auth();
+
+        // A persisted outcome means this negotiation was already closed; a
+        // second close would emit a second neg_clsd for the same negotiation.
+        if load_outcome(&env, &offer_id).is_some() {
+            env.panic_with_error(ContractError::InvalidTransition);
+        }
+
+        let outcome = match Self::get_negotiation_status(env.clone(), offer_id.clone()) {
+            NegotiationStatus::None => env.panic_with_error(ContractError::NotFound),
+            NegotiationStatus::Closed | NegotiationStatus::Accepted => {
+                env.panic_with_error(ContractError::InvalidTransition)
+            }
+            NegotiationStatus::Expired => NegotiationStatus::Expired,
+            NegotiationStatus::Open => {
+                let offer = load_offers(&env)
+                    .get(offer_id.clone())
+                    .unwrap_or_else(|| env.panic_with_error(ContractError::NotFound));
+                if caller != offer.lender {
+                    let registry_addr: Address = env
+                        .storage()
+                        .instance()
+                        .get(&symbol_short!("registry"))
+                        .unwrap_or_else(|| panic!("Not initialized"));
+                    let registry_client = RegistryClient::new(&env, &registry_addr);
+                    let invoice: Invoice = registry_client.get_invoice(&offer.invoice_id);
+                    if caller != invoice.originator {
+                        env.panic_with_error(ContractError::Unauthorized);
+                    }
+                }
+                NegotiationStatus::Closed
+            }
+        };
+
+        save_outcome(&env, &offer_id, outcome);
+        env.events()
+            .publish((symbol_short!("neg_clsd"), offer_id), (outcome, caller));
+        outcome
+    }
+
+    /// The full on-chain negotiation history for an offer, oldest round first.
+    /// Empty when no negotiation was ever opened.
+    pub fn get_negotiation(env: Env, offer_id: Symbol) -> Vec<NegotiationRecord> {
+        load_negotiation(&env, &offer_id)
+    }
+
+    /// Unix timestamp at which the negotiation window closes, or `0` if no
+    /// negotiation has been opened on this offer. Frozen when the negotiation
+    /// opens, so a later `set_negotiation_window` never moves it.
+    pub fn get_negotiation_deadline(env: Env, offer_id: Symbol) -> u64 {
+        load_deadline(&env, &offer_id)
+    }
+
+    /// Current negotiation status.
+    ///
+    /// `Expired` is derived from the deadline, not stored, so a caller reading
+    /// this always sees the truth whether or not anyone has called
+    /// `close_negotiation` yet. An offer that leaves `Pending` by any other
+    /// route — withdrawn, rejected, or accepted outright — ends its
+    /// negotiation, which reads as `Closed`.
+    pub fn get_negotiation_status(env: Env, offer_id: Symbol) -> NegotiationStatus {
+        if let Some(outcome) = load_outcome(&env, &offer_id) {
+            return outcome;
+        }
+        if load_negotiation(&env, &offer_id).is_empty() {
+            return NegotiationStatus::None;
+        }
+        match load_offers(&env).get(offer_id.clone()) {
+            Some(offer) if offer.status == OfferStatus::Pending => {}
+            _ => return NegotiationStatus::Closed,
+        }
+        if env.ledger().timestamp() > load_deadline(&env, &offer_id) {
+            NegotiationStatus::Expired
+        } else {
+            NegotiationStatus::Open
+        }
+    }
+
+    // ── Negotiation internals ────────────────────────────────────────────────
+
+    /// Guard shared by `amend_offer` and `counter_offer`: the offer must still
+    /// be Pending, the negotiation must be open, the caller must not be
+    /// working from a stale read, and the round cap must not be exhausted.
+    /// Returns the history the caller's round will be appended to.
+    fn assert_negotiable(
+        env: &Env,
+        offer_id: &Symbol,
+        offer: &FinancingOffer,
+        expected_round: u32,
+    ) -> Vec<NegotiationRecord> {
+        if offer.status != OfferStatus::Pending {
+            env.panic_with_error(ContractError::InvalidTransition);
+        }
+        match Self::get_negotiation_status(env.clone(), offer_id.clone()) {
+            NegotiationStatus::None | NegotiationStatus::Open => {}
+            _ => env.panic_with_error(ContractError::InvalidTransition),
+        }
+
+        let history = load_negotiation(env, offer_id);
+        // Optimistic concurrency: reject a round written against a version of
+        // the negotiation that no longer exists.
+        if history.len() != expected_round {
+            env.panic_with_error(ContractError::InvalidInput);
+        }
+        if history.len() >= MAX_NEGOTIATION_ROUNDS {
+            env.panic_with_error(ContractError::InvalidTransition);
+        }
+        history
+    }
+
+    /// Append a round, opening the negotiation (and freezing its deadline) if
+    /// this is the first one.
+    fn record_round(
+        env: &Env,
+        offer_id: &Symbol,
+        history: &Vec<NegotiationRecord>,
+        party: NegotiationParty,
+        amount: i128,
+        interest_rate: u32,
+        duration: u64,
+    ) {
+        let now = env.ledger().timestamp();
+        if history.is_empty() {
+            let window = Self::get_negotiation_window(env.clone());
+            save_deadline(env, offer_id, now.saturating_add(window));
+        }
+        let mut history = history.clone();
+        history.push_back(NegotiationRecord {
+            party,
+            amount,
+            interest_rate,
+            duration,
+            timestamp: now,
+        });
+        save_negotiation(env, offer_id, &history);
+    }
+
+    /// Both sides have put the same term tuple on the table: close the
+    /// negotiation as `Accepted` and run the ordinary settlement.
+    ///
+    /// The invoice is re-read here rather than trusted from the caller's
+    /// frame: a negotiation can outlive the invoice's Pending status (it can
+    /// be cancelled or disputed mid-negotiation), and settling against a
+    /// non-Pending invoice would finance an invoice that is no longer
+    /// financeable. Both parties are re-checked against the blacklist for the
+    /// same reason — this path settles without the counterparty's live
+    /// signature, so their eligibility has to be verified now, not assumed
+    /// from when they proposed.
+    fn execute_agreement(env: &Env, offer_id: &Symbol, closer: &Address) -> FinancingOffer {
+        let offer = load_offers(env)
+            .get(offer_id.clone())
+            .unwrap_or_else(|| env.panic_with_error(ContractError::NotFound));
+
+        let registry_addr: Address = env
+            .storage()
+            .instance()
+            .get(&symbol_short!("registry"))
+            .unwrap_or_else(|| panic!("Not initialized"));
+        let registry_client = RegistryClient::new(env, &registry_addr);
+        // CEI: Read-only cross-contract call before state mutations.
+        let invoice: Invoice = registry_client.get_invoice(&offer.invoice_id);
+        if invoice.status != InvoiceStatus::Pending {
+            env.panic_with_error(ContractError::InvalidTransition);
+        }
+        assert_not_blacklisted(env, &offer.lender);
+        assert_not_blacklisted(env, &invoice.originator);
+
+        Self::settle_acceptance(
+            env,
+            offer_id.clone(),
+            offer,
+            &registry_client,
+            &invoice,
+            closer,
+        )
+    }
+
+    /// Emit `neg_clsd` when an offer leaves Pending with a negotiation still
+    /// open. No outcome is persisted: `get_negotiation_status` already derives
+    /// `Closed` from the offer no longer being Pending, and writing a second
+    /// source of truth for the same fact is how the two drift apart.
+    fn close_negotiation_on_offer_exit(env: &Env, offer_id: &Symbol, closer: &Address) {
+        if load_negotiation(env, offer_id).is_empty() || load_outcome(env, offer_id).is_some() {
+            return;
+        }
+        env.events().publish(
+            (symbol_short!("neg_clsd"), offer_id.clone()),
+            (NegotiationStatus::Closed, closer.clone()),
+        );
     }
 
     // ── Cross-contract callback methods (called by Repayment) ───────────
@@ -747,8 +1299,7 @@ impl FinancingContract {
         // installment but the helper only reports whole installments — that
         // is explicitly in-scope per the issue.
         let installment_principal = offer.amount / (count as i128);
-        let installment_yield =
-            installment_principal * (offer.interest_rate as i128) / 10_000;
+        let installment_yield = installment_principal * (offer.interest_rate as i128) / 10_000;
         let installment_amount = installment_principal + installment_yield;
 
         assert!(

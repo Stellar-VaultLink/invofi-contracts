@@ -38,6 +38,26 @@ raw counts into a simple, transparent, publicly-readable score.
    new formula. The public `get_record` API makes a future re-scoring safe
    — scores are derived, raw outcomes remain the source of truth.
 
+7. **Dispute-aware adjustment (issue #134):** a default that a dispute
+   later overturns must not keep punishing the originator. Because the
+   reputation contract tracks only aggregate counts — not invoices — the
+   admin (the same key that resolves disputes in the registry) calls
+   `resolve_dispute(admin, originator, originator_favourable)` on the
+   reputation contract after a registry resolution:
+   - `originator_favourable = true` **neutralizes** one previously-recorded
+     default — `defaults` decrements by one, floored at 0 — so the `-2`
+     penalty stops counting against the originator. The scoring formula
+     itself is untouched: the neutralized default simply no longer exists
+     in the count.
+   - `originator_favourable = false` leaves the recorded outcome
+     unchanged; a penalty already applied by `record_outcome(..., 1)`
+     stands. Recording a *fresh* default for a resolution against the
+     originator remains the repayment contract's job, out of scope here.
+   - The adjustment emits a `ReputationChanged` event (topic `rep_chg`,
+     payload = corrected score) so indexers and the marketplace UI can
+     observe the correction. `get_score` / `get_record` stay public and
+     read-only. Admin auth mirrors `resolve_dispute` in the registry.
+
 ## Consequences
 
 - Lenders get a queryable, honest default-risk signal per originator.
