@@ -2,7 +2,7 @@
 #![cfg(test)]
 extern crate std;
 
-use super::InsuranceContract;
+use super::{InsuranceContract, InsuranceTier};
 use soroban_sdk::{symbol_short, testutils::{Address as _, Ledger}, token, Address, Env};
 
 /// Wrap a single signer in the one-element `Vec<Address>` the threshold-gated
@@ -991,4 +991,134 @@ fn test_accrued_yield_non_staker_returns_zero() {
     let stranger = Address::generate(&env);
     set_ts(&env, 31_536_000);
     assert_eq!(client.accrued_yield(&stranger), 0);
+}
+
+#[test]
+fn test_tier_economics_staking_yield_and_pool_isolation() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let admin = Address::generate(&env);
+    let (token_id, insurance_id, client) = setup(&env, &admin);
+    let conservative = Address::generate(&env);
+    let balanced = Address::generate(&env);
+    let aggressive = Address::generate(&env);
+    for staker in [&conservative, &balanced, &aggressive] {
+        mint_and_approve(&env, &token_id, &insurance_id, staker, 1_000_000);
+    }
+    fund_yield_reserve(&env, &token_id, &insurance_id, 200_000);
+    set_ts(&env, 0);
+    client.stake_tier(&conservative, &InsuranceTier::Conservative, &1_000_000);
+    client.stake_tier(&balanced, &InsuranceTier::Balanced, &1_000_000);
+    client.stake_tier(&aggressive, &InsuranceTier::Aggressive, &1_000_000);
+
+    assert_eq!(client.get_pool(&InsuranceTier::Conservative).apy_bps, 200);
+    assert_eq!(
+        client.get_pool(&InsuranceTier::Conservative).payout_cap_bps,
+        5_000
+    );
+    assert_eq!(client.get_pool(&InsuranceTier::Balanced).apy_bps, 500);
+    assert_eq!(
+        client.get_pool(&InsuranceTier::Balanced).payout_cap_bps,
+        7_500
+    );
+    assert_eq!(client.get_pool(&InsuranceTier::Aggressive).apy_bps, 1_000);
+    assert_eq!(
+        client.get_pool(&InsuranceTier::Aggressive).payout_cap_bps,
+        10_000
+    );
+
+    set_ts(&env, 31_536_000);
+    assert_eq!(
+        client.accrued_tier_yield(&conservative, &InsuranceTier::Conservative),
+        20_000
+    );
+    assert_eq!(
+        client.accrued_tier_yield(&balanced, &InsuranceTier::Balanced),
+        50_000
+    );
+    assert_eq!(
+        client.accrued_tier_yield(&aggressive, &InsuranceTier::Aggressive),
+        100_000
+    );
+
+    client.unstake_tier(&conservative, &InsuranceTier::Conservative, &1_000_000);
+    assert_eq!(client.get_pool(&InsuranceTier::Conservative).balance, 0);
+    assert_eq!(client.get_pool(&InsuranceTier::Balanced).balance, 1_000_000);
+    assert_eq!(
+        client.get_pool(&InsuranceTier::Aggressive).balance,
+        1_000_000
+    );
+}
+
+#[test]
+fn test_risk_assessment_uses_age_history_and_amount() {
+    let env = Env::default();
+    assert_eq!(
+        super::InsuranceContractClient::new(
+            &env,
+            &env.register(
+                InsuranceContract,
+                (Address::generate(&env), Address::generate(&env))
+            )
+        )
+        .assess_risk(&0, &10, &0, &10_000_000),
+        InsuranceTier::Conservative
+    );
+}
+
+#[test]
+fn test_tier_payout_caps_are_isolated() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let admin = Address::generate(&env);
+    let payout_caller = Address::generate(&env);
+    let beneficiary = Address::generate(&env);
+    let (token_id, insurance_id, client) = setup(&env, &admin);
+    let staker_a = Address::generate(&env);
+    let staker_b = Address::generate(&env);
+    let staker_c = Address::generate(&env);
+    for (staker, tier) in [
+        (&staker_a, InsuranceTier::Conservative),
+        (&staker_b, InsuranceTier::Balanced),
+        (&staker_c, InsuranceTier::Aggressive),
+    ] {
+        mint_and_approve(&env, &token_id, &insurance_id, staker, 1_000_000);
+        client.stake_tier(staker, &tier, &1_000_000);
+    }
+    client.set_payout_caller(&one(&env, &admin), &payout_caller);
+    let (_registry, invoice_id) =
+        setup_with_defaulted_invoice(&env, &admin, &payout_caller, &client);
+
+    assert_eq!(
+        client.pay_out_tier(
+            &invoice_id,
+            &InsuranceTier::Conservative,
+            &beneficiary,
+            &1_000_000
+        ),
+        500_000
+    );
+    assert_eq!(client.get_pool(&InsuranceTier::Balanced).balance, 1_000_000);
+    assert_eq!(
+        client.get_pool(&InsuranceTier::Aggressive).balance,
+        1_000_000
+    );
+    assert_eq!(
+        client.pay_out_tier(
+            &invoice_id,
+            &InsuranceTier::Balanced,
+            &beneficiary,
+            &1_000_000
+        ),
+        750_000
+    );
+    assert_eq!(
+        client.pay_out_tier(
+            &invoice_id,
+            &InsuranceTier::Aggressive,
+            &beneficiary,
+            &1_000_000
+        ),
+        1_000_000
+    );
 }
