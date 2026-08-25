@@ -1,7 +1,7 @@
 #![no_std]
 
 use soroban_sdk::{
-    contract, contractimpl, symbol_short, token, Address, BytesN, Env, Map, Symbol, Vec,
+    contract, contractimpl, symbol_short, token, Address, BytesN, Env, Map, String, Symbol, Vec,
 };
 
 use invofi_common::{
@@ -266,6 +266,11 @@ fn assert_admin(env: &Env, signers: &Vec<Address>) {
     invofi_common::assert_threshold(env, &cfg, signers);
 }
 
+// This release has no schema migration. Future Wasm versions can evolve these
+// hooks while preserving the lifecycle entrypoint ABI.
+fn pre_upgrade(_env: &Env) {}
+fn post_upgrade(_env: &Env) {}
+
 // ─── Contract ────────────────────────────────────────────────────────────────
 
 #[contract]
@@ -284,6 +289,7 @@ impl RegistryContract {
     /// as admin (issue #75).
     pub fn __constructor(env: Env, admin: Address) {
         invofi_common::init_admin_config(&env, &admin);
+        invofi_common::initialize_contract_version(&env, env!("CARGO_PKG_VERSION"));
     }
 
     /// Returns the primary admin address (the first configured signer).
@@ -1378,7 +1384,39 @@ impl RegistryContract {
     // ── Metadata ─────────────────────────────────────────────────────────────
 
     pub fn version(env: Env) -> soroban_sdk::String {
-        soroban_sdk::String::from_str(&env, env!("CARGO_PKG_VERSION"))
+        invofi_common::contract_version(&env)
+    }
+
+    /// Authorizes, validates, and schedules a replacement executable. Soroban
+    /// activates it after this call succeeds; call `post_upgrade` under the new
+    /// executable to complete the lifecycle.
+    pub fn upgrade(
+        env: Env,
+        signers: Vec<Address>,
+        current_wasm_hash: BytesN<32>,
+        new_wasm_hash: BytesN<32>,
+        new_version: String,
+    ) {
+        assert_admin(&env, &signers);
+        invofi_common::begin_upgrade(&env, &current_wasm_hash, &new_wasm_hash, &new_version);
+        pre_upgrade(&env);
+        env.deployer().update_current_contract_wasm(new_wasm_hash);
+    }
+
+    /// Runs the new executable's post-upgrade hook and commits its version.
+    pub fn post_upgrade(env: Env, signers: Vec<Address>) {
+        assert_admin(&env, &signers);
+        post_upgrade(&env);
+        invofi_common::complete_upgrade(&env);
+    }
+
+    /// Atomically replaces this executable with its immediately retained prior
+    /// executable. Contract storage remains as-is; no historical snapshot exists.
+    pub fn rollback(env: Env, signers: Vec<Address>) {
+        assert_admin(&env, &signers);
+        let (wasm_hash, version) = invofi_common::rollback_target(&env);
+        invofi_common::commit_rollback(&env, &version);
+        env.deployer().update_current_contract_wasm(wasm_hash);
     }
 
     pub fn get_min_invoice_amount(_env: Env) -> i128 {

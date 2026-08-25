@@ -18,7 +18,9 @@
 //! `resolve_dispute` — the `-2` penalty stops counting against them. The
 //! rule is documented in ADR-0004 §7.
 
-use soroban_sdk::{contract, contractimpl, contracttype, symbol_short, Address, Env, Map, Vec};
+use soroban_sdk::{
+    contract, contractimpl, contracttype, symbol_short, Address, BytesN, Env, Map, String, Vec,
+};
 
 use invofi_common::{assert_not_paused, AdminConfig, ContractError};
 
@@ -27,6 +29,9 @@ fn assert_admin(env: &Env, signers: &Vec<Address>) {
     let cfg = invofi_common::load_admin_config(env);
     invofi_common::assert_threshold(env, &cfg, signers);
 }
+
+fn pre_upgrade(_env: &Env) {}
+fn post_upgrade(_env: &Env) {}
 
 /// Outcome discriminant for a successful full repayment.
 pub const OUTCOME_REPAID: u32 = 0;
@@ -72,6 +77,7 @@ impl ReputationContract {
     /// is therefore no separate initialize() call to front-run (issue #75).
     pub fn __constructor(env: Env, admin: Address) {
         invofi_common::init_admin_config(&env, &admin);
+        invofi_common::initialize_contract_version(&env, env!("CARGO_PKG_VERSION"));
     }
 
     /// Returns the primary admin address (the first configured signer). See
@@ -278,7 +284,33 @@ impl ReputationContract {
     }
 
     pub fn version(env: Env) -> soroban_sdk::String {
-        soroban_sdk::String::from_str(&env, env!("CARGO_PKG_VERSION"))
+        invofi_common::contract_version(&env)
+    }
+
+    pub fn upgrade(
+        env: Env,
+        signers: Vec<Address>,
+        current_wasm_hash: BytesN<32>,
+        new_wasm_hash: BytesN<32>,
+        new_version: String,
+    ) {
+        assert_admin(&env, &signers);
+        invofi_common::begin_upgrade(&env, &current_wasm_hash, &new_wasm_hash, &new_version);
+        pre_upgrade(&env);
+        env.deployer().update_current_contract_wasm(new_wasm_hash);
+    }
+
+    pub fn post_upgrade(env: Env, signers: Vec<Address>) {
+        assert_admin(&env, &signers);
+        post_upgrade(&env);
+        invofi_common::complete_upgrade(&env);
+    }
+
+    pub fn rollback(env: Env, signers: Vec<Address>) {
+        assert_admin(&env, &signers);
+        let (wasm_hash, version) = invofi_common::rollback_target(&env);
+        invofi_common::commit_rollback(&env, &version);
+        env.deployer().update_current_contract_wasm(wasm_hash);
     }
 }
 

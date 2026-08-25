@@ -1383,6 +1383,19 @@ fn test_version_returns_nonempty_string() {
 }
 
 #[test]
+fn test_constructor_stores_version() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let contract_id = env.register(RegistryContract, (Address::generate(&env),));
+    let client = super::RegistryContractClient::new(&env, &contract_id);
+
+    assert_eq!(
+        client.version(),
+        soroban_sdk::String::from_str(&env, env!("CARGO_PKG_VERSION"))
+    );
+}
+
+#[test]
 fn test_get_min_invoice_amount() {
     let env = Env::default();
     let contract_id = env.register(RegistryContract, (Address::generate(&env),));
