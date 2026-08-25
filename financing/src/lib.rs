@@ -8,12 +8,14 @@ use soroban_sdk::{
 };
 
 use invofi_common::{
-    assert_not_paused, resolve_token, AdminConfig, ContractError, FinancingOffer, Invoice,
-    InvoiceStatus, LenderStats, NegotiationParty, NegotiationRecord, NegotiationStatus,
-    OfferStatus, ProtocolStats, RegistryClient, RepaymentSchedule, ScheduleFrequency,
-    DEFAULT_NEGOTIATION_WINDOW_SECS, MAX_INTEREST_BPS, MAX_NEGOTIATION_ROUNDS,
-    MAX_NEGOTIATION_WINDOW_SECS, MAX_OFFER_DURATION_SECS, MIN_NEGOTIATION_WINDOW_SECS,
-    MIN_OFFER_DURATION_SECS,
+    assert_not_paused, calculate_offer_score, resolve_token, AdminConfig, AuctionConfig,
+    AuctionMetadata, ContractError, FinancingOffer, Invoice, InvoiceStatus, LenderStats,
+    NegotiationParty, NegotiationRecord, NegotiationStatus, OfferStatus, ProtocolStats,
+    RegistryClient, RepaymentSchedule, ScheduleFrequency, DEFAULT_NEGOTIATION_WINDOW_SECS,
+    MAX_AUCTION_DEADLINE_SECS, MAX_INTEREST_BPS, MAX_NEGOTIATION_ROUNDS,
+    MAX_NEGOTIATION_WINDOW_SECS, MAX_OFFER_DURATION_SECS, MAX_OFFER_EXPIRY_SECS,
+    MAX_OFFERS_PER_INVOICE_LIMIT, MIN_AUCTION_DEADLINE_SECS, MIN_NEGOTIATION_WINDOW_SECS,
+    MIN_OFFER_DURATION_SECS, MIN_OFFER_EXPIRY_SECS,
 };
 
 /// Threshold-gated admin check (ADR-0010). See `invofi_common::assert_threshold`.
@@ -83,6 +85,36 @@ fn save_schedules(env: &Env, map: &Map<Symbol, RepaymentSchedule>) {
     env.storage()
         .persistent()
         .set(&symbol_short!("scheds"), map);
+}
+
+// ─── Auction Storage Helpers ────────────────────────────────────────────────
+
+fn load_auction_config(env: &Env) -> AuctionConfig {
+    env.storage()
+        .instance()
+        .get(&symbol_short!("auc_cfg"))
+        .unwrap_or_default()
+}
+
+fn save_auction_config(env: &Env, config: &AuctionConfig) {
+    env.storage()
+        .instance()
+        .set(&symbol_short!("auc_cfg"), config);
+}
+
+fn load_auction_metadata(env: &Env, invoice_id: &Symbol) -> Option<AuctionMetadata> {
+    env.storage()
+        .persistent()
+        .get(&(symbol_short!("auc_md"), invoice_id.clone()))
+}
+
+fn save_auction_metadata(env: &Env, metadata: &AuctionMetadata) {
+    env.storage()
+        .persistent()
+        .set(
+            &(symbol_short!("auc_md"), metadata.invoice_id.clone()),
+            metadata,
+        );
 }
 
 // ─── Negotiation Storage Helpers (issue #180) ────────────────────────────────
@@ -344,6 +376,274 @@ impl FinancingContract {
             .unwrap_or(false)
     }
 
+    // ── Auction Configuration ────────────────────────────────────────────────
+
+    /// Configure auction parameters. Admin only.
+    ///
+    /// `max_offers_per_invoice`: Maximum number of offers allowed per invoice (1-50)
+    /// `auction_deadline_secs`: Seconds after invoice creation when auction closes (1 hour - 30 days)
+    /// `offer_expiry_secs`: Seconds after offer creation when offer expires (1 hour - 30 days)
+    pub fn set_auction_config(
+        env: Env,
+        admin: Address,
+        max_offers_per_invoice: u32,
+        auction_deadline_secs: u64,
+        offer_expiry_secs: u64,
+    ) {
+        assert_not_paused(&env);
+        admin.require_auth();
+        let current: Address = env
+            .storage()
+            .instance()
+            .get(&symbol_short!("admin"))
+            .unwrap_or_else(|| panic!("Not initialized"));
+        if current != admin {
+            env.panic_with_error(ContractError::Unauthorized);
+        }
+
+        // Validate configuration bounds
+        assert!(
+            max_offers_per_invoice >= 1 && max_offers_per_invoice <= MAX_OFFERS_PER_INVOICE_LIMIT,
+            "max_offers_per_invoice must be between 1 and 50"
+        );
+        assert!(
+            auction_deadline_secs >= MIN_AUCTION_DEADLINE_SECS
+                && auction_deadline_secs <= MAX_AUCTION_DEADLINE_SECS,
+            "auction_deadline_secs must be between 1 hour and 30 days"
+        );
+        assert!(
+            offer_expiry_secs >= MIN_OFFER_EXPIRY_SECS
+                && offer_expiry_secs <= MAX_OFFER_EXPIRY_SECS,
+            "offer_expiry_secs must be between 1 hour and 30 days"
+        );
+
+        let config = AuctionConfig {
+            max_offers_per_invoice,
+            auction_deadline_secs,
+            offer_expiry_secs,
+        };
+        save_auction_config(&env, &config);
+    }
+
+    /// Get the current auction configuration.
+    pub fn get_auction_config(env: Env) -> AuctionConfig {
+        load_auction_config(&env)
+    }
+
+    /// Get auction metadata for an invoice, if it exists.
+    pub fn get_auction_metadata(env: Env, invoice_id: Symbol) -> Option<AuctionMetadata> {
+        load_auction_metadata(&env, &invoice_id)
+    }
+
+    // ── Auction Operations ──────────────────────────────────────────────────
+
+    /// Get the best offer for an invoice based on the time-weighted scoring algorithm.
+    /// Returns None if no pending offers exist.
+    ///
+    /// Scoring formula: score = (10_000_000 / rate_bps) * time_bonus * amount_factor
+    /// - Lower interest rates score higher
+    /// - Earlier offers get up to 10% time bonus
+    /// - Larger amounts get up to 10% amount bonus
+    pub fn get_best_offer(env: Env, invoice_id: Symbol) -> Option<FinancingOffer> {
+        // Get invoice to retrieve amount for scoring
+        let registry_addr: Address = env
+            .storage()
+            .instance()
+            .get(&symbol_short!("registry"))
+            .unwrap_or_else(|| panic!("Not initialized"));
+        let registry_client = RegistryClient::new(&env, &registry_addr);
+        let invoice: Invoice = registry_client.get_invoice(&invoice_id);
+
+        // Get auction metadata to determine auction start time
+        let auction_metadata = load_auction_metadata(&env, &invoice_id)?;
+        let auction_config = load_auction_config(&env);
+
+        let offers = load_offers(&env);
+        let mut best_offer: Option<FinancingOffer> = None;
+        let mut best_score: u64 = 0;
+
+        for (_id, offer) in offers.iter() {
+            if offer.invoice_id == invoice_id && offer.status == OfferStatus::Pending {
+                let score = calculate_offer_score(
+                    &offer,
+                    invoice.amount,
+                    auction_metadata.started_at,
+                    auction_config.auction_deadline_secs,
+                );
+
+                if score > best_score {
+                    best_score = score;
+                    best_offer = Some(offer);
+                }
+            }
+        }
+
+        best_offer
+    }
+
+    /// Calculate and return the score for a specific offer.
+    /// This is a query method for transparency - allows anyone to see how offers are ranked.
+    pub fn get_offer_score(env: Env, offer_id: Symbol) -> u64 {
+        let offers = load_offers(&env);
+        let offer = offers
+            .get(offer_id)
+            .unwrap_or_else(|| env.panic_with_error(ContractError::NotFound));
+
+        // Get invoice amount for scoring
+        let registry_addr: Address = env
+            .storage()
+            .instance()
+            .get(&symbol_short!("registry"))
+            .unwrap_or_else(|| panic!("Not initialized"));
+        let registry_client = RegistryClient::new(&env, &registry_addr);
+        let invoice: Invoice = registry_client.get_invoice(&offer.invoice_id);
+
+        // Get auction metadata
+        let auction_metadata = match load_auction_metadata(&env, &offer.invoice_id) {
+            Some(meta) => meta,
+            None => return 0, // No auction = no score
+        };
+        let auction_config = load_auction_config(&env);
+
+        calculate_offer_score(
+            &offer,
+            invoice.amount,
+            auction_metadata.started_at,
+            auction_config.auction_deadline_secs,
+        )
+    }
+
+    /// Close the auction for an invoice and auto-accept the best offer.
+    /// Can be called by anyone after the auction deadline has passed.
+    /// Returns the accepted offer.
+    pub fn close_auction(env: Env, invoice_id: Symbol, caller: Address) -> FinancingOffer {
+        assert_not_paused(&env);
+        caller.require_auth();
+
+        // Get auction metadata
+        let mut auction_metadata = load_auction_metadata(&env, &invoice_id)
+            .unwrap_or_else(|| env.panic_with_error(ContractError::NotFound));
+
+        // Check if auction is already closed
+        if auction_metadata.closed {
+            env.panic_with_error(ContractError::InvalidTransition);
+        }
+
+        // Check if auction deadline has passed
+        let now = env.ledger().timestamp();
+        if now < auction_metadata.closes_at {
+            env.panic_with_error(ContractError::InvalidTransition);
+        }
+
+        // Get the best offer
+        let best_offer = Self::get_best_offer(env.clone(), invoice_id.clone())
+            .unwrap_or_else(|| env.panic_with_error(ContractError::NotFound));
+
+        // Mark auction as closed
+        auction_metadata.closed = true;
+        save_auction_metadata(&env, &auction_metadata);
+
+        // Get invoice and registry for acceptance flow
+        let registry_addr: Address = env
+            .storage()
+            .instance()
+            .get(&symbol_short!("registry"))
+            .unwrap_or_else(|| panic!("Not initialized"));
+        let registry_client = RegistryClient::new(&env, &registry_addr);
+        let invoice: Invoice = registry_client.get_invoice(&invoice_id);
+
+        // Verify invoice is still in valid state
+        if invoice.status != InvoiceStatus::Pending {
+            env.panic_with_error(ContractError::InvalidTransition);
+        }
+
+        // Emit auction_closed event
+        env.events().publish(
+            (symbol_short!("auc_cls"), invoice_id.clone()),
+            (caller.clone(), now),
+        );
+
+        // Emit best_offer_selected event
+        env.events().publish(
+            (symbol_short!("best_sel"), best_offer.id.clone()),
+            (
+                invoice_id.clone(),
+                best_offer.lender.clone(),
+                best_offer.amount,
+                best_offer.interest_rate,
+            ),
+        );
+
+        // Auto-accept the best offer using the same settlement logic
+        Self::settle_acceptance(
+            &env,
+            best_offer.id.clone(),
+            best_offer,
+            &registry_client,
+            &invoice,
+            &caller,
+        )
+    }
+
+    /// Expire offers that have exceeded their validity period.
+    /// Can be called by anyone. Processes up to a specified number of offers
+    /// to prevent unbounded gas costs.
+    ///
+    /// Returns the number of offers expired.
+    pub fn expire_offers(env: Env, caller: Address, max_to_process: u32) -> u32 {
+        assert_not_paused(&env);
+        caller.require_auth();
+
+        let auction_config = load_auction_config(&env);
+        let now = env.ledger().timestamp();
+        let mut offers = load_offers(&env);
+        let mut expired_count = 0u32;
+        let mut processed = 0u32;
+
+        // Collect offer IDs to expire (can't modify map while iterating)
+        let mut to_expire: Vec<Symbol> = Vec::new(&env);
+
+        for (id, offer) in offers.iter() {
+            if processed >= max_to_process {
+                break;
+            }
+            processed += 1;
+
+            if offer.status == OfferStatus::Pending {
+                let expiry_time = offer.created_at + auction_config.offer_expiry_secs;
+                if now >= expiry_time {
+                    to_expire.push_back(id);
+                }
+            }
+        }
+
+        // Now expire the collected offers
+        for offer_id in to_expire.iter() {
+            if let Some(mut offer) = offers.get(offer_id.clone()) {
+                offer.status = OfferStatus::Rejected;
+                offers.set(offer_id.clone(), offer.clone());
+
+                // Update lender stats
+                let mut lstats = load_lender_stats(&env, &offer.lender);
+                if lstats.offers_pending > 0 {
+                    lstats.offers_pending -= 1;
+                }
+                save_lender_stats(&env, &offer.lender, &lstats);
+
+                // Emit offer expired event
+                env.events().publish(
+                    (symbol_short!("off_exp"), offer_id.clone()),
+                    (offer.invoice_id.clone(), offer.lender.clone()),
+                );
+
+                expired_count += 1;
+            }
+        }
+
+        save_offers(&env, &offers);
+        expired_count
+    }
+
     // ── Offer CRUD ───────────────────────────────────────────────────────────
 
     /// Create a financing offer on an invoice. Only the lender can call this.
@@ -403,19 +703,39 @@ impl FinancingContract {
             env.panic_with_error(ContractError::AlreadyExists);
         }
 
+        // Enforce max offers per invoice (auction constraint)
+        let auction_config = load_auction_config(&env);
+        let pending_offers_count = Self::count_pending_offers_for_invoice(&env, &invoice_id);
+        if pending_offers_count >= auction_config.max_offers_per_invoice {
+            env.panic_with_error(ContractError::InvalidInput);
+        }
+
+        // Initialize auction metadata if this is the first offer
+        let now = env.ledger().timestamp();
+        if load_auction_metadata(&env, &invoice_id).is_none() {
+            let metadata = AuctionMetadata {
+                invoice_id: invoice_id.clone(),
+                started_at: now,
+                closes_at: now + auction_config.auction_deadline_secs,
+                closed: false,
+            };
+            save_auction_metadata(&env, &metadata);
+        }
+
         let offer = FinancingOffer {
             id: offer_id.clone(),
-            invoice_id,
-            lender,
+            invoice_id: invoice_id.clone(),
+            lender: lender.clone(),
             amount,
             currency,
             interest_rate,
             duration,
             status: OfferStatus::Pending,
+            created_at: now,
             funded_at: 0,
             amount_repaid: 0,
         };
-        offers.set(offer_id, offer.clone());
+        offers.set(offer_id.clone(), offer.clone());
         save_offers(&env, &offers);
 
         let mut s = load_stats(&env);
@@ -427,6 +747,19 @@ impl FinancingContract {
         lstats.offers_pending += 1;
         save_lender_stats(&env, &offer.lender, &lstats);
 
+        // Emit offer_submitted event for auction tracking
+        env.events().publish(
+            (symbol_short!("off_sub"), offer.id.clone()),
+            (
+                offer.invoice_id.clone(),
+                offer.lender.clone(),
+                amount,
+                interest_rate,
+                now,
+            ),
+        );
+        
+        // Keep legacy event for backwards compatibility
         env.events().publish(
             (symbol_short!("off_new"), offer.id.clone()),
             (
@@ -1130,6 +1463,18 @@ impl FinancingContract {
     }
 
     // ── Query helpers ────────────────────────────────────────────────────────
+
+    /// Count the number of pending offers for a specific invoice.
+    fn count_pending_offers_for_invoice(env: &Env, invoice_id: &Symbol) -> u32 {
+        let offers = load_offers(env);
+        let mut count = 0u32;
+        for (_id, offer) in offers.iter() {
+            if offer.invoice_id == *invoice_id && offer.status == OfferStatus::Pending {
+                count += 1;
+            }
+        }
+        count
+    }
 
     pub fn get_offers_by_invoice(env: Env, invoice_id: Symbol) -> Vec<FinancingOffer> {
         let offers = load_offers(&env);

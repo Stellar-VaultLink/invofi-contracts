@@ -88,7 +88,71 @@ pub const VERIFICATION_TYPES: [VerificationType; 3] = [
     VerificationType::TaxCompliance,
 ];
 
+// ─── Auction Constants ──────────────────────────────────────────────────────
+
+/// Default maximum number of offers allowed per invoice in competitive auction.
+pub const DEFAULT_MAX_OFFERS_PER_INVOICE: u32 = 10;
+
+/// Default auction deadline in seconds. After this time from invoice creation,
+/// the auction can be closed and the best offer auto-accepted. 7 days.
+pub const DEFAULT_AUCTION_DEADLINE_SECS: u64 = 604_800;
+
+/// Default offer validity period in seconds. Offers expire after this duration
+/// from creation if not accepted. 48 hours.
+pub const DEFAULT_OFFER_EXPIRY_SECS: u64 = 172_800;
+
+/// Maximum auction deadline that can be configured. 30 days.
+pub const MAX_AUCTION_DEADLINE_SECS: u64 = 2_592_000;
+
+/// Minimum auction deadline that can be configured. 1 hour.
+pub const MIN_AUCTION_DEADLINE_SECS: u64 = 3_600;
+
+/// Maximum offer expiry period that can be configured. 30 days.
+pub const MAX_OFFER_EXPIRY_SECS: u64 = 2_592_000;
+
+/// Minimum offer expiry period that can be configured. 1 hour.
+pub const MIN_OFFER_EXPIRY_SECS: u64 = 3_600;
+
+/// Maximum offers per invoice that can be configured.
+pub const MAX_OFFERS_PER_INVOICE_LIMIT: u32 = 50;
+
 // ─── Shared Error Enum ────────────────────────────────────────────────────────
+
+/// Configuration for competitive auction behavior per deployment.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct AuctionConfig {
+    /// Maximum number of offers allowed per invoice.
+    pub max_offers_per_invoice: u32,
+    /// Seconds after invoice creation when auction can be closed.
+    pub auction_deadline_secs: u64,
+    /// Seconds after offer creation when offer expires.
+    pub offer_expiry_secs: u64,
+}
+
+impl Default for AuctionConfig {
+    fn default() -> Self {
+        Self {
+            max_offers_per_invoice: DEFAULT_MAX_OFFERS_PER_INVOICE,
+            auction_deadline_secs: DEFAULT_AUCTION_DEADLINE_SECS,
+            offer_expiry_secs: DEFAULT_OFFER_EXPIRY_SECS,
+        }
+    }
+}
+
+/// Metadata tracking auction state for an invoice.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct AuctionMetadata {
+    /// Invoice ID this auction is for.
+    pub invoice_id: Symbol,
+    /// Unix timestamp when the invoice was created (auction start).
+    pub started_at: u64,
+    /// Unix timestamp when the auction closes (derived from started_at + config).
+    pub closes_at: u64,
+    /// Whether the auction has been explicitly closed.
+    pub closed: bool,
+}
 
 /// Structured error type shared across all InvoFi contracts.
 ///
@@ -367,6 +431,8 @@ pub struct FinancingOffer {
     /// Financing duration in seconds
     pub duration: u64,
     pub status: OfferStatus,
+    /// Unix timestamp when the offer was created/submitted
+    pub created_at: u64,
     /// Unix timestamp when the offer was accepted; 0 if not yet accepted
     pub funded_at: u64,
     /// Running total of repayments made against the financing obligation
@@ -593,6 +659,104 @@ pub struct Attestation {
     pub status: VerificationStatus,
 }
 
+// ─── Auction Scoring ─────────────────────────────────────────────────────────
+
+/// Calculate the time bonus factor for an offer in the competitive auction.
+/// Earlier offers get a small bonus (up to 10% for the first offer).
+///
+/// Formula: time_bonus = 1.0 + (0.1 * (1 - relative_position))
+/// Where relative_position = (offer_created_at - auction_started_at) / auction_duration
+///
+/// Returns bonus as a scaled integer (10000 = 1.0x, 11000 = 1.1x) for fixed-point math.
+pub fn calculate_time_bonus(
+    offer_created_at: u64,
+    auction_started_at: u64,
+    auction_duration_secs: u64,
+) -> u32 {
+    if auction_duration_secs == 0 {
+        return 10_000; // No bonus if auction duration is zero
+    }
+    
+    let elapsed = offer_created_at.saturating_sub(auction_started_at);
+    
+    // If offer was submitted after auction should have closed, no bonus
+    if elapsed >= auction_duration_secs {
+        return 10_000; // 1.0x (no bonus)
+    }
+    
+    // relative_position = elapsed / duration (scaled to avoid float)
+    // time_bonus = 1.0 + 0.1 * (1 - relative_position)
+    // = 1.0 + 0.1 - 0.1 * relative_position
+    // = 1.1 - 0.1 * relative_position
+    // Scaled: 11000 - 1000 * elapsed / duration
+    
+    let bonus_reduction = (1000_u64 * elapsed) / auction_duration_secs;
+    11_000_u32.saturating_sub(bonus_reduction as u32)
+}
+
+/// Calculate the amount factor for an offer score.
+/// Larger offers get a small bonus to encourage liquidity.
+///
+/// Formula: amount_factor = sqrt(amount / invoice_amount)
+/// But using integer approximation: amount_factor = 10000 + min(1000, (amount - invoice_amount) / invoice_amount * 1000)
+///
+/// Returns factor as a scaled integer (10000 = 1.0x) for fixed-point math.
+pub fn calculate_amount_factor(offer_amount: i128, invoice_amount: i128) -> u32 {
+    if invoice_amount <= 0 {
+        return 10_000;
+    }
+    
+    if offer_amount <= invoice_amount {
+        return 10_000; // No bonus for offers at or below invoice amount
+    }
+    
+    // Bonus for offering more, capped at 10% extra
+    let excess = offer_amount.saturating_sub(invoice_amount);
+    let bonus_bps = ((excess * 1000) / invoice_amount).min(1000) as u32;
+    10_000 + bonus_bps
+}
+
+/// Calculate the overall score for an offer in the competitive auction.
+///
+/// Formula: score = (10_000_000 / rate_bps) * time_bonus * amount_factor / 100_000_000
+///
+/// Lower interest rates score higher. Earlier submissions get time bonus.
+/// Larger amounts get amount bonus.
+///
+/// All factors are scaled integers to avoid floating point:
+/// - rate_bps: 1-10000 (0.01% to 100%)
+/// - time_bonus: 10000-11000 (1.0x to 1.1x)
+/// - amount_factor: 10000-11000 (1.0x to 1.1x)
+///
+/// Returns score as a u64 for comparison (higher is better).
+pub fn calculate_offer_score(
+    offer: &FinancingOffer,
+    invoice_amount: i128,
+    auction_started_at: u64,
+    auction_duration_secs: u64,
+) -> u64 {
+    // Prevent division by zero
+    if offer.interest_rate == 0 {
+        return 0;
+    }
+    
+    // Base score: inverse of interest rate (lower rate = higher score)
+    // Scale up to maintain precision
+    let base_score = 10_000_000_u64 / (offer.interest_rate as u64);
+    
+    // Time bonus for early submission
+    let time_bonus = calculate_time_bonus(
+        offer.created_at,
+        auction_started_at,
+        auction_duration_secs,
+    ) as u64;
+    
+    // Amount factor for offer size
+    let amount_factor = calculate_amount_factor(offer.amount, invoice_amount) as u64;
+    
+    // Combined score = base_score * time_bonus * amount_factor / scale
+    // Scale down by 100_000_000 to prevent overflow (10000 * 10000)
+    (base_score * time_bonus * amount_factor) / 100_000_000
 /// An event record stored in the on-chain event index.
 ///
 /// Lightweight summary that mirrors a Soroban event log entry, enabling
