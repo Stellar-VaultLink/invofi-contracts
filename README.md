@@ -349,17 +349,17 @@ Thanks to everyone who has contributed to InvoFi — the list below is generated
                 </a>
             </td>
             <td align="center">
-                <a href="https://github.com/p3ris0n">
-                    <img src="https://avatars.githubusercontent.com/u/94976593?v=4" width="100;" alt="p3ris0n"/>
-                    <br />
-                    <sub><b>Promise Raji</b></sub>
-                </a>
-            </td>
-            <td align="center">
                 <a href="https://github.com/MJ-RWA">
                     <img src="https://avatars.githubusercontent.com/u/240063069?v=4" width="100;" alt="MJ-RWA"/>
                     <br />
                     <sub><b>MJ | Dev 🏀</b></sub>
+                </a>
+            </td>
+            <td align="center">
+                <a href="https://github.com/p3ris0n">
+                    <img src="https://avatars.githubusercontent.com/u/94976593?v=4" width="100;" alt="p3ris0n"/>
+                    <br />
+                    <sub><b>Promise Raji</b></sub>
                 </a>
             </td>
 		</tr>
