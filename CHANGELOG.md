@@ -8,6 +8,12 @@ and are enforced by commitlint in CI.
 ## [Unreleased]
 
 ### Added
+- **Interest-rate cap audit & proptest (issue #122)** — verified `MAX_INTEREST_BPS`
+  (10 000 bps = 100%) is enforced on all three term-setting entrypoints:
+  `create_offer` (inline assertion), `amend_offer`, and `counter_offer`
+  (via `assert_terms_valid`). Added proptest that confirms the cap holds across
+  random rate/amount/duration combos, and unit tests for the negotiation path.
+  Updated security-self-review docs to mark the follow-up as resolved.
 - **Multisig threshold boundary tests (issue #128)** — six new tests covering
   the exact N, N-1, N+1 threshold boundaries for M-of-N admin governance
   (ADR-0010). Tests verify: 2-of-3 (N-1 fails, N succeeds, N+1 succeeds),

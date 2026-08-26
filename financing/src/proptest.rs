@@ -246,4 +246,86 @@ proptest! {
             prop_assert_eq!(pos_client.balance(&lender), 0);
             prop_assert_eq!(fin.get_stats().total_financed, 0);
         }
+
+    /// The interest-rate cap (`MAX_INTEREST_BPS`) must be enforced on every
+    /// term-setting entrypoint: `create_offer`, `amend_offer`, and
+    /// `counter_offer`.  Random valid rates are accepted; any rate one above
+    /// the cap is rejected on all three paths.
+    #[test]
+    fn test_interest_rate_cap_enforced_on_all_paths(
+        valid_rate in 1u32..=10_000u32,
+        principal in 10_000_000i128..100_000_000_000i128,
+        duration in 86_400u64..31_536_000u64,
+    ) {
+        let env = Env::default();
+        env.mock_all_auths();
+        env.ledger().set_timestamp(1_000_000);
+
+        let admin = Address::generate(&env);
+        let originator = Address::generate(&env);
+        let lender = Address::generate(&env);
+        let token_id = Address::generate(&env);
+
+        let registry_id = env.register(RegistryContract, (admin.clone(),));
+        let reg = invofi_registry::RegistryContractClient::new(&env, &registry_id);
+        let financing_id = env.register(FinancingContract, (admin.clone(), registry_id.clone(), token_id.clone()));
+        let fin = crate::FinancingContractClient::new(&env, &financing_id);
+
+        // Register invoice (amount must be >= principal for the offer to be valid)
+        let invoice_amount = principal.max(10_000_000);
+        let invoice_id = symbol_short!("inv_rc");
+        reg.register_invoice(&invoice_id, &originator, &invoice_amount, &symbol_short!("USD"), &2_000_000u64);
+
+        // ── 1. create_offer with valid rate must succeed ────────────────────
+        let offer = fin.create_offer(
+            &symbol_short!("off_rc"),
+            &invoice_id,
+            &lender,
+            &principal,
+            &symbol_short!("USD"),
+            &valid_rate,
+            &duration,
+        );
+        prop_assert_eq!(offer.interest_rate, valid_rate);
+
+        // ── 2. create_offer with rate = MAX + 1 must be rejected ───────────
+        let over_rate = invofi_common::MAX_INTEREST_BPS + 1;
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            fin.create_offer(
+                &symbol_short!("off_over"),
+                &invoice_id,
+                &lender,
+                &principal,
+                &symbol_short!("USD"),
+                &over_rate,
+                &duration,
+            );
+        }));
+        prop_assert!(result.is_err(), "create_offer: rate {} above cap must be rejected", over_rate);
+
+        // ── 3. amend_offer with rate = MAX + 1 must be rejected ─────────────
+        let offer_id = symbol_short!("off_amd");
+        fin.create_offer(&offer_id, &invoice_id, &lender, &principal, &symbol_short!("USD"), &valid_rate, &duration);
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            fin.amend_offer(&offer_id, &lender, &0u32, &principal, &over_rate, &duration);
+        }));
+        prop_assert!(result.is_err(), "amend_offer: rate {} above cap must be rejected", over_rate);
+
+        // ── 4. counter_offer with rate = MAX + 1 must be rejected ───────────
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            fin.counter_offer(&offer_id, &originator, &0u32, &principal, &over_rate, &duration);
+        }));
+        prop_assert!(result.is_err(), "counter_offer: rate {} above cap must be rejected", over_rate);
+
+        // ── 5. All stored offers must have rate <= MAX_INTEREST_BPS ──────────
+        let all_offers = fin.get_all_offers();
+        for stored_offer in all_offers.iter() {
+            prop_assert!(
+                stored_offer.interest_rate <= invofi_common::MAX_INTEREST_BPS,
+                "stored offer rate {} exceeds MAX_INTEREST_BPS {}",
+                stored_offer.interest_rate,
+                invofi_common::MAX_INTEREST_BPS,
+            );
+        }
+    }
 }

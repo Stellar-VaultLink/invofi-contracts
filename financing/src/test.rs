@@ -2759,3 +2759,104 @@ fn test_plain_accept_without_a_negotiation_emits_no_closure() {
         NegotiationStatus::None
     );
 }
+
+// ── Interest-rate cap enforcement across all term-setting paths ────────────
+
+#[test]
+#[should_panic(expected = "Error(Contract, #6)")]
+fn test_amend_offer_interest_rate_above_cap_panics() {
+    let env = Env::default();
+    env.mock_all_auths();
+    env.ledger().set_timestamp(1_000_000);
+
+    let invoice_id = symbol_short!("inv_rc");
+    let offer_id = symbol_short!("off_rc");
+    let (_reg, fin, _admin, _originator, lender, _token) =
+        setup_negotiation(&env, &invoice_id, &offer_id, 1_000_000_000);
+
+    // Amend with rate = MAX_INTEREST_BPS + 1 must be rejected.
+    fin.amend_offer(
+        &offer_id,
+        &lender,
+        &0u32,
+        &1_000_000_000i128,
+        &(invofi_common::MAX_INTEREST_BPS + 1),
+        &1_296_000u64,
+    );
+}
+
+#[test]
+#[should_panic(expected = "Error(Contract, #6)")]
+fn test_counter_offer_interest_rate_above_cap_panics() {
+    let env = Env::default();
+    env.mock_all_auths();
+    env.ledger().set_timestamp(1_000_000);
+
+    let invoice_id = symbol_short!("inv_cc");
+    let offer_id = symbol_short!("off_cc");
+    let (_reg, fin, _admin, originator, _lender, _token) =
+        setup_negotiation(&env, &invoice_id, &offer_id, 1_000_000_000);
+
+    // Counter-offer with rate = MAX_INTEREST_BPS + 1 must be rejected.
+    fin.counter_offer(
+        &offer_id,
+        &originator,
+        &0u32,
+        &1_000_000_000i128,
+        &(invofi_common::MAX_INTEREST_BPS + 1),
+        &1_296_000u64,
+    );
+}
+
+#[test]
+fn test_amend_offer_interest_rate_at_cap_passes() {
+    let env = Env::default();
+    env.mock_all_auths();
+    env.ledger().set_timestamp(1_000_000);
+
+    let invoice_id = symbol_short!("inv_rk");
+    let offer_id = symbol_short!("off_rk");
+    let (_reg, fin, _admin, _originator, lender, _token) =
+        setup_negotiation(&env, &invoice_id, &offer_id, 1_000_000_000);
+
+    // Amend with rate = MAX_INTEREST_BPS must succeed.
+    let amended = fin.amend_offer(
+        &offer_id,
+        &lender,
+        &0u32,
+        &1_000_000_000i128,
+        &invofi_common::MAX_INTEREST_BPS,
+        &1_296_000u64,
+    );
+    assert_eq!(amended.interest_rate, invofi_common::MAX_INTEREST_BPS);
+}
+
+#[test]
+fn test_counter_offer_interest_rate_at_cap_records_in_history() {
+    let env = Env::default();
+    env.mock_all_auths();
+    env.ledger().set_timestamp(1_000_000);
+
+    let invoice_id = symbol_short!("inv_ck");
+    let offer_id = symbol_short!("off_ck");
+    let (_reg, fin, _admin, originator, _lender, _token) =
+        setup_negotiation(&env, &invoice_id, &offer_id, 1_000_000_000);
+
+    // Counter-offer with rate = MAX_INTEREST_BPS must succeed.
+    // counter_offer records in negotiation history — the offer's rate
+    // is unchanged (it is the lender's standing position).
+    let countered = fin.counter_offer(
+        &offer_id,
+        &originator,
+        &0u32,
+        &1_000_000_000i128,
+        &invofi_common::MAX_INTEREST_BPS,
+        &1_296_000u64,
+    );
+    // offer.status is still Pending (counter-offer doesn't auto-accept here)
+    assert_eq!(countered.status, OfferStatus::Pending);
+    // The rate is recorded in negotiation history
+    let history = fin.get_negotiation(&offer_id);
+    assert_eq!(history.len(), 1);
+    assert_eq!(history.get(0).unwrap().interest_rate, invofi_common::MAX_INTEREST_BPS);
+}

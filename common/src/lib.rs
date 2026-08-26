@@ -175,7 +175,7 @@ const PENDING_UPGRADE_KEY: Symbol = symbol_short!("__upgrade");
 /// Parses a numeric semantic version in exactly `MAJOR.MINOR.PATCH` form.
 pub fn parse_semantic_version(env: &Env, value: &String) -> SemanticVersion {
     let len = value.len() as usize;
-    if len < 5 || len > 32 {
+    if !(5..=32).contains(&len) {
         env.panic_with_error(ContractError::InvalidVersion);
     }
 
