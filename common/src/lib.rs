@@ -8,8 +8,7 @@
 #![no_std]
 
 use soroban_sdk::{
-    contractclient, contracterror, contracttype, symbol_short, Address, BytesN, Env, Map, String,
-    Symbol, Vec,
+    contractclient, contracterror, contracttype, symbol_short, Address, Env, Map, Symbol,
 };
 
 // ─── Constants ───────────────────────────────────────────────────────────────
@@ -92,50 +91,34 @@ pub const VERIFICATION_TYPES: [VerificationType; 3] = [
 
 /// Structured error type shared across all InvoFi contracts.
 ///
-/// Using `#[contracterror]` causes the Soroban host to encode these as a
-/// typed `Error` value in the XDR result, not as an opaque string panic.
-/// Clients (SDK, frontend, indexer) can match on the `u32` discriminant
-/// without parsing panic messages — which breaks across contract versions.
-///
-/// Discriminants are **stable** and must never be re-numbered once deployed.
-/// Add new variants at the end with a new, higher number.
-///
-/// Using `env.panic_with_error(&ContractError::X)` keeps all public
-/// function signatures identical (`T`, not `Result<T, ContractError>`), so
-/// no SDK binding changes are needed.
+/// The discriminants are stable public API: never renumber existing variants;
+/// append new variants with a new code instead.
 #[contracterror]
 #[derive(Copy, Clone, Debug, Eq, PartialEq, PartialOrd, Ord)]
 #[repr(u32)]
 pub enum ContractError {
-    /// Caller is not authorized to perform this action (wrong admin,
-    /// wrong originator, wrong lender, etc.).
+    /// Caller is not authorized to perform this action.
     Unauthorized = 1,
 
-    /// Requested resource (invoice, offer, rate, etc.) does not exist.
+    /// Requested resource does not exist.
     NotFound = 2,
 
-    /// The operation is not permitted given the resource's current status
-    /// (e.g., accepting an already-Financed offer, cancelling a non-Pending
-    /// invoice, reclaiming before the grace period).
+    /// Operation is not permitted for the resource's current status.
     InvalidTransition = 3,
 
-    /// The contract is paused; all state-mutating operations are halted
-    /// until an admin calls `unpause`.
+    /// Contract is paused.
     Paused = 4,
 
-    /// The caller's balance is insufficient for the requested operation
-    /// (e.g., unstaking more than staked, repaying more than is owed).
+    /// Requested balance is insufficient.
     InsufficientBalance = 5,
 
-    /// A parameter value falls outside the allowed range or violates a
-    /// protocol constraint (e.g., `fee_bps > 500`, `amount <= 0`,
-    /// past-due `due_date`).
+    /// Parameter is outside the allowed range or violates a constraint.
     InvalidInput = 6,
 
-    /// An entity with the provided ID already exists (invoice, offer).
+    /// Entity with the provided ID already exists.
     AlreadyExists = 7,
 
-    /// The caller's address is on the blacklist.
+    /// Caller is blacklisted.
     Blacklisted = 8,
 
     /// A version is not in strict `MAJOR.MINOR.PATCH` form.
@@ -305,6 +288,21 @@ pub fn commit_rollback(env: &Env, version: &String) {
     env.storage().instance().remove(&PREVIOUS_WASM_KEY);
 }
 
+/// Default maximum serialized storage attributed to one invoice record.
+pub const DEFAULT_INVOICE_STORAGE_BUDGET_BYTES: u32 = 10 * 1024;
+
+/// Minimum XDR key/value payload for the maximally sized `Invoice` shape.
+/// 332 is measured using the SDK's XDR path with 32-byte invoice/currency
+/// symbols, a populated address, maximum integers, and `Defaulted` status;
+/// the registry test mechanically verifies this value.
+pub const MIN_INVOICE_STORAGE_BUDGET_BYTES: u32 = 332;
+
+/// Retain a terminal invoice for one calendar year before its eviction notice.
+pub const TERMINAL_INVOICE_RETENTION_SECS: u64 = 31_536_000;
+
+/// Notice period between the retention threshold and eviction eligibility.
+pub const EVICTION_GRACE_PERIOD_SECS: u64 = 2_592_000;
+
 // ─── Types ───────────────────────────────────────────────────────────────────
 
 /// Risk tier for yield-rate lookups. A = low risk, C = high risk.
@@ -343,14 +341,13 @@ pub enum InvoiceStatus {
     Defaulted = 6,
 }
 
-/// A record of a single invoice state transition.
+/// Why a terminal invoice was removed from registry storage.
 #[contracttype]
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub struct TransitionRecord {
-    pub from_status: InvoiceStatus,
-    pub to_status: InvoiceStatus,
-    pub actor: Address,
-    pub timestamp: u64,
+#[repr(u32)]
+pub enum StorageEvictionReason {
+    RetentionExpired = 0,
+    Admin = 1,
 }
 
 /// A financing offer submitted by a lender against an invoice.

@@ -1,30 +1,203 @@
 #![no_std]
 
 use soroban_sdk::{
-    contract, contractimpl, symbol_short, token, Address, BytesN, Env, Map, String, Symbol, Vec,
+    contract, contractimpl, symbol_short, xdr::ToXdr, Address, Env, Map, Symbol, Vec,
 };
 
 use invofi_common::{
-    assert_not_paused, assert_transition, get_transition_history, AdminConfig, Attestation,
-    ContractError, Invoice, InvoiceStatus, ProtocolStats, RiskTier, TransitionRecord,
-    VerificationStatus, VerificationType, DEFAULT_ATTESTATION_VALIDITY_SECS,
-    MAX_ATTESTATIONS_PER_INVOICE, MAX_ATTESTATION_VALIDITY_SECS, MAX_VERIFICATION_FEE_BPS,
-    MAX_VERIFIERS, MIN_ATTESTATION_VALIDITY_SECS, MIN_INVOICE_AMOUNT, VERIFICATION_TYPES,
+    assert_not_paused, ContractError, Invoice, InvoiceStatus, ProtocolStats, RiskTier,
+    StorageEvictionReason, DEFAULT_INVOICE_STORAGE_BUDGET_BYTES, EVICTION_GRACE_PERIOD_SECS,
+    MIN_INVOICE_AMOUNT, TERMINAL_INVOICE_RETENTION_SECS,
 };
 
 // ─── Storage Helpers ─────────────────────────────────────────────────────────
 
-fn load_invoices(env: &Env) -> Map<Symbol, Invoice> {
-    env.storage()
-        .persistent()
-        .get(&symbol_short!("invoices"))
-        .unwrap_or(Map::new(env))
+// Storage design:
+// - Invoices, terminal timestamps, and ID pages are independent persistent
+//   entries, so changing one invoice never rewrites another invoice.
+// - `invmeta` stores `(active_count, current_page, next_slot)`; each `invpage`
+//   holds at most `INVOICE_IDS_PER_PAGE` `Option<Symbol>` slots.
+// - Registration appends to the current page. Eviction clears its slot and
+//   never compacts pages, preserving stable offset ordering across gaps.
+// - Aggregate reads are page-bounded; callers use `get_invoices_paginated` or
+//   a filtered paginated helper for pages beyond the legacy first-page views.
+// - Active TTL bumps are keeper-gated. Terminal entries are renewed only by
+//   `renew_terminal_invoice_ttl`, also keeper-gated, before eligibility.
+// - Renewal extends the invoice, terminal timestamp, and its page/meta index,
+//   but does not alter `terminal_at`; real-time retention still ends at 395 days.
+const INVOICE_IDS_PER_PAGE: u32 = 32;
+const MAX_INVOICE_QUERY_LIMIT: u32 = 32;
+const TTL_RENEWAL_THRESHOLD_DIVISOR: u32 = 2;
+
+/// Renew a persistent entry once its remaining TTL falls below roughly half
+/// of the requested extension window. This leaves a meaningful keeper window
+/// before expiry instead of refreshing entries on every call.
+fn ttl_renewal_threshold(extend_to: u32) -> u32 {
+    (extend_to / TTL_RENEWAL_THRESHOLD_DIVISOR).min(extend_to.saturating_sub(1))
 }
 
-fn save_invoices(env: &Env, map: &Map<Symbol, Invoice>) {
+fn invoice_key(id: &Symbol) -> (Symbol, Symbol) {
+    (symbol_short!("inv"), id.clone())
+}
+
+fn terminal_at_key(id: &Symbol) -> (Symbol, Symbol) {
+    (symbol_short!("term_at"), id.clone())
+}
+
+fn invoice_page_key(page: u32) -> (Symbol, u32) {
+    (symbol_short!("invpage"), page)
+}
+
+fn invoice_location_key(id: &Symbol) -> (Symbol, Symbol) {
+    (symbol_short!("invloc"), id.clone())
+}
+
+fn load_invoice_index_meta(env: &Env) -> (u32, u32, u32) {
     env.storage()
         .persistent()
-        .set(&symbol_short!("invoices"), map);
+        .get(&symbol_short!("invmeta"))
+        .unwrap_or((0, 0, 0))
+}
+
+fn save_invoice_index_meta(env: &Env, meta: &(u32, u32, u32)) {
+    env.storage()
+        .persistent()
+        .set(&symbol_short!("invmeta"), meta);
+}
+
+fn load_invoice_page(env: &Env, page: u32) -> Vec<Option<Symbol>> {
+    env.storage()
+        .persistent()
+        .get(&invoice_page_key(page))
+        .unwrap_or(Vec::new(env))
+}
+
+fn save_invoice_page(env: &Env, page: u32, ids: &Vec<Option<Symbol>>) {
+    env.storage().persistent().set(&invoice_page_key(page), ids);
+}
+
+fn load_invoice(env: &Env, id: &Symbol) -> Option<Invoice> {
+    env.storage().persistent().get(&invoice_key(id))
+}
+
+fn load_invoice_or_panic(env: &Env, id: &Symbol) -> Invoice {
+    load_invoice(env, id).unwrap_or_else(|| env.panic_with_error(ContractError::NotFound))
+}
+
+fn invoice_storage_bytes(env: &Env, invoice: &Invoice) -> u32 {
+    // SDK 22 exposes no Storage::bytes API. XDR is the SDK's canonical
+    // serialization, so this is the deterministic size attributed to the
+    // invoice key/value payload (not ledger-entry framing).
+    invoice_key(&invoice.id)
+        .to_xdr(env)
+        .len()
+        .saturating_add(invoice.clone().to_xdr(env).len())
+}
+
+fn invoice_storage_budget(env: &Env) -> u32 {
+    env.storage()
+        .instance()
+        .get(&symbol_short!("inv_budg"))
+        .unwrap_or(DEFAULT_INVOICE_STORAGE_BUDGET_BYTES)
+}
+
+fn assert_invoice_within_budget(env: &Env, invoice: &Invoice) {
+    if invoice_storage_bytes(env, invoice) > invoice_storage_budget(env) {
+        env.panic_with_error(ContractError::InvalidInput);
+    }
+}
+
+fn save_invoice(env: &Env, invoice: &Invoice) {
+    assert_invoice_within_budget(env, invoice);
+    env.storage()
+        .persistent()
+        .set(&invoice_key(&invoice.id), invoice);
+}
+
+fn is_terminal(status: &InvoiceStatus) -> bool {
+    *status == InvoiceStatus::Repaid
+        || *status == InvoiceStatus::Defaulted
+        || *status == InvoiceStatus::Cancelled
+}
+
+fn save_terminal_timestamp(env: &Env, invoice: &Invoice) {
+    let key = terminal_at_key(&invoice.id);
+    if is_terminal(&invoice.status) {
+        env.storage()
+            .persistent()
+            .set(&key, &env.ledger().timestamp());
+        let max_ttl = env.storage().max_ttl();
+        env.storage()
+            .persistent()
+            .extend_ttl(&key, ttl_renewal_threshold(max_ttl), max_ttl);
+        env.storage().persistent().extend_ttl(
+            &invoice_key(&invoice.id),
+            ttl_renewal_threshold(max_ttl),
+            max_ttl,
+        );
+        extend_invoice_index_ttl(env, &invoice.id, max_ttl);
+    } else {
+        env.storage().persistent().remove(&key);
+    }
+}
+
+fn add_invoice_id(env: &Env, id: &Symbol) {
+    let (mut active_count, mut page, mut slot) = load_invoice_index_meta(env);
+    let mut ids = load_invoice_page(env, page);
+    if slot == INVOICE_IDS_PER_PAGE {
+        page = page
+            .checked_add(1)
+            .unwrap_or_else(|| panic!("Invoice index overflow"));
+        slot = 0;
+        ids = Vec::new(env);
+    }
+    ids.push_back(Some(id.clone()));
+    save_invoice_page(env, page, &ids);
+    env.storage()
+        .persistent()
+        .set(&invoice_location_key(id), &(page, slot));
+    active_count = active_count
+        .checked_add(1)
+        .unwrap_or_else(|| panic!("Invoice count overflow"));
+    save_invoice_index_meta(env, &(active_count, page, slot + 1));
+}
+
+fn extend_invoice_index_ttl(env: &Env, id: &Symbol, ttl: u32) {
+    let (page, _slot): (u32, u32) = env
+        .storage()
+        .persistent()
+        .get(&invoice_location_key(id))
+        .unwrap_or_else(|| panic!("Invoice index location not found"));
+    env.storage()
+        .persistent()
+        .extend_ttl(&invoice_page_key(page), ttl_renewal_threshold(ttl), ttl);
+    env.storage().persistent().extend_ttl(
+        &invoice_location_key(id),
+        ttl_renewal_threshold(ttl),
+        ttl,
+    );
+    env.storage().persistent().extend_ttl(
+        &symbol_short!("invmeta"),
+        ttl_renewal_threshold(ttl),
+        ttl,
+    );
+}
+
+fn remove_invoice_id(env: &Env, id: &Symbol) {
+    let (mut active_count, current_page, next_slot) = load_invoice_index_meta(env);
+    let (page, slot): (u32, u32) = env
+        .storage()
+        .persistent()
+        .get(&invoice_location_key(id))
+        .unwrap_or_else(|| panic!("Invoice index location not found"));
+    let mut ids = load_invoice_page(env, page);
+    ids.set(slot, None);
+    save_invoice_page(env, page, &ids);
+    env.storage().persistent().remove(&invoice_location_key(id));
+    active_count = active_count
+        .checked_sub(1)
+        .unwrap_or_else(|| panic!("Invoice index underflow"));
+    save_invoice_index_meta(env, &(active_count, current_page, next_slot));
 }
 
 fn load_rates(env: &Env) -> Map<RiskTier, u32> {
@@ -68,186 +241,6 @@ fn save_blacklist(env: &Env, list: &Vec<Address>) {
         .set(&symbol_short!("blklist"), list);
 }
 
-// ─── Verification Oracle Storage Helpers (issue #181) ────────────────────────
-//
-//   ("verifs", invoice_id) -> Vec<Attestation>   attestations for one invoice
-//   ("verifrs")            -> Vec<Address>       the trusted verifier set
-
-fn load_verifications(env: &Env, invoice_id: &Symbol) -> Vec<Attestation> {
-    env.storage()
-        .persistent()
-        .get(&(symbol_short!("verifs"), invoice_id.clone()))
-        .unwrap_or(Vec::new(env))
-}
-
-fn save_verifications(env: &Env, invoice_id: &Symbol, list: &Vec<Attestation>) {
-    env.storage()
-        .persistent()
-        .set(&(symbol_short!("verifs"), invoice_id.clone()), list);
-}
-
-fn load_verifiers(env: &Env) -> Vec<Address> {
-    env.storage()
-        .persistent()
-        .get(&symbol_short!("verifrs"))
-        .unwrap_or(Vec::new(env))
-}
-
-fn save_verifiers(env: &Env, list: &Vec<Address>) {
-    env.storage()
-        .persistent()
-        .set(&symbol_short!("verifrs"), list);
-}
-
-/// An attestation's status as of `now`.
-///
-/// Expiry is derived here rather than stored, so a read is correct whether or
-/// not anyone has called `expire_verifications` yet. A lapsed *rejection*
-/// expires too: a stale "this invoice is bad" is no more informative than a
-/// stale "this invoice is good".
-fn effective_status(attestation: &Attestation, now: u64) -> VerificationStatus {
-    if attestation.status != VerificationStatus::Expired && now > attestation.valid_until {
-        VerificationStatus::Expired
-    } else {
-        attestation.status
-    }
-}
-
-/// Status of one verification type on one invoice.
-///
-/// `attest` keeps at most one attestation per (verifier, type), so counting
-/// affirmative attestations *is* counting distinct verifiers — no verifier can
-/// reach the threshold alone by attesting repeatedly.
-fn type_status(
-    env: &Env,
-    attestations: &Vec<Attestation>,
-    v_type: VerificationType,
-    threshold: u32,
-    now: u64,
-) -> VerificationStatus {
-    let mut approvals: u32 = 0;
-    let mut rejected = false;
-    let mut expired = false;
-    let mut seen = false;
-
-    // Only the current verifier set speaks to status. Removing a verifier is
-    // how the admin withdraws trust -- usually because the key is compromised
-    // or the verifier was found negligent -- so their statements must stop
-    // counting the moment they leave, or removal would not actually revoke
-    // anything. The records stay readable through `get_verifications` -- the
-    // history of who said what is preserved, it just no longer votes -- until
-    // the invoice hits its cap, where departed verifiers' records are the
-    // first thing `evict_one_slot` reclaims.
-    let trusted = load_verifiers(env);
-
-    for attestation in attestations.iter() {
-        if attestation.v_type != v_type
-            || !trusted.iter().any(|entry| entry == attestation.verifier)
-        {
-            continue;
-        }
-        seen = true;
-        match effective_status(&attestation, now) {
-            VerificationStatus::Verified => approvals += 1,
-            VerificationStatus::Rejected => rejected = true,
-            VerificationStatus::Expired => expired = true,
-            VerificationStatus::Pending => {}
-        }
-    }
-
-    if !seen {
-        return VerificationStatus::Pending;
-    }
-    // A live rejection outranks approvals: one verifier saying the document is
-    // forged is not outvoted by two saying it looks fine.
-    if rejected {
-        return VerificationStatus::Rejected;
-    }
-    if approvals >= threshold {
-        return VerificationStatus::Verified;
-    }
-    // `Expired` means the type has no live statement left. A type that still
-    // holds a live approval but has not reached the threshold is
-    // under-attested, not expired -- it needs another verifier, not a refresh
-    // of one that already spoke.
-    if expired && approvals == 0 {
-        return VerificationStatus::Expired;
-    }
-    VerificationStatus::Pending
-}
-
-/// Free one slot in a full attestation list so a trusted verifier is never
-/// locked out of an invoice.
-///
-/// The cap is `MAX_VERIFIERS x 3`, which is exactly enough for the whole
-/// active set to speak on all three types — but records from verifiers that
-/// have since been removed keep occupying slots, so a rotated-through set can
-/// fill the list and permanently block admission. History yields to liveness
-/// in a defined order: the oldest record from a verifier that is no longer
-/// trusted goes first, then the oldest lapsed record.
-///
-/// Under the current constants only the first pass can ever run, and that
-/// makes eviction **fully status-preserving**. The arithmetic: eviction is
-/// reached only when the list still holds `MAX_ATTESTATIONS_PER_INVOICE`
-/// records after excluding the incoming verifier's own record for this type.
-/// Were every one of those 60 from a current verifier, then with at most
-/// `MAX_VERIFIERS` (20) of them, one record per (verifier, type) and three
-/// types, the list would have to be exactly 20 x 3 -- meaning the incoming
-/// verifier already holds this type, its record is the one excluded, and the
-/// count is 59, so eviction is never reached at all. So whenever eviction
-/// *does* run, at least one record belongs to a departed verifier, and pass
-/// one finds it. Departed records are filtered out of `type_status`, so
-/// dropping one cannot move any status.
-///
-/// The lapsed pass and the refusal below are therefore unreachable today.
-/// They are kept because they are the correct behaviour if
-/// `MAX_VERIFIERS x 3` and `MAX_ATTESTATIONS_PER_INVOICE` are ever moved out
-/// of that equality, and because the ordering states the intent: a lapsed
-/// record is the next-least-valuable thing to drop. If the lapsed pass ever
-/// did run it could take a type whose only remaining record is a lapsed one
-/// from `Expired` to `Pending` -- both non-verified states that gate
-/// financing identically -- but it can never touch `Verified` or `Rejected`,
-/// which rest on live records from current verifiers.
-///
-/// The final `None` arm is unreachable for the same reason, and is likewise
-/// kept as the correct behaviour: refuse the attestation rather than drop a
-/// live statement from an active verifier.
-fn evict_one_slot(env: &Env, list: &Vec<Attestation>, now: u64) -> Vec<Attestation> {
-    let trusted = load_verifiers(env);
-    let is_trusted = |who: &Address| trusted.iter().any(|entry| entry == *who);
-
-    let mut victim: Option<u32> = None;
-    // Pass 1: the oldest record whose verifier has been removed from the set.
-    for (idx, attestation) in list.iter().enumerate() {
-        if !is_trusted(&attestation.verifier) {
-            victim = Some(idx as u32);
-            break;
-        }
-    }
-    // Pass 2: failing that, the oldest record that has lapsed.
-    if victim.is_none() {
-        for (idx, attestation) in list.iter().enumerate() {
-            if effective_status(&attestation, now) == VerificationStatus::Expired {
-                victim = Some(idx as u32);
-                break;
-            }
-        }
-    }
-
-    let victim = match victim {
-        Some(idx) => idx,
-        None => env.panic_with_error(ContractError::InvalidTransition),
-    };
-
-    let mut kept: Vec<Attestation> = Vec::new(env);
-    for (idx, attestation) in list.iter().enumerate() {
-        if idx as u32 != victim {
-            kept.push_back(attestation);
-        }
-    }
-    kept
-}
-
 fn assert_not_blacklisted(env: &Env, address: &Address) {
     let list = load_blacklist(env);
     for entry in list.iter() {
@@ -257,19 +250,103 @@ fn assert_not_blacklisted(env: &Env, address: &Address) {
     }
 }
 
-/// Threshold-gated admin check (ADR-0010). `signers` must contain at least
-/// `threshold` distinct, authorized addresses from the contract's
-/// `AdminConfig`. In single-admin bootstrap mode (the default at deploy)
-/// this is one address behaving exactly like the legacy admin check.
-fn assert_admin(env: &Env, signers: &Vec<Address>) {
-    let cfg = invofi_common::load_admin_config(env);
-    invofi_common::assert_threshold(env, &cfg, signers);
+fn assert_admin(env: &Env, caller: &Address) {
+    caller.require_auth();
+    let current: Address = env
+        .storage()
+        .instance()
+        .get(&symbol_short!("admin"))
+        .unwrap_or_else(|| panic!("Not initialized"));
+    if current != *caller {
+        env.panic_with_error(ContractError::Unauthorized);
+    }
 }
 
-// This release has no schema migration. Future Wasm versions can evolve these
-// hooks while preserving the lifecycle entrypoint ABI.
-fn pre_upgrade(_env: &Env) {}
-fn post_upgrade(_env: &Env) {}
+fn assert_keeper(env: &Env, caller: &Address) {
+    caller.require_auth();
+    let keeper: Address = env
+        .storage()
+        .instance()
+        .get(&symbol_short!("strgkeep"))
+        .unwrap_or_else(|| panic!("Storage keeper not configured"));
+    if keeper != *caller {
+        env.panic_with_error(ContractError::Unauthorized);
+    }
+}
+
+fn assert_evictable(env: &Env, invoice: &Invoice) {
+    if !is_invoice_eviction_eligible(env, invoice) {
+        env.panic_with_error(ContractError::InvalidTransition);
+    }
+}
+
+fn is_invoice_eviction_eligible(env: &Env, invoice: &Invoice) -> bool {
+    if !is_terminal(&invoice.status) {
+        return false;
+    }
+    let Some(terminal_at) = env
+        .storage()
+        .persistent()
+        .get::<_, u64>(&terminal_at_key(&invoice.id))
+    else {
+        return false;
+    };
+    let Some(eligible_at) = terminal_at
+        .checked_add(TERMINAL_INVOICE_RETENTION_SECS)
+        .and_then(|timestamp| timestamp.checked_add(EVICTION_GRACE_PERIOD_SECS))
+    else {
+        return false;
+    };
+    env.ledger().timestamp() >= eligible_at
+}
+
+fn evict_invoice(env: &Env, id: &Symbol, reason: StorageEvictionReason) -> u32 {
+    let invoice =
+        load_invoice(env, id).unwrap_or_else(|| env.panic_with_error(ContractError::NotFound));
+    assert_evictable(env, &invoice);
+    let reclaimed_bytes = invoice_storage_bytes(env, &invoice);
+    env.storage().persistent().remove(&invoice_key(id));
+    env.storage().persistent().remove(&terminal_at_key(id));
+    remove_invoice_id(env, id);
+    env.events().publish(
+        (Symbol::new(env, "storage_evicted"), id.clone()),
+        (reason, reclaimed_bytes),
+    );
+    reclaimed_bytes
+}
+
+fn query_invoices<F>(env: &Env, offset: u32, limit: u32, matches: F) -> Vec<Invoice>
+where
+    F: Fn(&Invoice) -> bool,
+{
+    // Enforce the bound at the loop's own boundary so future callers cannot
+    // accidentally turn this read into unbounded work.
+    if limit > MAX_INVOICE_QUERY_LIMIT {
+        env.panic_with_error(ContractError::InvalidInput);
+    }
+    let end = offset.saturating_add(limit);
+    let mut result = Vec::new(env);
+    // Keep the loop's trip count syntactically constant for Scout. The end
+    // check preserves the original offset/limit and saturating arithmetic
+    // semantics, including offsets near u32::MAX.
+    for step in 0..MAX_INVOICE_QUERY_LIMIT {
+        let index = offset.saturating_add(step);
+        if index >= end {
+            break;
+        }
+        let page = index / INVOICE_IDS_PER_PAGE;
+        let slot = index % INVOICE_IDS_PER_PAGE;
+        let ids = load_invoice_page(env, page);
+        if let Some(Some(id)) = ids.get(slot) {
+            if let Some(invoice) = load_invoice(env, &id) {
+                if matches(&invoice) {
+                    result.push_back(invoice);
+                }
+            }
+        }
+    }
+    result
+}
 
 // ─── Contract ────────────────────────────────────────────────────────────────
 
@@ -288,84 +365,38 @@ impl RegistryContract {
     /// deployment can never be hijacked by a third party setting themselves
     /// as admin (issue #75).
     pub fn __constructor(env: Env, admin: Address) {
-        invofi_common::init_admin_config(&env, &admin);
-        invofi_common::initialize_contract_version(&env, env!("CARGO_PKG_VERSION"));
+        if env.storage().instance().has(&symbol_short!("admin")) {
+            panic!("Already initialized");
+        }
+        env.storage()
+            .instance()
+            .set(&symbol_short!("admin"), &admin);
     }
 
-    /// Returns the primary admin address (the first configured signer).
-    /// Panics if not yet initialized. In single-admin bootstrap mode this is
-    /// the only signer; under true M-of-N it is a convenience for tooling
-    /// that only needs *an* admin-controlled address, not a source of
-    /// authorization by itself — use `get_signers`/`get_threshold` for that.
+    /// Returns the admin address. Panics if not yet initialized.
     pub fn get_admin(env: Env) -> Address {
-        invofi_common::load_admin_config(&env)
-            .signers
-            .get(0)
+        env.storage()
+            .instance()
+            .get(&symbol_short!("admin"))
             .unwrap_or_else(|| panic!("Not initialized"))
     }
 
-    /// The full M-of-N admin governance config. See ADR-0010.
-    pub fn get_admin_config(env: Env) -> AdminConfig {
-        invofi_common::load_admin_config(&env)
-    }
-
-    /// The current signer set.
-    pub fn get_signers(env: Env) -> Vec<Address> {
-        invofi_common::load_admin_config(&env).signers
-    }
-
-    /// The current approval threshold.
-    pub fn get_threshold(env: Env) -> u32 {
-        invofi_common::load_admin_config(&env).threshold
-    }
-
-    /// Reconfigure the admin signer set and threshold. Threshold-gated by the
-    /// *current* config, so raising the bar (e.g. moving from single-admin
-    /// bootstrap to true M-of-N) requires the outgoing config's own
-    /// authorization — this is the mechanism ADR-0010 describes for opting
-    /// into multisig after deploy.
-    pub fn set_signers(
-        env: Env,
-        signers: Vec<Address>,
-        new_signers: Vec<Address>,
-        new_threshold: u32,
-    ) {
+    /// Transfers admin rights to a new address. Only the current admin can
+    /// call this.
+    pub fn transfer_admin(env: Env, admin: Address, new_admin: Address) {
         assert_not_paused(&env);
-        assert_admin(&env, &signers);
-        invofi_common::validate_signers(&env, &new_signers, new_threshold);
-        invofi_common::save_admin_config(
-            &env,
-            &AdminConfig {
-                signers: new_signers,
-                threshold: new_threshold,
-            },
-        );
-    }
-
-    /// Hands control to a single new admin, collapsing the config back to
-    /// single-admin bootstrap mode (threshold 1). Requires the *current*
-    /// threshold's worth of signer authorizations. For reconfiguring to a
-    /// true M-of-N set instead, use `set_signers`.
-    pub fn transfer_admin(env: Env, signers: Vec<Address>, new_admin: Address) {
-        assert_not_paused(&env);
-        assert_admin(&env, &signers);
-        let mut new_signers = Vec::new(&env);
-        new_signers.push_back(new_admin);
-        invofi_common::save_admin_config(
-            &env,
-            &AdminConfig {
-                signers: new_signers,
-                threshold: 1,
-            },
-        );
+        assert_admin(&env, &admin);
+        env.storage()
+            .instance()
+            .set(&symbol_short!("admin"), &new_admin);
     }
 
     /// Register the financing contract address. Admin only. The financing
     /// contract is the only caller allowed to transition a Pending invoice to
     /// Financed via `transition_invoice_status`.
-    pub fn set_financing_contract(env: Env, signers: Vec<Address>, financing: Address) {
+    pub fn set_financing_contract(env: Env, admin: Address, financing: Address) {
         assert_not_paused(&env);
-        assert_admin(&env, &signers);
+        assert_admin(&env, &admin);
         env.storage()
             .instance()
             .set(&symbol_short!("financing"), &financing);
@@ -374,9 +405,9 @@ impl RegistryContract {
     /// Register the repayment contract address. Admin only. The repayment
     /// contract is the only caller allowed to transition a Financed invoice
     /// to Financed (partial) or Repaid (full) via `transition_invoice_status`.
-    pub fn set_repayment_contract(env: Env, signers: Vec<Address>, repayment: Address) {
+    pub fn set_repayment_contract(env: Env, admin: Address, repayment: Address) {
         assert_not_paused(&env);
-        assert_admin(&env, &signers);
+        assert_admin(&env, &admin);
         env.storage()
             .instance()
             .set(&symbol_short!("repayment"), &repayment);
@@ -385,16 +416,16 @@ impl RegistryContract {
     // ── Pause / unpause ──────────────────────────────────────────────────────
 
     /// Halt all state-mutating operations. Admin only.
-    pub fn pause(env: Env, signers: Vec<Address>) {
-        assert_admin(&env, &signers);
+    pub fn pause(env: Env, admin: Address) {
+        assert_admin(&env, &admin);
         env.storage()
             .instance()
             .set(&symbol_short!("paused"), &true);
     }
 
     /// Resume operations after a pause. Admin only.
-    pub fn unpause(env: Env, signers: Vec<Address>) {
-        assert_admin(&env, &signers);
+    pub fn unpause(env: Env, admin: Address) {
+        assert_admin(&env, &admin);
         env.storage()
             .instance()
             .set(&symbol_short!("paused"), &false);
@@ -412,9 +443,9 @@ impl RegistryContract {
 
     /// Sets the yield rate (in basis points, 0-10000) for a risk tier.
     /// Admin only.
-    pub fn set_rate(env: Env, signers: Vec<Address>, tier: RiskTier, rate_bps: u32) {
+    pub fn set_rate(env: Env, admin: Address, tier: RiskTier, rate_bps: u32) {
         assert_not_paused(&env);
-        assert_admin(&env, &signers);
+        assert_admin(&env, &admin);
         if rate_bps > 10_000 {
             env.panic_with_error(ContractError::InvalidInput);
         }
@@ -434,9 +465,9 @@ impl RegistryContract {
     // ── Protocol fee ─────────────────────────────────────────────────────────
 
     /// Set the protocol fee in basis points (max 500 = 5%). Admin only.
-    pub fn set_fee(env: Env, signers: Vec<Address>, fee_bps: u32) {
+    pub fn set_fee(env: Env, admin: Address, fee_bps: u32) {
         assert_not_paused(&env);
-        assert_admin(&env, &signers);
+        assert_admin(&env, &admin);
         if fee_bps > 500 {
             env.panic_with_error(ContractError::InvalidInput);
         }
@@ -474,8 +505,7 @@ impl RegistryContract {
             env.panic_with_error(ContractError::InvalidInput);
         }
 
-        let mut invoices = load_invoices(&env);
-        if invoices.contains_key(id.clone()) {
+        if load_invoice(&env, &id).is_some() {
             env.panic_with_error(ContractError::AlreadyExists);
         }
 
@@ -487,8 +517,8 @@ impl RegistryContract {
             due_date,
             status: InvoiceStatus::Pending,
         };
-        invoices.set(id, invoice.clone());
-        save_invoices(&env, &invoices);
+        save_invoice(&env, &invoice);
+        add_invoice_id(&env, &invoice.id);
 
         let mut s = load_stats(&env);
         s.total_invoices += 1;
@@ -503,14 +533,11 @@ impl RegistryContract {
 
     /// Get an invoice by ID.
     pub fn get_invoice(env: Env, id: Symbol) -> Invoice {
-        load_invoices(&env)
-            .get(id)
-            .unwrap_or_else(|| env.panic_with_error(ContractError::NotFound))
+        load_invoice(&env, &id).unwrap_or_else(|| env.panic_with_error(ContractError::NotFound))
     }
 
-    /// Manually cancel a Pending invoice. Only the invoice originator can call
-    /// this. Restricted to `Pending → Cancelled`; for all other lifecycle
-    /// transitions use the dedicated entry points.
+    /// Manually update the status of a Pending invoice. Only the invoice
+    /// originator can call this.
     pub fn update_invoice_status(
         env: Env,
         id: Symbol,
@@ -519,19 +546,18 @@ impl RegistryContract {
     ) -> Invoice {
         assert_not_paused(&env);
         originator.require_auth();
-        let mut invoices = load_invoices(&env);
-        let mut invoice = invoices
-            .get(id.clone())
-            .unwrap_or_else(|| env.panic_with_error(ContractError::NotFound));
+        let mut invoice = load_invoice_or_panic(&env, &id);
         if invoice.originator != originator {
             env.panic_with_error(ContractError::Unauthorized);
         }
-        let old_status = invoice.status;
-        assert_transition(&env, id.clone(), old_status, new_status, originator.clone());
-
-        invoice.status = new_status;
-        invoices.set(id, invoice.clone());
-        save_invoices(&env, &invoices);
+        if invoice.status != InvoiceStatus::Pending {
+            env.panic_with_error(ContractError::InvalidTransition);
+        }
+        invoice.status = new_status.clone();
+        save_invoice(&env, &invoice);
+        save_terminal_timestamp(&env, &invoice);
+        env.events()
+            .publish((symbol_short!("inv_sts"), invoice.id.clone()), new_status);
         invoice
     }
 
@@ -544,10 +570,7 @@ impl RegistryContract {
     ) -> Invoice {
         assert_not_paused(&env);
         originator.require_auth();
-        let mut invoices = load_invoices(&env);
-        let mut invoice = invoices
-            .get(invoice_id.clone())
-            .unwrap_or_else(|| env.panic_with_error(ContractError::NotFound));
+        let mut invoice = load_invoice_or_panic(&env, &invoice_id);
         if invoice.originator != originator {
             env.panic_with_error(ContractError::Unauthorized);
         }
@@ -558,8 +581,8 @@ impl RegistryContract {
             env.panic_with_error(ContractError::InvalidInput);
         }
         invoice.amount = new_amount;
-        invoices.set(invoice_id, invoice.clone());
-        save_invoices(&env, &invoices);
+        save_invoice(&env, &invoice);
+        save_terminal_timestamp(&env, &invoice);
         env.events()
             .publish((symbol_short!("inv_amt"), invoice.id.clone()), new_amount);
         invoice
@@ -569,28 +592,18 @@ impl RegistryContract {
     pub fn cancel_invoice(env: Env, invoice_id: Symbol, originator: Address) -> Invoice {
         assert_not_paused(&env);
         originator.require_auth();
-        let mut invoices = load_invoices(&env);
-        let mut invoice = invoices
-            .get(invoice_id.clone())
-            .unwrap_or_else(|| env.panic_with_error(ContractError::NotFound));
+        let mut invoice = load_invoice_or_panic(&env, &invoice_id);
         if invoice.originator != originator {
             env.panic_with_error(ContractError::Unauthorized);
         }
-
-        let old_status = invoice.status;
-        assert_transition(
-            &env,
-            invoice_id.clone(),
-            old_status,
-            InvoiceStatus::Cancelled,
-            originator.clone(),
-        );
-
+        if invoice.status != InvoiceStatus::Pending {
+            env.panic_with_error(ContractError::InvalidTransition);
+        }
         invoice.status = InvoiceStatus::Cancelled;
-        invoices.set(invoice_id, invoice.clone());
-        save_invoices(&env, &invoices);
+        save_invoice(&env, &invoice);
+        save_terminal_timestamp(&env, &invoice);
         env.events().publish(
-            (symbol_short!("inv_cxl"), invoice.originator.clone()),
+            (symbol_short!("inv_cxl"), invoice.id.clone()),
             invoice.originator.clone(),
         );
         invoice
@@ -608,26 +621,20 @@ impl RegistryContract {
     ) -> Invoice {
         assert_not_paused(&env);
         repayer.require_auth();
-        let mut invoices = load_invoices(&env);
-        let mut invoice = invoices
-            .get(id.clone())
-            .unwrap_or_else(|| env.panic_with_error(ContractError::NotFound));
-
-        let new_status = if fully_repaid {
+        let mut invoice = load_invoice_or_panic(&env, &id);
+        if invoice.status != InvoiceStatus::Financed {
+            env.panic_with_error(ContractError::InvalidTransition);
+        }
+        invoice.status = if fully_repaid {
             InvoiceStatus::Repaid
         } else {
             InvoiceStatus::Financed
         };
-
-        let old_status = invoice.status;
-        assert_transition(&env, id.clone(), old_status, new_status, repayer.clone());
-
-        invoice.status = new_status;
-        invoices.set(id, invoice.clone());
-        save_invoices(&env, &invoices);
+        save_invoice(&env, &invoice);
+        save_terminal_timestamp(&env, &invoice);
         env.events().publish(
             (symbol_short!("inv_sts"), invoice.id.clone()),
-            invoice.status,
+            invoice.status.clone(),
         );
         invoice
     }
@@ -646,23 +653,13 @@ impl RegistryContract {
             .unwrap_or_else(|| panic!("Financing contract not configured"));
         financing.require_auth();
 
-        let mut invoices = load_invoices(&env);
-        let mut invoice = invoices
-            .get(id.clone())
-            .unwrap_or_else(|| env.panic_with_error(ContractError::NotFound));
-
-        let old_status = invoice.status;
-        assert_transition(
-            &env,
-            id.clone(),
-            old_status,
-            InvoiceStatus::Financed,
-            financing.clone(),
-        );
-
+        let mut invoice = load_invoice_or_panic(&env, &id);
+        if invoice.status != InvoiceStatus::Pending {
+            env.panic_with_error(ContractError::InvalidTransition);
+        }
         invoice.status = InvoiceStatus::Financed;
-        invoices.set(id, invoice.clone());
-        save_invoices(&env, &invoices);
+        save_invoice(&env, &invoice);
+        save_terminal_timestamp(&env, &invoice);
         env.events().publish(
             (symbol_short!("inv_sts"), invoice.id.clone()),
             InvoiceStatus::Financed,
@@ -682,26 +679,20 @@ impl RegistryContract {
             .unwrap_or_else(|| panic!("Repayment contract not configured"));
         repayment.require_auth();
 
-        let mut invoices = load_invoices(&env);
-        let mut invoice = invoices
-            .get(id.clone())
-            .unwrap_or_else(|| env.panic_with_error(ContractError::NotFound));
-
-        let new_status = if fully_repaid {
+        let mut invoice = load_invoice_or_panic(&env, &id);
+        if invoice.status != InvoiceStatus::Financed {
+            env.panic_with_error(ContractError::InvalidTransition);
+        }
+        invoice.status = if fully_repaid {
             InvoiceStatus::Repaid
         } else {
             InvoiceStatus::Financed
         };
-
-        let old_status = invoice.status;
-        assert_transition(&env, id.clone(), old_status, new_status, repayment.clone());
-
-        invoice.status = new_status;
-        invoices.set(id, invoice.clone());
-        save_invoices(&env, &invoices);
+        save_invoice(&env, &invoice);
+        save_terminal_timestamp(&env, &invoice);
         env.events().publish(
             (symbol_short!("inv_sts"), invoice.id.clone()),
-            invoice.status,
+            invoice.status.clone(),
         );
         invoice
     }
@@ -722,23 +713,13 @@ impl RegistryContract {
             .unwrap_or_else(|| panic!("Repayment contract not configured"));
         repayment.require_auth();
 
-        let mut invoices = load_invoices(&env);
-        let mut invoice = invoices
-            .get(id.clone())
-            .unwrap_or_else(|| env.panic_with_error(ContractError::NotFound));
-
-        let old_status = invoice.status;
-        assert_transition(
-            &env,
-            id.clone(),
-            old_status,
-            InvoiceStatus::Defaulted,
-            repayment.clone(),
-        );
-
+        let mut invoice = load_invoice_or_panic(&env, &id);
+        if invoice.status != InvoiceStatus::Overdue {
+            env.panic_with_error(ContractError::InvalidTransition);
+        }
         invoice.status = InvoiceStatus::Defaulted;
-        invoices.set(id, invoice.clone());
-        save_invoices(&env, &invoices);
+        save_invoice(&env, &invoice);
+        save_terminal_timestamp(&env, &invoice);
         env.events().publish(
             (symbol_short!("inv_def"), invoice.id.clone()),
             invoice.originator.clone(),
@@ -751,30 +732,15 @@ impl RegistryContract {
     /// require originator auth — the time-based condition is sufficient.
     pub fn mark_invoice_overdue(env: Env, id: Symbol) -> Invoice {
         assert_not_paused(&env);
-        let mut invoices = load_invoices(&env);
-        let mut invoice = invoices
-            .get(id.clone())
-            .unwrap_or_else(|| env.panic_with_error(ContractError::NotFound));
-
-        // Validate time-based precondition before state transition
+        let mut invoice = load_invoice_or_panic(&env, &id);
+        if invoice.status != InvoiceStatus::Financed {
+            env.panic_with_error(ContractError::InvalidTransition);
+        }
         if env.ledger().timestamp() <= invoice.due_date {
             env.panic_with_error(ContractError::InvalidTransition);
         }
-
-        let old_status = invoice.status;
-        // For overdue, we use a dummy actor since it's permissionless
-        let dummy_actor = env.current_contract_address();
-        assert_transition(
-            &env,
-            id.clone(),
-            old_status,
-            InvoiceStatus::Overdue,
-            dummy_actor,
-        );
-
         invoice.status = InvoiceStatus::Overdue;
-        invoices.set(id, invoice.clone());
-        save_invoices(&env, &invoices);
+        save_invoice(&env, &invoice);
         env.events().publish(
             (symbol_short!("inv_ovd"), invoice.id.clone()),
             invoice.due_date,
@@ -788,26 +754,16 @@ impl RegistryContract {
     pub fn raise_dispute(env: Env, invoice_id: Symbol, originator: Address) -> Invoice {
         assert_not_paused(&env);
         originator.require_auth();
-        let mut invoices = load_invoices(&env);
-        let mut invoice = invoices
-            .get(invoice_id.clone())
-            .unwrap_or_else(|| env.panic_with_error(ContractError::NotFound));
+        let mut invoice = load_invoice_or_panic(&env, &invoice_id);
         if invoice.originator != originator {
             env.panic_with_error(ContractError::Unauthorized);
         }
-
-        let old_status = invoice.status;
-        assert_transition(
-            &env,
-            invoice_id.clone(),
-            old_status,
-            InvoiceStatus::Disputed,
-            originator.clone(),
-        );
-
+        if invoice.status != InvoiceStatus::Financed {
+            env.panic_with_error(ContractError::InvalidTransition);
+        }
         invoice.status = InvoiceStatus::Disputed;
-        invoices.set(invoice_id, invoice.clone());
-        save_invoices(&env, &invoices);
+        save_invoice(&env, &invoice);
+        save_terminal_timestamp(&env, &invoice);
         env.events().publish(
             (symbol_short!("inv_dsp"), invoice.id.clone()),
             invoice.originator.clone(),
@@ -816,117 +772,247 @@ impl RegistryContract {
     }
 
     /// Resolve a Disputed invoice. Admin only.
-    /// Allowed targets: Financed, Repaid, Cancelled, Defaulted.
     pub fn resolve_dispute(
         env: Env,
-        signers: Vec<Address>,
+        admin: Address,
         invoice_id: Symbol,
         target_status: InvoiceStatus,
     ) -> Invoice {
         assert_not_paused(&env);
-        assert_admin(&env, &signers);
-        let mut invoices = load_invoices(&env);
-        let mut invoice = invoices
-            .get(invoice_id.clone())
-            .unwrap_or_else(|| env.panic_with_error(ContractError::NotFound));
+        assert_admin(&env, &admin);
+        let mut invoice = load_invoice_or_panic(&env, &invoice_id);
+        if invoice.status != InvoiceStatus::Disputed {
+            env.panic_with_error(ContractError::InvalidTransition);
+        }
         if target_status == InvoiceStatus::Disputed {
             env.panic_with_error(ContractError::InvalidInput);
         }
-
-        let old_status = invoice.status;
-        let actor = signers
-            .get(0)
-            .unwrap_or_else(|| env.panic_with_error(ContractError::Unauthorized));
-        assert_transition(&env, invoice_id.clone(), old_status, target_status, actor);
-
         invoice.status = target_status;
-        invoices.set(invoice_id, invoice.clone());
-        save_invoices(&env, &invoices);
+        save_invoice(&env, &invoice);
+        save_terminal_timestamp(&env, &invoice);
         env.events().publish(
             (symbol_short!("inv_rsl"), invoice.id.clone()),
-            invoice.status,
+            invoice.status.clone(),
         );
         invoice
     }
 
     // ── Query helpers ────────────────────────────────────────────────────────
 
+    /// Configure the account authorized to run storage maintenance. Panics
+    /// unless `admin` is the current admin.
+    pub fn set_storage_keeper(env: Env, admin: Address, keeper: Address) {
+        assert_not_paused(&env);
+        assert_admin(&env, &admin);
+        env.storage()
+            .instance()
+            .set(&symbol_short!("strgkeep"), &keeper);
+    }
+
+    /// Return the configured storage keeper, if one has been configured.
+    pub fn get_storage_keeper(env: Env) -> Option<Address> {
+        env.storage().instance().get(&symbol_short!("strgkeep"))
+    }
+
+    /// Configure the maximum XDR key/value payload size permitted for an
+    /// invoice. Panics unless `admin` is current admin or `bytes` is nonzero.
+    pub fn set_invoice_storage_budget(env: Env, admin: Address, bytes: u32) {
+        assert_not_paused(&env);
+        assert_admin(&env, &admin);
+        if bytes < invofi_common::MIN_INVOICE_STORAGE_BUDGET_BYTES {
+            env.panic_with_error(ContractError::InvalidInput);
+        }
+        env.storage()
+            .instance()
+            .set(&symbol_short!("inv_budg"), &bytes);
+    }
+
+    /// Return the invoice storage budget. Defaults to 10 KiB.
+    pub fn get_invoice_storage_budget(env: Env) -> u32 {
+        invoice_storage_budget(&env)
+    }
+
+    /// Return the deterministic XDR key/value payload size attributed to an
+    /// invoice. SDK 22 does not expose host storage-byte accounting.
+    pub fn get_invoice_storage_bytes(env: Env, id: Symbol) -> u32 {
+        let invoice = load_invoice(&env, &id)
+            .unwrap_or_else(|| env.panic_with_error(ContractError::NotFound));
+        invoice_storage_bytes(&env, &invoice)
+    }
+
+    /// Return whether a terminal invoice has passed both retention windows.
+    /// Missing invoices and non-terminal invoices return `false`.
+    pub fn is_invoice_eviction_eligible(env: Env, id: Symbol) -> bool {
+        let Some(invoice) = load_invoice(&env, &id) else {
+            return false;
+        };
+        is_invoice_eviction_eligible(&env, &invoice)
+    }
+
+    /// Extend a non-terminal invoice's persistent-entry TTL to the network
+    /// maximum. Panics when the invoice is terminal; non-terminal invoices
+    /// require a configured and authorized `keeper`. The invoice ID index TTL
+    /// is bumped at the same time so keeper queries remain available.
+    pub fn bump_invoice_ttl(env: Env, keeper: Address, id: Symbol) {
+        assert_not_paused(&env);
+        assert_keeper(&env, &keeper);
+        let invoice = load_invoice(&env, &id)
+            .unwrap_or_else(|| env.panic_with_error(ContractError::NotFound));
+        if is_terminal(&invoice.status) {
+            panic!("Terminal invoices cannot have their active TTL bumped");
+        }
+        let max_ttl = env.storage().max_ttl();
+        env.storage().persistent().extend_ttl(
+            &invoice_key(&id),
+            ttl_renewal_threshold(max_ttl),
+            max_ttl,
+        );
+        extend_invoice_index_ttl(&env, &id, max_ttl);
+        env.events()
+            .publish((Symbol::new(&env, "ttl_bumped"), id), (keeper, max_ttl));
+    }
+
+    /// Renew a terminal invoice before eviction eligibility when network TTL
+    /// limits are shorter than the 395-day retention window. Only the
+    /// configured keeper may call this. The terminal timestamp is never
+    /// changed, so renewal cannot extend the retention deadline.
+    pub fn renew_terminal_invoice_ttl(env: Env, keeper: Address, id: Symbol) {
+        assert_not_paused(&env);
+        assert_keeper(&env, &keeper);
+        let invoice = load_invoice_or_panic(&env, &id);
+        if !is_terminal(&invoice.status) {
+            env.panic_with_error(ContractError::InvalidTransition);
+        }
+        if is_invoice_eviction_eligible(&env, &invoice) {
+            env.panic_with_error(ContractError::InvalidTransition);
+        }
+        let max_ttl = env.storage().max_ttl();
+        env.storage().persistent().extend_ttl(
+            &invoice_key(&id),
+            ttl_renewal_threshold(max_ttl),
+            max_ttl,
+        );
+        env.storage().persistent().extend_ttl(
+            &terminal_at_key(&id),
+            ttl_renewal_threshold(max_ttl),
+            max_ttl,
+        );
+        extend_invoice_index_ttl(&env, &id, max_ttl);
+    }
+
+    /// Evict an eligible terminal invoice during keeper automation. Panics
+    /// unless `keeper` is authorized and the one-year retention plus 30-day
+    /// notice period have elapsed. Returns XDR payload bytes reclaimed.
+    pub fn keeper_evict_invoice(env: Env, keeper: Address, id: Symbol) -> u32 {
+        assert_not_paused(&env);
+        assert_keeper(&env, &keeper);
+        evict_invoice(&env, &id, StorageEvictionReason::RetentionExpired)
+    }
+
+    /// Evict an eligible terminal invoice at the admin's direction. This does
+    /// not bypass the retention or notice period. Returns XDR payload bytes
+    /// reclaimed and emits `storage_evicted` with reason `Admin`.
+    pub fn evict_invoice(env: Env, admin: Address, id: Symbol) -> u32 {
+        assert_not_paused(&env);
+        assert_admin(&env, &admin);
+        evict_invoice(&env, &id, StorageEvictionReason::Admin)
+    }
+
+    /// Return matches from only the first bounded page: the first 32 index
+    /// slots, after applying the status filter. This is not guaranteed to
+    /// include every matching invoice; use `get_invoices_by_status_paginated`
+    /// with later stable index-slot offsets for complete traversal.
     pub fn get_invoices_by_status(env: Env, status: InvoiceStatus) -> Vec<Invoice> {
-        let invoices = load_invoices(&env);
-        let mut result: Vec<Invoice> = Vec::new(&env);
-        for (_id, inv) in invoices.iter() {
-            if inv.status == status {
-                result.push_back(inv);
-            }
-        }
-        result
+        Self::get_invoices_by_status_paginated(env, status, 0, MAX_INVOICE_QUERY_LIMIT)
     }
 
+    /// Page through invoices matching a lifecycle status. `offset` is a stable
+    /// index-slot offset; eviction gaps are skipped without shifting later IDs.
+    pub fn get_invoices_by_status_paginated(
+        env: Env,
+        status: InvoiceStatus,
+        offset: u32,
+        limit: u32,
+    ) -> Vec<Invoice> {
+        query_invoices(&env, offset, limit, |invoice| invoice.status == status)
+    }
+
+    /// Return matches from only the first bounded page: the first 32 index
+    /// slots, after applying the originator filter. This is not guaranteed to
+    /// include every matching invoice; use `get_inv_by_originator_page` with
+    /// later stable index-slot offsets for complete traversal.
     pub fn get_invoices_by_originator(env: Env, originator: Address) -> Vec<Invoice> {
-        let invoices = load_invoices(&env);
-        let mut result: Vec<Invoice> = Vec::new(&env);
-        for (_id, inv) in invoices.iter() {
-            if inv.originator == originator {
-                result.push_back(inv);
-            }
-        }
-        result
+        Self::get_inv_by_originator_page(env, originator, 0, MAX_INVOICE_QUERY_LIMIT)
     }
 
-    /// Return all registered invoices. Admin-only analytics function.
-    /// At scale, prefer paginated queries — this returns an unbounded Vec.
+    pub fn get_inv_by_originator_page(
+        env: Env,
+        originator: Address,
+        offset: u32,
+        limit: u32,
+    ) -> Vec<Invoice> {
+        query_invoices(&env, offset, limit, |invoice| {
+            invoice.originator == originator
+        })
+    }
+
+    /// Return only the first bounded invoice page (the first 32 index slots).
+    /// This is not guaranteed to include every invoice; use
+    /// `get_invoices_paginated` with later stable index-slot offsets for a
+    /// complete traversal.
     pub fn get_all_invoices(env: Env) -> Vec<Invoice> {
-        let invoices = load_invoices(&env);
-        let mut result: Vec<Invoice> = Vec::new(&env);
-        for (_id, inv) in invoices.iter() {
-            result.push_back(inv);
-        }
-        result
+        Self::get_invoices_paginated(env, 0, MAX_INVOICE_QUERY_LIMIT)
     }
 
+    /// Return matches from only the first bounded page: the first 32 index
+    /// slots, after applying the currency filter. This is not guaranteed to
+    /// include every matching invoice; use `get_inv_by_currency_page` with
+    /// later stable index-slot offsets for complete traversal.
     pub fn get_invoices_by_currency(env: Env, currency: Symbol) -> Vec<Invoice> {
-        let invoices = load_invoices(&env);
-        let mut result: Vec<Invoice> = Vec::new(&env);
-        for (_id, inv) in invoices.iter() {
-            if inv.currency == currency {
-                result.push_back(inv);
-            }
-        }
-        result
+        Self::get_inv_by_currency_page(env, currency, 0, MAX_INVOICE_QUERY_LIMIT)
     }
 
+    pub fn get_inv_by_currency_page(
+        env: Env,
+        currency: Symbol,
+        offset: u32,
+        limit: u32,
+    ) -> Vec<Invoice> {
+        query_invoices(&env, offset, limit, |invoice| invoice.currency == currency)
+    }
+
+    /// Return matches from only the first bounded page: the first 32 index
+    /// slots, after applying the due-date filter. This is not guaranteed to
+    /// include every matching invoice; use `get_inv_due_before_page` with
+    /// later stable index-slot offsets for complete traversal.
     pub fn get_invoices_due_before(env: Env, timestamp: u64) -> Vec<Invoice> {
-        let invoices = load_invoices(&env);
-        let mut result: Vec<Invoice> = Vec::new(&env);
-        for (_id, inv) in invoices.iter() {
+        Self::get_inv_due_before_page(env, timestamp, 0, MAX_INVOICE_QUERY_LIMIT)
+    }
+
+    pub fn get_inv_due_before_page(
+        env: Env,
+        timestamp: u64,
+        offset: u32,
+        limit: u32,
+    ) -> Vec<Invoice> {
+        query_invoices(&env, offset, limit, |inv| {
             let is_open =
                 inv.status == InvoiceStatus::Pending || inv.status == InvoiceStatus::Financed;
-            if is_open && inv.due_date < timestamp {
-                result.push_back(inv);
-            }
-        }
-        result
+            is_open && inv.due_date < timestamp
+        })
     }
 
     pub fn get_invoices_paginated(env: Env, offset: u32, limit: u32) -> Vec<Invoice> {
-        let invoices = load_invoices(&env);
-        let mut result: Vec<Invoice> = Vec::new(&env);
-        for (idx, (_id, inv)) in invoices.iter().enumerate() {
-            if idx as u32 >= offset && result.len() < limit {
-                result.push_back(inv);
-            }
-            if result.len() >= limit {
-                break;
-            }
-        }
-        result
+        query_invoices(&env, offset, limit, |_| true)
     }
 
     pub fn batch_get_invoices(env: Env, ids: Vec<Symbol>) -> Vec<Invoice> {
-        let invoices = load_invoices(&env);
+        if ids.len() > MAX_INVOICE_QUERY_LIMIT {
+            env.panic_with_error(ContractError::InvalidInput);
+        }
         let mut result: Vec<Invoice> = Vec::new(&env);
         for id in ids.iter() {
-            if let Some(inv) = invoices.get(id) {
+            if let Some(inv) = load_invoice(&env, &id) {
                 result.push_back(inv);
             }
         }
@@ -934,7 +1020,7 @@ impl RegistryContract {
     }
 
     pub fn get_invoices_count(env: Env) -> u32 {
-        load_invoices(&env).len()
+        load_invoice_index_meta(&env).0
     }
 
     pub fn get_stats(env: Env) -> ProtocolStats {
@@ -943,9 +1029,9 @@ impl RegistryContract {
 
     // ── Blacklist management ─────────────────────────────────────────────────
 
-    pub fn blacklist_address(env: Env, signers: Vec<Address>, target: Address) {
+    pub fn blacklist_address(env: Env, admin: Address, target: Address) {
         assert_not_paused(&env);
-        assert_admin(&env, &signers);
+        assert_admin(&env, &admin);
         let mut list = load_blacklist(&env);
         for entry in list.iter() {
             if entry == target {
@@ -956,9 +1042,9 @@ impl RegistryContract {
         save_blacklist(&env, &list);
     }
 
-    pub fn unblacklist_address(env: Env, signers: Vec<Address>, target: Address) {
+    pub fn unblacklist_address(env: Env, admin: Address, target: Address) {
         assert_not_paused(&env);
-        assert_admin(&env, &signers);
+        assert_admin(&env, &admin);
         let list = load_blacklist(&env);
         let mut new_list: Vec<Address> = Vec::new(&env);
         for entry in list.iter() {
@@ -983,451 +1069,14 @@ impl RegistryContract {
         load_blacklist(&env)
     }
 
-    // ── Verification oracle (issue #181) ─────────────────────────────────────
-    //
-    // On-chain invoice data is self-reported. This is the layer that lets
-    // trusted off-chain verifiers put their name to the facts behind it —
-    // document hashes, business registration, tax compliance — and have that
-    // statement stored immutably against the invoice.
-    //
-    // What the contract can and cannot do is worth stating plainly, and is
-    // spelled out in `docs/adr/0009-verification-oracle.md`: it cannot check
-    // that a PDF hash belongs to a real invoice or that a registration number
-    // is genuine. It authenticates that a verifier from the admin-governed set
-    // said so, charges for the work, timestamps it, and expires it. Trust is
-    // bounded by verifier honesty and by the m-of-n threshold, not eliminated.
-
-    /// Add an address to the trusted verifier set. Admin only. Idempotent.
-    pub fn add_verifier(env: Env, signers: Vec<Address>, verifier: Address) {
-        assert_not_paused(&env);
-        assert_admin(&env, &signers);
-        let mut verifiers = load_verifiers(&env);
-        for existing in verifiers.iter() {
-            if existing == verifier {
-                return;
-            }
-        }
-        if verifiers.len() >= MAX_VERIFIERS {
-            env.panic_with_error(ContractError::InvalidInput);
-        }
-        verifiers.push_back(verifier);
-        save_verifiers(&env, &verifiers);
-    }
-
-    /// Remove an address from the trusted verifier set. Admin only.
-    ///
-    /// Attestations that verifier already submitted are left in place — the
-    /// history of who said what, when, is the point of storing them. They
-    /// still count until they expire; an admin who needs a compromised
-    /// verifier's statements discounted immediately raises the threshold, per
-    /// the key-compromise runbook (#145).
-    pub fn remove_verifier(env: Env, signers: Vec<Address>, verifier: Address) {
-        assert_not_paused(&env);
-        assert_admin(&env, &signers);
-        let verifiers = load_verifiers(&env);
-        let mut remaining: Vec<Address> = Vec::new(&env);
-        for existing in verifiers.iter() {
-            if existing != verifier {
-                remaining.push_back(existing);
-            }
-        }
-        save_verifiers(&env, &remaining);
-    }
-
-    pub fn get_verifiers(env: Env) -> Vec<Address> {
-        load_verifiers(&env)
-    }
-
-    pub fn is_verifier(env: Env, address: Address) -> bool {
-        for existing in load_verifiers(&env).iter() {
-            if existing == address {
-                return true;
-            }
-        }
-        false
-    }
-
-    /// Number of distinct verifiers that must attest affirmatively before a
-    /// verification type counts as Verified — the m of m-of-n. Admin only.
-    ///
-    /// The threshold is *not* clamped to the current verifier-set size: an
-    /// admin may deliberately set it above the set while adding verifiers, and
-    /// a removal must not silently weaken it. A threshold no live verifier set
-    /// can reach simply means nothing verifies, which is the safe direction.
-    pub fn set_verifier_threshold(env: Env, signers: Vec<Address>, threshold: u32) {
-        assert_not_paused(&env);
-        assert_admin(&env, &signers);
-        if threshold == 0 || threshold > MAX_VERIFIERS {
-            env.panic_with_error(ContractError::InvalidInput);
-        }
-        env.storage()
-            .instance()
-            .set(&symbol_short!("verthr"), &threshold);
-    }
-
-    /// The configured verifier threshold (default 1).
-    pub fn get_verifier_threshold(env: Env) -> u32 {
-        env.storage()
-            .instance()
-            .get(&symbol_short!("verthr"))
-            .unwrap_or(1)
-    }
-
-    /// Set the verification fee in basis points of invoice value. Admin only.
-    /// Capped at `MAX_VERIFICATION_FEE_BPS` (5%). Defaults to 0, which
-    /// disables fee settlement entirely.
-    pub fn set_verification_fee(env: Env, signers: Vec<Address>, fee_bps: u32) {
-        assert_not_paused(&env);
-        assert_admin(&env, &signers);
-        if fee_bps > MAX_VERIFICATION_FEE_BPS {
-            env.panic_with_error(ContractError::InvalidInput);
-        }
-        env.storage()
-            .instance()
-            .set(&symbol_short!("verfee"), &fee_bps);
-    }
-
-    /// The configured verification fee in basis points (default 0).
-    pub fn get_verification_fee(env: Env) -> u32 {
-        env.storage()
-            .instance()
-            .get(&symbol_short!("verfee"))
-            .unwrap_or(0)
-    }
-
-    /// Set how long a new attestation stays valid, in seconds. Admin only.
-    /// Clamped to [`MIN_ATTESTATION_VALIDITY_SECS`,
-    /// `MAX_ATTESTATION_VALIDITY_SECS`]; defaults to 90 days.
-    ///
-    /// Changing this does not move the `valid_until` of attestations already
-    /// submitted — each one carries its own, fixed at submission.
-    pub fn set_attestation_validity(env: Env, signers: Vec<Address>, validity_secs: u64) {
-        assert_not_paused(&env);
-        assert_admin(&env, &signers);
-        if !(MIN_ATTESTATION_VALIDITY_SECS..=MAX_ATTESTATION_VALIDITY_SECS).contains(&validity_secs)
-        {
-            env.panic_with_error(ContractError::InvalidInput);
-        }
-        env.storage()
-            .instance()
-            .set(&symbol_short!("vervld"), &validity_secs);
-    }
-
-    /// The configured attestation validity in seconds (default 90 days).
-    pub fn get_attestation_validity(env: Env) -> u64 {
-        env.storage()
-            .instance()
-            .get(&symbol_short!("vervld"))
-            .unwrap_or(DEFAULT_ATTESTATION_VALIDITY_SECS)
-    }
-
-    /// Register the SEP-41 token that settles verification fees denominated in
-    /// `currency`. Admin only.
-    ///
-    /// Verification fees are paid in the invoice's own currency, so a
-    /// multi-currency deployment registers each currency once here — the same
-    /// pattern the financing contract uses, sharing the `invofi_common`
-    /// registry rather than growing a per-currency branch.
-    pub fn register_currency(
-        env: Env,
-        signers: Vec<Address>,
-        currency: Symbol,
-        token_addr: Address,
-    ) {
-        assert_not_paused(&env);
-        assert_admin(&env, &signers);
-        invofi_common::register_currency(&env, &currency, &token_addr);
-    }
-
-    /// The token registered to settle `currency`, if any.
-    pub fn get_currency_token(env: Env, currency: Symbol) -> Option<Address> {
-        invofi_common::get_currency_token(&env, &currency)
-    }
-
-    /// The fee an attestation on this invoice currently costs, in the
-    /// invoice's currency: `invoice.amount * verification_fee_bps / 10_000`.
-    ///
-    /// The multiplication is checked and the division happens last, so a large
-    /// invoice cannot silently wrap into a small (or negative) fee.
-    pub fn calculate_verification_fee(env: Env, invoice_id: Symbol) -> i128 {
-        let invoice = load_invoices(&env)
-            .get(invoice_id)
-            .unwrap_or_else(|| env.panic_with_error(ContractError::NotFound));
-        Self::fee_for(&env, invoice.amount)
-    }
-
-    fn fee_for(env: &Env, invoice_amount: i128) -> i128 {
-        let fee_bps = Self::get_verification_fee(env.clone());
-        if fee_bps == 0 {
-            return 0;
-        }
-        invoice_amount
-            .checked_mul(fee_bps as i128)
-            .unwrap_or_else(|| env.panic_with_error(ContractError::InvalidInput))
-            / 10_000
-    }
-
-    /// Submit an attestation about one off-chain fact for an invoice.
-    ///
-    /// Only an address in the trusted verifier set may call this, and only on
-    /// an invoice that is still Pending or Financed — verification of a
-    /// cancelled or settled invoice would charge a fee for a fact nothing can
-    /// act on.
-    ///
-    /// `approved` is the verifier's verdict: `true` records an affirmative
-    /// attestation, `false` a rejection. **The fee is charged either way**,
-    /// because it pays for the verification work, not for a favourable answer
-    /// — a fee contingent on approval would pay verifiers to approve.
-    ///
-    /// A verifier re-attesting the same type on the same invoice **replaces**
-    /// their earlier statement rather than stacking on it. That is what keeps
-    /// the threshold a count of distinct verifiers, and it is how a verifier
-    /// refreshes an attestation that has expired or corrects one they got
-    /// wrong.
-    ///
-    /// The fee transfer and the stored attestation are in the same
-    /// transaction, so there is no charge without a record and no record
-    /// without a charge.
-    pub fn attest(
-        env: Env,
-        invoice_id: Symbol,
-        verifier: Address,
-        v_type: VerificationType,
-        hash: BytesN<32>,
-        approved: bool,
-    ) -> Attestation {
-        assert_not_paused(&env);
-        verifier.require_auth();
-        if !Self::is_verifier(env.clone(), verifier.clone()) {
-            env.panic_with_error(ContractError::Unauthorized);
-        }
-
-        let invoice = load_invoices(&env)
-            .get(invoice_id.clone())
-            .unwrap_or_else(|| env.panic_with_error(ContractError::NotFound));
-        if invoice.status != InvoiceStatus::Pending && invoice.status != InvoiceStatus::Financed {
-            env.panic_with_error(ContractError::InvalidTransition);
-        }
-
-        let now = env.ledger().timestamp();
-        let threshold = Self::get_verifier_threshold(env.clone());
-        let attestations = load_verifications(&env, &invoice_id);
-        let status_before = type_status(&env, &attestations, v_type, threshold, now);
-
-        // Charge before writing, so a verifier the originator cannot pay never
-        // gets an attestation recorded. CEI: the token is a standard SEP-41
-        // contract with no reentrant hooks.
-        let fee = Self::fee_for(&env, invoice.amount);
-        if fee > 0 {
-            let token_addr = invofi_common::get_currency_token(&env, &invoice.currency)
-                .unwrap_or_else(|| panic!("Verification fee token not configured for currency"));
-            token::TokenClient::new(&env, &token_addr).transfer_from(
-                &env.current_contract_address(),
-                &invoice.originator,
-                &verifier,
-                &fee,
-            );
-        }
-
-        let attestation = Attestation {
-            verifier: verifier.clone(),
-            v_type,
-            hash: hash.clone(),
-            timestamp: now,
-            valid_until: now.saturating_add(Self::get_attestation_validity(env.clone())),
-            status: if approved {
-                VerificationStatus::Verified
-            } else {
-                VerificationStatus::Rejected
-            },
-        };
-
-        // One attestation per (verifier, type): drop this verifier's previous
-        // statement about this fact before appending the new one.
-        let mut updated: Vec<Attestation> = Vec::new(&env);
-        for existing in attestations.iter() {
-            if existing.verifier == verifier && existing.v_type == v_type {
-                continue;
-            }
-            updated.push_back(existing);
-        }
-        if updated.len() >= MAX_ATTESTATIONS_PER_INVOICE {
-            updated = evict_one_slot(&env, &updated, now);
-        }
-        updated.push_back(attestation.clone());
-        save_verifications(&env, &invoice_id, &updated);
-
-        env.events().publish(
-            (symbol_short!("ver_sub"), invoice_id.clone()),
-            (verifier, v_type, hash, attestation.valid_until, fee),
-        );
-
-        let status_after = type_status(&env, &updated, v_type, threshold, now);
-        if status_after != status_before
-            && (status_after == VerificationStatus::Verified
-                || status_after == VerificationStatus::Rejected)
-        {
-            env.events().publish(
-                (symbol_short!("ver_done"), invoice_id),
-                (v_type, status_after),
-            );
-        }
-
-        attestation
-    }
-
-    /// Every attestation recorded against an invoice, oldest first.
-    pub fn get_verifications(env: Env, invoice_id: Symbol) -> Vec<Attestation> {
-        load_verifications(&env, &invoice_id)
-    }
-
-    /// Status of one verification type on an invoice. Expiry is derived, so
-    /// this is correct whether or not `expire_verifications` has been called.
-    pub fn get_verification_status(
-        env: Env,
-        invoice_id: Symbol,
-        v_type: VerificationType,
-    ) -> VerificationStatus {
-        let attestations = load_verifications(&env, &invoice_id);
-        let threshold = Self::get_verifier_threshold(env.clone());
-        type_status(
-            &env,
-            &attestations,
-            v_type,
-            threshold,
-            env.ledger().timestamp(),
-        )
-    }
-
-    /// Verification status of the invoice as a whole.
-    ///
-    /// `Verified` requires **every** verification type to be verified — an
-    /// invoice with a checked document hash but no business registration is
-    /// not a verified invoice. A rejection anywhere makes the whole thing
-    /// `Rejected`; otherwise a lapsed type makes it `Expired`.
-    pub fn get_invoice_verification_status(env: Env, invoice_id: Symbol) -> VerificationStatus {
-        let attestations = load_verifications(&env, &invoice_id);
-        let threshold = Self::get_verifier_threshold(env.clone());
-        let now = env.ledger().timestamp();
-
-        let mut all_verified = true;
-        let mut any_expired = false;
-        for v_type in VERIFICATION_TYPES.iter() {
-            match type_status(&env, &attestations, *v_type, threshold, now) {
-                VerificationStatus::Rejected => return VerificationStatus::Rejected,
-                VerificationStatus::Verified => {}
-                VerificationStatus::Expired => {
-                    all_verified = false;
-                    any_expired = true;
-                }
-                VerificationStatus::Pending => all_verified = false,
-            }
-        }
-
-        if all_verified {
-            VerificationStatus::Verified
-        } else if any_expired {
-            VerificationStatus::Expired
-        } else {
-            VerificationStatus::Pending
-        }
-    }
-
-    /// Record the attestations on an invoice that have passed `valid_until`
-    /// and emit `ver_exp` for each, returning how many were newly expired.
-    ///
-    /// Permissionless, and purely a notification mechanism: reads already
-    /// derive expiry from `valid_until`, so nothing about an invoice's
-    /// verification status depends on this being called. It exists because
-    /// Soroban has no scheduler and an indexer cannot observe a deadline
-    /// passing — someone has to poke. Calling it twice is a no-op the second
-    /// time, so a keeper cannot spam duplicate events.
-    pub fn expire_verifications(env: Env, invoice_id: Symbol) -> u32 {
-        assert_not_paused(&env);
-        let attestations = load_verifications(&env, &invoice_id);
-        if attestations.is_empty() {
-            env.panic_with_error(ContractError::NotFound);
-        }
-
-        let now = env.ledger().timestamp();
-        let mut updated: Vec<Attestation> = Vec::new(&env);
-        let mut newly_expired: u32 = 0;
-
-        for attestation in attestations.iter() {
-            if effective_status(&attestation, now) == VerificationStatus::Expired
-                && attestation.status != VerificationStatus::Expired
-            {
-                newly_expired += 1;
-                env.events().publish(
-                    (symbol_short!("ver_exp"), invoice_id.clone()),
-                    (
-                        attestation.verifier.clone(),
-                        attestation.v_type,
-                        attestation.valid_until,
-                    ),
-                );
-                updated.push_back(Attestation {
-                    status: VerificationStatus::Expired,
-                    ..attestation
-                });
-            } else {
-                updated.push_back(attestation);
-            }
-        }
-
-        if newly_expired > 0 {
-            save_verifications(&env, &invoice_id, &updated);
-        }
-        newly_expired
-    }
-
     // ── Metadata ─────────────────────────────────────────────────────────────
 
     pub fn version(env: Env) -> soroban_sdk::String {
-        invofi_common::contract_version(&env)
-    }
-
-    /// Authorizes, validates, and schedules a replacement executable. Soroban
-    /// activates it after this call succeeds; call `post_upgrade` under the new
-    /// executable to complete the lifecycle.
-    pub fn upgrade(
-        env: Env,
-        signers: Vec<Address>,
-        current_wasm_hash: BytesN<32>,
-        new_wasm_hash: BytesN<32>,
-        new_version: String,
-    ) {
-        assert_admin(&env, &signers);
-        invofi_common::begin_upgrade(&env, &current_wasm_hash, &new_wasm_hash, &new_version);
-        pre_upgrade(&env);
-        env.deployer().update_current_contract_wasm(new_wasm_hash);
-    }
-
-    /// Runs the new executable's post-upgrade hook and commits its version.
-    pub fn post_upgrade(env: Env, signers: Vec<Address>) {
-        assert_admin(&env, &signers);
-        post_upgrade(&env);
-        invofi_common::complete_upgrade(&env);
-    }
-
-    /// Atomically replaces this executable with its immediately retained prior
-    /// executable. Contract storage remains as-is; no historical snapshot exists.
-    pub fn rollback(env: Env, signers: Vec<Address>) {
-        assert_admin(&env, &signers);
-        let (wasm_hash, version) = invofi_common::rollback_target(&env);
-        invofi_common::commit_rollback(&env, &version);
-        env.deployer().update_current_contract_wasm(wasm_hash);
+        soroban_sdk::String::from_str(&env, env!("CARGO_PKG_VERSION"))
     }
 
     pub fn get_min_invoice_amount(_env: Env) -> i128 {
         MIN_INVOICE_AMOUNT
-    }
-
-    // ── State Machine History ────────────────────────────────────────────────
-
-    /// Query the full transition history for an invoice.
-    pub fn get_transition_history(env: Env, invoice_id: Symbol) -> Vec<TransitionRecord> {
-        get_transition_history(&env, invoice_id)
     }
 }
 
