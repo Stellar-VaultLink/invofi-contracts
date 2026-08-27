@@ -1,12 +1,13 @@
 #![no_std]
 
-use soroban_sdk::{contract, contractimpl, symbol_short, token, Address, Env, Symbol, Vec};
+use soroban_sdk::{
+    contract, contractimpl, symbol_short, token, Address, BytesN, Env, String, Symbol, Vec,
+};
 
 use invofi_common::{
-    assert_not_paused, resolve_token, AdminConfig, ContractError, FinancingClient,
-    FinancingOffer, InsuranceClient, Invoice, InvoiceStatus, OfferStatus, PaymentRecord,
-    RegistryClient, ReputationClient, GRACE_PERIOD_SECS, MAX_OFFER_DURATION_SECS,
-    MIN_OFFER_DURATION_SECS,
+    assert_not_paused, resolve_token, AdminConfig, ContractError, FinancingClient, FinancingOffer,
+    InsuranceClient, Invoice, InvoiceStatus, OfferStatus, PaymentRecord, RegistryClient,
+    ReputationClient, GRACE_PERIOD_SECS, MAX_OFFER_DURATION_SECS, MIN_OFFER_DURATION_SECS,
 };
 
 /// Threshold-gated admin check (ADR-0010). See `invofi_common::assert_threshold`.
@@ -14,6 +15,9 @@ fn assert_admin(env: &Env, signers: &Vec<Address>) {
     let cfg = invofi_common::load_admin_config(env);
     invofi_common::assert_threshold(env, &cfg, signers);
 }
+
+fn pre_upgrade(_env: &Env) {}
+fn post_upgrade(_env: &Env) {}
 
 // ─── Overdue penalty (ADR-0007) ──────────────────────────────────────────────
 
@@ -183,6 +187,7 @@ impl RepaymentContract {
         token: Address,
     ) {
         invofi_common::init_admin_config(&env, &admin);
+        invofi_common::initialize_contract_version(&env, env!("CARGO_PKG_VERSION"));
         env.storage()
             .instance()
             .set(&symbol_short!("registry"), &registry);
@@ -715,7 +720,33 @@ impl RepaymentContract {
     }
 
     pub fn version(env: Env) -> soroban_sdk::String {
-        soroban_sdk::String::from_str(&env, env!("CARGO_PKG_VERSION"))
+        invofi_common::contract_version(&env)
+    }
+
+    pub fn upgrade(
+        env: Env,
+        signers: Vec<Address>,
+        current_wasm_hash: BytesN<32>,
+        new_wasm_hash: BytesN<32>,
+        new_version: String,
+    ) {
+        assert_admin(&env, &signers);
+        invofi_common::begin_upgrade(&env, &current_wasm_hash, &new_wasm_hash, &new_version);
+        pre_upgrade(&env);
+        env.deployer().update_current_contract_wasm(new_wasm_hash);
+    }
+
+    pub fn post_upgrade(env: Env, signers: Vec<Address>) {
+        assert_admin(&env, &signers);
+        post_upgrade(&env);
+        invofi_common::complete_upgrade(&env);
+    }
+
+    pub fn rollback(env: Env, signers: Vec<Address>) {
+        assert_admin(&env, &signers);
+        let (wasm_hash, version) = invofi_common::rollback_target(&env);
+        invofi_common::commit_rollback(&env, &version);
+        env.deployer().update_current_contract_wasm(wasm_hash);
     }
 
     pub fn get_duration_limits(_env: Env) -> (u64, u64) {

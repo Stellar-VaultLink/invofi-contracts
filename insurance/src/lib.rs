@@ -36,7 +36,10 @@
 //!   component on top of the principal.
 //! - The `pool_yld` event is emitted on every yield payout.
 
-use soroban_sdk::{contract, contractimpl, symbol_short, token, Address, Env, Map, Symbol, Vec};
+use soroban_sdk::{
+    contract, contractimpl, contracttype, symbol_short, token, Address, BytesN, Env, Map, String,
+    Symbol, Vec,
+};
 
 use invofi_common::{assert_not_paused, AdminConfig, ContractError, InvoiceStatus, RegistryClient};
 
@@ -46,10 +49,189 @@ fn assert_admin(env: &Env, signers: &Vec<Address>) {
     invofi_common::assert_threshold(env, &cfg, signers);
 }
 
+fn pre_upgrade(_env: &Env) {}
+fn post_upgrade(_env: &Env) {}
+
 // ─── Constants ────────────────────────────────────────────────────────────────
 
 /// Seconds in a 365-day year. Mirrors `MAX_OFFER_DURATION_SECS` in common.
 const SECONDS_PER_YEAR: u64 = 31_536_000;
+const BPS_DENOMINATOR: i128 = 10_000;
+const RISK_AGE_SECS: u64 = 30 * 86_400;
+const RISK_LARGE_INVOICE_AMOUNT: i128 = 1_000_000_000;
+
+/// The three fixed insurance products.  This is deliberately separate from
+/// the registry's legacy `RiskTier`: that type controls lender-offer rates,
+/// whereas this type is part of the insurance contract's public ABI.
+#[contracttype]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[repr(u32)]
+pub enum InsuranceTier {
+    Conservative = 0,
+    Balanced = 1,
+    Aggressive = 2,
+}
+
+/// Independently accounted reserve and immutable economics for one tier.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct PoolRecord {
+    pub balance: i128,
+    pub reserved: i128,
+    pub apy_bps: u32,
+    pub payout_cap_bps: u32,
+}
+
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct TierStakeKey {
+    staker: Address,
+    tier: InsuranceTier,
+}
+
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct TierOfferKey {
+    offer_id: Symbol,
+    tier: InsuranceTier,
+}
+
+fn tier_parameters(tier: InsuranceTier) -> (u32, u32) {
+    match tier {
+        InsuranceTier::Conservative => (200, 5_000),
+        InsuranceTier::Balanced => (500, 7_500),
+        InsuranceTier::Aggressive => (1_000, 10_000),
+    }
+}
+
+fn tier_key(staker: &Address, tier: InsuranceTier) -> TierStakeKey {
+    TierStakeKey {
+        staker: staker.clone(),
+        tier,
+    }
+}
+
+fn load_tier_pools(env: &Env) -> Map<InsuranceTier, PoolRecord> {
+    env.storage()
+        .persistent()
+        .get(&symbol_short!("pools"))
+        .unwrap_or_else(|| Map::new(env))
+}
+
+fn load_tier_pool(env: &Env, tier: InsuranceTier) -> PoolRecord {
+    let (apy_bps, payout_cap_bps) = tier_parameters(tier);
+    load_tier_pools(env).get(tier).unwrap_or(PoolRecord {
+        balance: 0,
+        reserved: 0,
+        apy_bps,
+        payout_cap_bps,
+    })
+}
+
+fn tier_offer_key(offer_id: &Symbol, tier: InsuranceTier) -> TierOfferKey {
+    TierOfferKey {
+        offer_id: offer_id.clone(),
+        tier,
+    }
+}
+
+fn load_tier_reservations(env: &Env) -> Map<TierOfferKey, i128> {
+    env.storage()
+        .persistent()
+        .get(&symbol_short!("tresrv"))
+        .unwrap_or_else(|| Map::new(env))
+}
+
+fn save_tier_reservations(env: &Env, reservations: &Map<TierOfferKey, i128>) {
+    env.storage()
+        .persistent()
+        .set(&symbol_short!("tresrv"), reservations);
+}
+
+fn load_tier_paid(env: &Env) -> Map<TierOfferKey, i128> {
+    env.storage()
+        .persistent()
+        .get(&symbol_short!("tpaid"))
+        .unwrap_or_else(|| Map::new(env))
+}
+
+fn save_tier_paid(env: &Env, paid: &Map<TierOfferKey, i128>) {
+    env.storage()
+        .persistent()
+        .set(&symbol_short!("tpaid"), paid);
+}
+
+fn save_tier_pool(env: &Env, tier: InsuranceTier, pool: &PoolRecord) {
+    let mut pools = load_tier_pools(env);
+    pools.set(tier, pool.clone());
+    env.storage()
+        .persistent()
+        .set(&symbol_short!("pools"), &pools);
+}
+
+fn load_tier_stakes(env: &Env) -> Map<TierStakeKey, i128> {
+    env.storage()
+        .persistent()
+        .get(&symbol_short!("tstakes"))
+        .unwrap_or_else(|| Map::new(env))
+}
+
+fn save_tier_stakes(env: &Env, stakes: &Map<TierStakeKey, i128>) {
+    env.storage()
+        .persistent()
+        .set(&symbol_short!("tstakes"), stakes);
+}
+
+fn load_tier_timestamps(env: &Env) -> Map<TierStakeKey, u64> {
+    env.storage()
+        .persistent()
+        .get(&symbol_short!("tstk_ts"))
+        .unwrap_or_else(|| Map::new(env))
+}
+
+fn save_tier_timestamps(env: &Env, timestamps: &Map<TierStakeKey, u64>) {
+    env.storage()
+        .persistent()
+        .set(&symbol_short!("tstk_ts"), timestamps);
+}
+
+fn load_tier_accruals(env: &Env) -> Map<TierStakeKey, i128> {
+    env.storage()
+        .persistent()
+        .get(&symbol_short!("tyld_acc"))
+        .unwrap_or_else(|| Map::new(env))
+}
+
+fn save_tier_accruals(env: &Env, accruals: &Map<TierStakeKey, i128>) {
+    env.storage()
+        .persistent()
+        .set(&symbol_short!("tyld_acc"), accruals);
+}
+
+fn tier_yield(principal: i128, apy_bps: u32, elapsed_secs: u64) -> i128 {
+    if principal == 0 || elapsed_secs == 0 {
+        return 0;
+    }
+    principal * apy_bps as i128 * elapsed_secs as i128
+        / (BPS_DENOMINATOR * SECONDS_PER_YEAR as i128)
+}
+
+fn bank_tier_yield(
+    key: &TierStakeKey,
+    pool: &PoolRecord,
+    stakes: &Map<TierStakeKey, i128>,
+    timestamps: &mut Map<TierStakeKey, u64>,
+    accruals: &mut Map<TierStakeKey, i128>,
+    now: u64,
+) {
+    let principal = stakes.get(key.clone()).unwrap_or(0);
+    let start = timestamps.get(key.clone()).unwrap_or(now);
+    let earned = tier_yield(principal, pool.apy_bps, now.saturating_sub(start));
+    if earned > 0 {
+        accruals.set(key.clone(), accruals.get(key.clone()).unwrap_or(0) + earned);
+    }
+    timestamps.set(key.clone(), now);
+}
 
 // ─── Storage Helpers ─────────────────────────────────────────────────────────
 
@@ -271,6 +453,7 @@ impl InsuranceContract {
     /// is therefore no separate initialize() call to front-run (issue #75).
     pub fn __constructor(env: Env, admin: Address, token: Address) {
         invofi_common::init_admin_config(&env, &admin);
+        invofi_common::initialize_contract_version(&env, env!("CARGO_PKG_VERSION"));
         env.storage()
             .instance()
             .set(&symbol_short!("token"), &token);
@@ -416,6 +599,156 @@ impl InsuranceContract {
     /// Read the current annual yield rate in basis points. Default is 0.
     pub fn get_yield_rate(env: Env) -> u32 {
         load_yield_rate(&env)
+    }
+
+    /// Returns the fixed economics and isolated balance for `tier`.
+    pub fn get_pool(env: Env, tier: InsuranceTier) -> PoolRecord {
+        load_tier_pool(&env, tier)
+    }
+
+    /// Deterministically recommends a product from the three on-chain risk
+    /// inputs. A staker's explicit `stake_tier` choice is never overridden;
+    /// this view is for clients presenting the risk information consistently.
+    ///
+    /// One point is assigned for an invoice older than 30 days, an originator
+    /// with more defaults than repayments, and an invoice of at least 1,000
+    /// settlement-token units (the protocol's existing 10 XLM/USDC minimum
+    /// multiplied by 100). Zero points is Conservative, one is Balanced, and
+    /// two or three is Aggressive.
+    pub fn assess_risk(
+        _env: Env,
+        invoice_age_secs: u64,
+        originator_repayments: u32,
+        originator_defaults: u32,
+        invoice_amount: i128,
+    ) -> InsuranceTier {
+        if invoice_amount <= 0 {
+            return InsuranceTier::Aggressive;
+        }
+        let mut points = 0u32;
+        if invoice_age_secs >= RISK_AGE_SECS {
+            points += 1;
+        }
+        if originator_defaults > originator_repayments {
+            points += 1;
+        }
+        if invoice_amount >= RISK_LARGE_INVOICE_AMOUNT {
+            points += 1;
+        }
+        match points {
+            0 => InsuranceTier::Conservative,
+            1 => InsuranceTier::Balanced,
+            _ => InsuranceTier::Aggressive,
+        }
+    }
+
+    /// Deposit into a selected insurance tier. The existing `stake` entrypoint
+    /// remains the legacy flat-pool API; new integrations must use this
+    /// tier-aware entrypoint.
+    pub fn stake_tier(env: Env, staker: Address, tier: InsuranceTier, amount: i128) {
+        assert_not_paused(&env);
+        staker.require_auth();
+        if amount <= 0 {
+            env.panic_with_error(ContractError::InvalidInput);
+        }
+        let token_addr = load_token(&env);
+        token::TokenClient::new(&env, &token_addr).transfer_from(
+            &env.current_contract_address(),
+            &staker,
+            &env.current_contract_address(),
+            &amount,
+        );
+
+        let key = tier_key(&staker, tier);
+        let mut stakes = load_tier_stakes(&env);
+        let mut timestamps = load_tier_timestamps(&env);
+        let mut accruals = load_tier_accruals(&env);
+        let mut pool = load_tier_pool(&env, tier);
+        let now = env.ledger().timestamp();
+        let existing = stakes.get(key.clone()).unwrap_or(0);
+        if existing > 0 {
+            bank_tier_yield(&key, &pool, &stakes, &mut timestamps, &mut accruals, now);
+        } else {
+            timestamps.set(key.clone(), now);
+        }
+        stakes.set(key.clone(), existing + amount);
+        pool.balance += amount;
+        save_tier_stakes(&env, &stakes);
+        save_tier_timestamps(&env, &timestamps);
+        save_tier_accruals(&env, &accruals);
+        save_tier_pool(&env, tier, &pool);
+        env.events()
+            .publish((symbol_short!("pool_stk"), staker, tier), amount);
+    }
+
+    /// Withdraw principal and accrued fixed-tier yield from the selected pool.
+    pub fn unstake_tier(env: Env, staker: Address, tier: InsuranceTier, amount: i128) {
+        assert_not_paused(&env);
+        staker.require_auth();
+        if amount <= 0 {
+            env.panic_with_error(ContractError::InvalidInput);
+        }
+        let key = tier_key(&staker, tier);
+        let mut stakes = load_tier_stakes(&env);
+        let balance = stakes.get(key.clone()).unwrap_or(0);
+        if balance < amount {
+            env.panic_with_error(ContractError::InsufficientBalance);
+        }
+        let mut pool = load_tier_pool(&env, tier);
+        let mut timestamps = load_tier_timestamps(&env);
+        let mut accruals = load_tier_accruals(&env);
+        let now = env.ledger().timestamp();
+        bank_tier_yield(&key, &pool, &stakes, &mut timestamps, &mut accruals, now);
+        let yield_payout = accruals.get(key.clone()).unwrap_or(0);
+        let remaining = balance - amount;
+        if remaining == 0 {
+            stakes.remove(key.clone());
+            timestamps.remove(key.clone());
+            accruals.remove(key.clone());
+        } else {
+            stakes.set(key.clone(), remaining);
+            accruals.set(key.clone(), 0);
+        }
+        pool.balance -= amount;
+        save_tier_stakes(&env, &stakes);
+        save_tier_timestamps(&env, &timestamps);
+        save_tier_accruals(&env, &accruals);
+        save_tier_pool(&env, tier, &pool);
+        let token_client = token::TokenClient::new(&env, &load_token(&env));
+        token_client.transfer(&env.current_contract_address(), &staker, &amount);
+        if yield_payout > 0 {
+            token_client.transfer(&env.current_contract_address(), &staker, &yield_payout);
+            env.events().publish(
+                (symbol_short!("pool_yld"), staker.clone(), tier),
+                yield_payout,
+            );
+        }
+        env.events()
+            .publish((symbol_short!("pool_un"), staker, tier), amount);
+    }
+
+    pub fn get_tier_stake(env: Env, staker: Address, tier: InsuranceTier) -> i128 {
+        load_tier_stakes(&env)
+            .get(tier_key(&staker, tier))
+            .unwrap_or(0)
+    }
+
+    /// Preview a selected tier's accrued yield. Uses deterministic integer
+    /// arithmetic and rounds down, like the legacy yield preview.
+    pub fn accrued_tier_yield(env: Env, staker: Address, tier: InsuranceTier) -> i128 {
+        let key = tier_key(&staker, tier);
+        let stakes = load_tier_stakes(&env);
+        let banked = load_tier_accruals(&env).get(key.clone()).unwrap_or(0);
+        let principal = stakes.get(key.clone()).unwrap_or(0);
+        let start = load_tier_timestamps(&env)
+            .get(key)
+            .unwrap_or(env.ledger().timestamp());
+        banked
+            + tier_yield(
+                principal,
+                load_tier_pool(&env, tier).apy_bps,
+                env.ledger().timestamp().saturating_sub(start),
+            )
     }
 
     // ── Pause / unpause (Task 4A circuit breaker) ───────────────────────────
@@ -669,6 +1002,207 @@ impl InsuranceContract {
         payout
     }
 
+    /// Pay a default claim from one selected tier. The payout is capped by
+    /// both the tier's configured coverage percentage and that tier's own
+    /// balance; no other tier can fund or absorb this loss.
+    pub fn pay_out_tier(
+        env: Env,
+        invoice_id: Symbol,
+        tier: InsuranceTier,
+        beneficiary: Address,
+        amount: i128,
+    ) -> i128 {
+        assert_not_paused(&env);
+        let payout_caller: Address = env
+            .storage()
+            .instance()
+            .get(&symbol_short!("paycall"))
+            .unwrap_or_else(|| panic!("No payout caller configured"));
+        payout_caller.require_auth();
+        if amount <= 0 {
+            env.panic_with_error(ContractError::InvalidInput);
+        }
+        let registry_addr: Address = env
+            .storage()
+            .instance()
+            .get(&symbol_short!("registry"))
+            .unwrap_or_else(|| panic!("Registry not configured"));
+        if RegistryClient::new(&env, &registry_addr)
+            .get_invoice(&invoice_id)
+            .status
+            != InvoiceStatus::Defaulted
+        {
+            env.panic_with_error(ContractError::InvalidTransition);
+        }
+
+        let mut pool = load_tier_pool(&env, tier);
+        let capped_claim = amount * pool.payout_cap_bps as i128 / BPS_DENOMINATOR;
+        let payout = capped_claim.min(pool.balance);
+        if payout <= 0 {
+            return 0;
+        }
+        let mut stakes = load_tier_stakes(&env);
+        let all_keys: Vec<TierStakeKey> = stakes.keys();
+        let mut keys = Vec::new(&env);
+        for key in all_keys.iter() {
+            if key.tier == tier {
+                keys.push_back(key);
+            }
+        }
+        let count = keys.len() as usize;
+        let original_balance = pool.balance;
+        let mut reductions = 0;
+        for (index, key) in keys.iter().enumerate() {
+            let balance = stakes.get(key.clone()).unwrap_or(0);
+            let reduction = if index == count - 1 {
+                payout - reductions
+            } else {
+                (balance * payout / original_balance).min(payout - reductions)
+            };
+            if reduction == balance {
+                stakes.remove(key.clone());
+            } else {
+                stakes.set(key.clone(), balance - reduction);
+            }
+            reductions += reduction;
+        }
+        // A tier pool can only hold funds represented by tier stakes; this
+        // guard fails closed if a corrupted record would violate that invariant.
+        if reductions != payout {
+            env.panic_with_error(ContractError::InsufficientBalance);
+        }
+        pool.balance -= payout;
+        save_tier_stakes(&env, &stakes);
+        save_tier_pool(&env, tier, &pool);
+        token::TokenClient::new(&env, &load_token(&env)).transfer(
+            &env.current_contract_address(),
+            &beneficiary,
+            &payout,
+        );
+        env.events()
+            .publish((symbol_short!("pool_pay"), beneficiary, tier), payout);
+        payout
+    }
+
+    /// Reserve capacity from one tier for an offer. The cap is applied when
+    /// reserving, so several partial claims cannot cumulatively exceed the
+    /// selected tier's coverage percentage of the original request.
+    pub fn reserve_payout_tier(
+        env: Env,
+        offer_id: Symbol,
+        tier: InsuranceTier,
+        amount: i128,
+    ) -> i128 {
+        assert_not_paused(&env);
+        let caller: Address = env
+            .storage()
+            .instance()
+            .get(&symbol_short!("paycall"))
+            .unwrap_or_else(|| panic!("No payout caller configured"));
+        caller.require_auth();
+        if amount <= 0 {
+            env.panic_with_error(ContractError::InvalidInput);
+        }
+        let mut pool = load_tier_pool(&env, tier);
+        let key = tier_offer_key(&offer_id, tier);
+        let mut reservations = load_tier_reservations(&env);
+        let already_reserved = reservations.get(key.clone()).unwrap_or(0);
+        let capped_total = amount * pool.payout_cap_bps as i128 / BPS_DENOMINATOR;
+        let reserve = capped_total
+            .saturating_sub(already_reserved)
+            .min(pool.balance - pool.reserved);
+        if reserve <= 0 {
+            return 0;
+        }
+        reservations.set(key, already_reserved + reserve);
+        pool.reserved += reserve;
+        save_tier_reservations(&env, &reservations);
+        save_tier_pool(&env, tier, &pool);
+        env.events()
+            .publish((symbol_short!("ins_rsrv"), offer_id, tier), reserve);
+        reserve
+    }
+
+    /// Consume a tier-specific reservation. The reservation and all principal
+    /// reductions are scoped by the same tier key, preventing cross-pool use.
+    pub fn claim_payout_tier(
+        env: Env,
+        offer_id: Symbol,
+        tier: InsuranceTier,
+        lender: Address,
+        amount: i128,
+    ) -> (i128, i128) {
+        assert_not_paused(&env);
+        let caller: Address = env
+            .storage()
+            .instance()
+            .get(&symbol_short!("paycall"))
+            .unwrap_or_else(|| panic!("No payout caller configured"));
+        caller.require_auth();
+        if amount <= 0 {
+            env.panic_with_error(ContractError::InvalidInput);
+        }
+        let key = tier_offer_key(&offer_id, tier);
+        let reservations = load_tier_reservations(&env);
+        let reserved = reservations.get(key.clone()).unwrap_or(0);
+        let mut paid_map = load_tier_paid(&env);
+        let paid_before = paid_map.get(key.clone()).unwrap_or(0);
+        let remaining = reserved - paid_before;
+        if remaining <= 0 {
+            env.panic_with_error(ContractError::InsufficientBalance);
+        }
+        let mut pool = load_tier_pool(&env, tier);
+        let paid = amount.min(remaining).min(pool.balance);
+        if paid <= 0 {
+            return (0, remaining);
+        }
+        let mut stakes = load_tier_stakes(&env);
+        let all_keys: Vec<TierStakeKey> = stakes.keys();
+        let mut keys = Vec::new(&env);
+        for stake_key in all_keys.iter() {
+            if stake_key.tier == tier {
+                keys.push_back(stake_key);
+            }
+        }
+        let original_balance = pool.balance;
+        let mut reductions = 0;
+        let count = keys.len() as usize;
+        for (index, stake_key) in keys.iter().enumerate() {
+            let balance = stakes.get(stake_key.clone()).unwrap_or(0);
+            let reduction = if index == count - 1 {
+                paid - reductions
+            } else {
+                (balance * paid / original_balance).min(paid - reductions)
+            };
+            if reduction == balance {
+                stakes.remove(stake_key);
+            } else {
+                stakes.set(stake_key, balance - reduction);
+            }
+            reductions += reduction;
+        }
+        if reductions != paid {
+            env.panic_with_error(ContractError::InsufficientBalance);
+        }
+        paid_map.set(key, paid_before + paid);
+        pool.balance -= paid;
+        pool.reserved -= paid;
+        save_tier_stakes(&env, &stakes);
+        save_tier_paid(&env, &paid_map);
+        save_tier_pool(&env, tier, &pool);
+        token::TokenClient::new(&env, &load_token(&env)).transfer(
+            &env.current_contract_address(),
+            &lender,
+            &paid,
+        );
+        let remaining_after = remaining - paid;
+        env.events().publish(
+            (symbol_short!("ins_pay"), offer_id, tier),
+            (paid, remaining_after),
+        );
+        (paid, remaining_after)
+    }
+
     // ── Reserve + partial claim (Issue #137) ──────────────────────────────
 
     /// Reserve `amount` from the pool for a specific offer's insurance claim.
@@ -850,7 +1384,33 @@ impl InsuranceContract {
     }
 
     pub fn version(env: Env) -> soroban_sdk::String {
-        soroban_sdk::String::from_str(&env, env!("CARGO_PKG_VERSION"))
+        invofi_common::contract_version(&env)
+    }
+
+    pub fn upgrade(
+        env: Env,
+        signers: Vec<Address>,
+        current_wasm_hash: BytesN<32>,
+        new_wasm_hash: BytesN<32>,
+        new_version: String,
+    ) {
+        assert_admin(&env, &signers);
+        invofi_common::begin_upgrade(&env, &current_wasm_hash, &new_wasm_hash, &new_version);
+        pre_upgrade(&env);
+        env.deployer().update_current_contract_wasm(new_wasm_hash);
+    }
+
+    pub fn post_upgrade(env: Env, signers: Vec<Address>) {
+        assert_admin(&env, &signers);
+        post_upgrade(&env);
+        invofi_common::complete_upgrade(&env);
+    }
+
+    pub fn rollback(env: Env, signers: Vec<Address>) {
+        assert_admin(&env, &signers);
+        let (wasm_hash, version) = invofi_common::rollback_target(&env);
+        invofi_common::commit_rollback(&env, &version);
+        env.deployer().update_current_contract_wasm(wasm_hash);
     }
 }
 

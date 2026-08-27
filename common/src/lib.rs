@@ -120,6 +120,172 @@ pub enum ContractError {
 
     /// Caller is blacklisted.
     Blacklisted = 8,
+
+    /// A version is not in strict `MAJOR.MINOR.PATCH` form.
+    InvalidVersion = 9,
+
+    /// An executable update is awaiting post-upgrade finalization.
+    UpgradePending = 10,
+
+    /// No executable update is awaiting post-upgrade finalization.
+    UpgradeNotPending = 11,
+
+    /// No retained previous executable is available for rollback.
+    RollbackUnavailable = 12,
+}
+
+/// Numeric components of a strict `MAJOR.MINOR.PATCH` version.
+#[contracttype]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, PartialOrd, Ord)]
+pub struct SemanticVersion {
+    pub major: u32,
+    pub minor: u32,
+    pub patch: u32,
+}
+
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct PendingUpgrade {
+    pub version: String,
+    pub wasm_hash: BytesN<32>,
+}
+
+const VERSION_KEY: Symbol = symbol_short!("__version");
+const PREVIOUS_VERSION_KEY: Symbol = symbol_short!("__prevver");
+const PREVIOUS_WASM_KEY: Symbol = symbol_short!("__prevwsm");
+const PENDING_UPGRADE_KEY: Symbol = symbol_short!("__upgrade");
+
+/// Parses a numeric semantic version in exactly `MAJOR.MINOR.PATCH` form.
+pub fn parse_semantic_version(env: &Env, value: &String) -> SemanticVersion {
+    let len = value.len() as usize;
+    if !(5..=32).contains(&len) {
+        env.panic_with_error(ContractError::InvalidVersion);
+    }
+
+    let mut bytes = [0u8; 32];
+    value.copy_into_slice(&mut bytes[..len]);
+    let mut parts = [0u32; 3];
+    let mut part = 0usize;
+    let mut digits = 0usize;
+
+    for byte in &bytes[..len] {
+        if *byte == b'.' {
+            if part == 2 || digits == 0 {
+                env.panic_with_error(ContractError::InvalidVersion);
+            }
+            part += 1;
+            digits = 0;
+        } else {
+            if !byte.is_ascii_digit() || (digits > 0 && parts[part] == 0) {
+                env.panic_with_error(ContractError::InvalidVersion);
+            }
+            parts[part] = parts[part]
+                .checked_mul(10)
+                .and_then(|v| v.checked_add((byte - b'0') as u32))
+                .unwrap_or_else(|| env.panic_with_error(ContractError::InvalidVersion));
+            digits += 1;
+        }
+    }
+    if part != 2 || digits == 0 {
+        env.panic_with_error(ContractError::InvalidVersion);
+    }
+    SemanticVersion {
+        major: parts[0],
+        minor: parts[1],
+        patch: parts[2],
+    }
+}
+
+/// Stores the initial version and emits the initialization event. Constructors
+/// call this only after their one-time deploy-time setup has succeeded.
+pub fn initialize_contract_version(env: &Env, version: &str) {
+    let version = String::from_str(env, version);
+    parse_semantic_version(env, &version);
+    env.storage().instance().set(&VERSION_KEY, &version);
+    env.events()
+        .publish((Symbol::new(env, "contract_initialized"),), version);
+}
+
+/// Returns the version committed by the constructor or a completed upgrade.
+pub fn contract_version(env: &Env) -> String {
+    env.storage()
+        .instance()
+        .get(&VERSION_KEY)
+        .unwrap_or_else(|| panic!("Not initialized"))
+}
+
+/// Validates and records an upgrade before its executable is replaced.
+///
+/// SDK 22 does not expose the currently-running executable hash. The release
+/// transaction therefore supplies it, under the same threshold authorization
+/// that is required to schedule the replacement, so it can be retained as the
+/// rollback target.
+pub fn begin_upgrade(
+    env: &Env,
+    current_wasm_hash: &BytesN<32>,
+    new_wasm_hash: &BytesN<32>,
+    new_version: &String,
+) {
+    if env.storage().instance().has(&PENDING_UPGRADE_KEY) {
+        env.panic_with_error(ContractError::UpgradePending);
+    }
+    let current = contract_version(env);
+    if parse_semantic_version(env, new_version) <= parse_semantic_version(env, &current) {
+        env.panic_with_error(ContractError::InvalidVersion);
+    }
+    env.storage()
+        .instance()
+        .set(&PREVIOUS_VERSION_KEY, &current);
+    env.storage()
+        .instance()
+        .set(&PREVIOUS_WASM_KEY, current_wasm_hash);
+    env.storage().instance().set(
+        &PENDING_UPGRADE_KEY,
+        &PendingUpgrade {
+            version: new_version.clone(),
+            wasm_hash: new_wasm_hash.clone(),
+        },
+    );
+}
+
+/// Commits an upgrade after the new executable's post-upgrade hook succeeds.
+pub fn complete_upgrade(env: &Env) {
+    let pending: PendingUpgrade = env
+        .storage()
+        .instance()
+        .get(&PENDING_UPGRADE_KEY)
+        .unwrap_or_else(|| env.panic_with_error(ContractError::UpgradeNotPending));
+    env.storage().instance().set(&VERSION_KEY, &pending.version);
+    env.storage().instance().remove(&PENDING_UPGRADE_KEY);
+    env.events()
+        .publish((Symbol::new(env, "contract_upgraded"),), pending.version);
+}
+
+/// Returns the immediately previous executable and its version. Soroban
+/// preserves storage across executable replacement but offers no historical
+/// storage snapshot API, so rollback can only restore code and metadata.
+pub fn rollback_target(env: &Env) -> (BytesN<32>, String) {
+    if env.storage().instance().has(&PENDING_UPGRADE_KEY) {
+        env.panic_with_error(ContractError::UpgradePending);
+    }
+    let wasm_hash = env
+        .storage()
+        .instance()
+        .get(&PREVIOUS_WASM_KEY)
+        .unwrap_or_else(|| env.panic_with_error(ContractError::RollbackUnavailable));
+    let version = env
+        .storage()
+        .instance()
+        .get(&PREVIOUS_VERSION_KEY)
+        .unwrap_or_else(|| env.panic_with_error(ContractError::RollbackUnavailable));
+    (wasm_hash, version)
+}
+
+/// Commits rollback metadata in the same call that schedules the prior Wasm.
+pub fn commit_rollback(env: &Env, version: &String) {
+    env.storage().instance().set(&VERSION_KEY, version);
+    env.storage().instance().remove(&PREVIOUS_VERSION_KEY);
+    env.storage().instance().remove(&PREVIOUS_WASM_KEY);
 }
 
 /// Default maximum serialized storage attributed to one invoice record.
@@ -422,6 +588,21 @@ pub struct Attestation {
     /// `valid_until` regardless, so this field lagging never makes a read
     /// wrong.
     pub status: VerificationStatus,
+}
+
+/// An event record stored in the on-chain event index.
+///
+/// Lightweight summary that mirrors a Soroban event log entry, enabling
+/// efficient querying by event type, time range, and actor address.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct EventRecord {
+    pub event_id: u64,
+    pub event_type: Symbol,
+    pub timestamp: u64,
+    pub actor: Address,
+    pub contract_id: Address,
+    pub data_key: Symbol,
 }
 
 // ─── Currency Registry ───────────────────────────────────────────────────────
@@ -1206,4 +1387,39 @@ pub fn get_transition_history(env: &Env, invoice_id: Symbol) -> Vec<TransitionRe
         .persistent()
         .get(&(symbol_short!("trn_log"), invoice_id))
         .unwrap_or_else(|| Vec::new(env))
+}
+
+#[cfg(test)]
+mod semantic_version_tests {
+    extern crate std;
+
+    use super::{parse_semantic_version, SemanticVersion};
+    use soroban_sdk::{Env, String};
+
+    #[test]
+    fn compares_numeric_components_not_lexicographic_text() {
+        let env = Env::default();
+        let one_nine = parse_semantic_version(&env, &String::from_str(&env, "1.9.0"));
+        let one_ten = parse_semantic_version(&env, &String::from_str(&env, "1.10.0"));
+        assert_eq!(
+            one_ten,
+            SemanticVersion {
+                major: 1,
+                minor: 10,
+                patch: 0
+            }
+        );
+        assert!(one_nine < one_ten);
+    }
+
+    #[test]
+    fn rejects_malformed_versions() {
+        let env = Env::default();
+        for value in ["1.0", "1.0.0.0", "01.0.0", "1.a.0", "1..0"] {
+            let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                parse_semantic_version(&env, &String::from_str(&env, value));
+            }));
+            assert!(result.is_err(), "{value} must be rejected");
+        }
+    }
 }

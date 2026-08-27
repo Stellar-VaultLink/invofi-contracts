@@ -364,17 +364,17 @@ Thanks to everyone who has contributed to InvoFi — the list below is generated
                 </a>
             </td>
             <td align="center">
-                <a href="https://github.com/p3ris0n">
-                    <img src="https://avatars.githubusercontent.com/u/94976593?v=4" width="100;" alt="p3ris0n"/>
-                    <br />
-                    <sub><b>Promise Raji</b></sub>
-                </a>
-            </td>
-            <td align="center">
                 <a href="https://github.com/MJ-RWA">
                     <img src="https://avatars.githubusercontent.com/u/240063069?v=4" width="100;" alt="MJ-RWA"/>
                     <br />
                     <sub><b>MJ | Dev 🏀</b></sub>
+                </a>
+            </td>
+            <td align="center">
+                <a href="https://github.com/p3ris0n">
+                    <img src="https://avatars.githubusercontent.com/u/94976593?v=4" width="100;" alt="p3ris0n"/>
+                    <br />
+                    <sub><b>Promise Raji</b></sub>
                 </a>
             </td>
 		</tr>
@@ -408,17 +408,61 @@ Thanks to everyone who has contributed to InvoFi — the list below is generated
                 </a>
             </td>
             <td align="center">
-                <a href="https://github.com/Agbasimere">
-                    <img src="https://avatars.githubusercontent.com/u/107962282?v=4" width="100;" alt="Agbasimere"/>
+                <a href="https://github.com/xeladev4">
+                    <img src="https://avatars.githubusercontent.com/u/171882586?v=4" width="100;" alt="xeladev4"/>
                     <br />
-                    <sub><b>Buik3m</b></sub>
+                    <sub><b>xeladev4</b></sub>
                 </a>
             </td>
             <td align="center">
-                <a href="https://github.com/Ajibose">
-                    <img src="https://avatars.githubusercontent.com/u/99620327?v=4" width="100;" alt="Ajibose"/>
+                <a href="https://github.com/Wetshakat">
+                    <img src="https://avatars.githubusercontent.com/u/182114004?v=4" width="100;" alt="Wetshakat"/>
                     <br />
-                    <sub><b>Ajibose Ibrahim</b></sub>
+                    <sub><b>Ishaku Dyelshak </b></sub>
+                </a>
+            </td>
+		</tr>
+		<tr>
+            <td align="center">
+                <a href="https://github.com/RawNuke">
+                    <img src="https://avatars.githubusercontent.com/u/67506722?v=4" width="100;" alt="RawNuke"/>
+                    <br />
+                    <sub><b>Raw_Nuke</b></sub>
+                </a>
+            </td>
+            <td align="center">
+                <a href="https://github.com/Chigybillionz">
+                    <img src="https://avatars.githubusercontent.com/u/184784116?v=4" width="100;" alt="Chigybillionz"/>
+                    <br />
+                    <sub><b>OKORIE CHIGOZIE JEHOSHAPHAT</b></sub>
+                </a>
+            </td>
+            <td align="center">
+                <a href="https://github.com/JinadJay">
+                    <img src="https://avatars.githubusercontent.com/u/103272555?v=4" width="100;" alt="JinadJay"/>
+                    <br />
+                    <sub><b>JinadJay</b></sub>
+                </a>
+            </td>
+            <td align="center">
+                <a href="https://github.com/aigbagbobila">
+                    <img src="https://avatars.githubusercontent.com/u/286679235?v=4" width="100;" alt="aigbagbobila"/>
+                    <br />
+                    <sub><b>Hybrid</b></sub>
+                </a>
+            </td>
+            <td align="center">
+                <a href="https://github.com/EneGab">
+                    <img src="https://avatars.githubusercontent.com/u/157655503?v=4" width="100;" alt="EneGab"/>
+                    <br />
+                    <sub><b>EneGab</b></sub>
+                </a>
+            </td>
+            <td align="center">
+                <a href="https://github.com/DevSolex">
+                    <img src="https://avatars.githubusercontent.com/u/220715997?v=4" width="100;" alt="DevSolex"/>
+                    <br />
+                    <sub><b>Dev solex</b></sub>
                 </a>
             </td>
 		</tr>
@@ -431,54 +475,17 @@ Thanks to everyone who has contributed to InvoFi — the list below is generated
                 </a>
             </td>
             <td align="center">
-                <a href="https://github.com/DevSolex">
-                    <img src="https://avatars.githubusercontent.com/u/220715997?v=4" width="100;" alt="DevSolex"/>
+                <a href="https://github.com/Ajibose">
+                    <img src="https://avatars.githubusercontent.com/u/99620327?v=4" width="100;" alt="Ajibose"/>
                     <br />
-                    <sub><b>Dev solex</b></sub>
+                    <sub><b>Ajibose Ibrahim</b></sub>
                 </a>
             </td>
             <td align="center">
-                <a href="https://github.com/EneGab">
-                    <img src="https://avatars.githubusercontent.com/u/157655503?v=4" width="100;" alt="EneGab"/>
+                <a href="https://github.com/Agbasimere">
+                    <img src="https://avatars.githubusercontent.com/u/107962282?v=4" width="100;" alt="Agbasimere"/>
                     <br />
-                    <sub><b>EneGab</b></sub>
-                </a>
-            </td>
-            <td align="center">
-                <a href="https://github.com/JinadJay">
-                    <img src="https://avatars.githubusercontent.com/u/103272555?v=4" width="100;" alt="JinadJay"/>
-                    <br />
-                    <sub><b>JinadJay</b></sub>
-                </a>
-            </td>
-            <td align="center">
-                <a href="https://github.com/Chigybillionz">
-                    <img src="https://avatars.githubusercontent.com/u/184784116?v=4" width="100;" alt="Chigybillionz"/>
-                    <br />
-                    <sub><b>OKORIE CHIGOZIE JEHOSHAPHAT</b></sub>
-                </a>
-            </td>
-            <td align="center">
-                <a href="https://github.com/RawNuke">
-                    <img src="https://avatars.githubusercontent.com/u/67506722?v=4" width="100;" alt="RawNuke"/>
-                    <br />
-                    <sub><b>Raw_Nuke</b></sub>
-                </a>
-            </td>
-		</tr>
-		<tr>
-            <td align="center">
-                <a href="https://github.com/Wetshakat">
-                    <img src="https://avatars.githubusercontent.com/u/182114004?v=4" width="100;" alt="Wetshakat"/>
-                    <br />
-                    <sub><b>Ishaku Dyelshak </b></sub>
-                </a>
-            </td>
-            <td align="center">
-                <a href="https://github.com/xeladev4">
-                    <img src="https://avatars.githubusercontent.com/u/171882586?v=4" width="100;" alt="xeladev4"/>
-                    <br />
-                    <sub><b>xeladev4</b></sub>
+                    <sub><b>Buik3m</b></sub>
                 </a>
             </td>
 		</tr>
