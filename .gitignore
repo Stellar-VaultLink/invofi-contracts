@@ -3,6 +3,13 @@ target/
 **/test_snapshots/
 **/*.rs.bk
 
+# ── Local coverage output (committed baseline lives in coverage/) ─────────────
+coverage/local/
+coverage-summary.json
+coverage-summary.txt
+coverage-report.md
+lcov.info
+
 # ── Stellar CLI ───────────────────────────────────────────────────────────────
 .soroban/
 .stellar/

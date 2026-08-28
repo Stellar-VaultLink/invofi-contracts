@@ -5,6 +5,7 @@ Soroban smart contracts for the [InvoFi](https://github.com/Stellar-VaultLink/in
 [![CI](https://github.com/Stellar-VaultLink/invofi-contracts/actions/workflows/ci.yml/badge.svg)](https://github.com/Stellar-VaultLink/invofi-contracts/actions/workflows/ci.yml)
 [![Clippy](https://github.com/Stellar-VaultLink/invofi-contracts/actions/workflows/clippy.yml/badge.svg)](https://github.com/Stellar-VaultLink/invofi-contracts/actions/workflows/clippy.yml)
 [![Scout](https://github.com/Stellar-VaultLink/invofi-contracts/actions/workflows/scout-security-analysis.yml/badge.svg)](https://github.com/Stellar-VaultLink/invofi-contracts/actions/workflows/scout-security-analysis.yml)
+[![Coverage](https://img.shields.io/endpoint?url=https://raw.githubusercontent.com/Stellar-VaultLink/invofi-contracts/master/coverage/badge.json)](./coverage/README.md)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](./LICENSE)
 
 ---
@@ -74,6 +75,12 @@ register_invoice()  →  create_offer()  →  accept_offer()
 | `mark_invoice_overdue(id)` | Anyone | Overdue once due_date passes |
 | `raise_dispute / resolve_dispute` | Originator / Admin | Dispute lifecycle |
 | `blacklist_address / unblacklist_address / is_blacklisted` | Admin | Address blocking |
+| `attest(invoice_id, verifier, type, hash, approved)` | Trusted verifier | Record an off-chain attestation (document hash, business registration, tax compliance); charges the verification fee (ADR-0009) |
+| `get_verification_status(invoice_id, type)` / `get_invoice_verification_status(invoice_id)` | Anyone | Verification status per type, and the conjunction across all three |
+| `get_verifications(invoice_id)` | Anyone | Every attestation recorded against an invoice |
+| `expire_verifications(invoice_id)` | Anyone | Permissionless poke that records lapsed attestations and emits `ver_exp` |
+| `add_verifier / remove_verifier / set_verifier_threshold` | Admin | Trusted verifier set and the m-of-n threshold |
+| `set_verification_fee / set_attestation_validity / register_currency` | Admin | Fee in bps (default 0 = off), attestation validity (default 90 days), fee settlement token |
 | `set_rate / set_fee / transfer_admin / pause / unpause` | Admin | Admin controls |
 
 ### Financing — `financing/`
@@ -84,6 +91,11 @@ register_invoice()  →  create_offer()  →  accept_offer()
 | `create_offer(offer_id, invoice_id, lender, amount, currency, rate, duration)` | Lender | Submit an offer (validates amount/rate/duration bounds) |
 | `withdraw_offer / reject_offer` | Lender / Originator | Withdraw or reject a Pending offer |
 | `accept_offer(offer_id, originator)` | Originator | Pulls principal lender → business **and mints the lender's position token** |
+| `amend_offer(offer_id, lender, expected_round, amount, rate, duration)` | Lender | Revise a Pending offer's terms; settles immediately if they match the originator's live counter-offer (ADR-0008) |
+| `counter_offer(offer_id, originator, expected_round, amount, rate, duration)` | Originator | Propose different terms; settles immediately if they match the lender's standing terms (ADR-0008) |
+| `close_negotiation(offer_id, caller)` | Lender / Originator, or anyone once expired | End a negotiation — revokes a live counter-offer before the deadline, records expiry after it |
+| `get_negotiation / get_negotiation_status / get_negotiation_deadline` | Anyone | Read the on-chain negotiation history, its derived status, and its frozen deadline |
+| `set_negotiation_window(admin, secs)` | Admin | Negotiation window, default 72 h, clamped to 1 h – 30 days |
 | `register_currency(admin, currency, token)` | Admin | Add a settlement currency — one registry entry, no code branch per currency |
 | `set_position_token(admin, token)` | Admin | Configure the SEP-41 position-token contract (ADR-0002) |
 | `get_position_token()` | Anyone | Read the configured position token |
@@ -113,10 +125,10 @@ register_invoice()  →  create_offer()  →  accept_offer()
 | `get_contract_token_balance()` | Anyone | Actual on-chain balance — audit check that accounting matches |
 | `pay_out(beneficiary, amount)` | Payout caller only (repayment) | Pay up to `amount`, capped at pool balance; returns amount actually paid |
 | `get_payout_caller()` | Anyone | Read the configured payout caller |
+| `set_yield_rate(admin, rate_bps)` | Admin | Set the annual flat yield rate in basis points (e.g. 500 = 5 %). Banks existing yield prospectively before applying the new rate |
+| `get_yield_rate()` | Anyone | Read the current annual yield rate in basis points |
+| `accrued_yield(staker)` | Anyone | Preview the total accrued yield for a staker (banked + since last checkpoint) |
 | `set_staking_token / pause / unpause / transfer_admin` | Admin | Admin controls |
-
-> Yield-rate calculation remains intentionally out of scope — the pool is flat accounting with
-> payout-on-default wired through `pay_out`. See ADR-0003 for the payout design.
 
 ---
 
@@ -140,9 +152,10 @@ the frontend's portfolio offers a one-click trustline helper.
 |---|---|---|
 | `__constructor(admin)` | Deployer (at deploy) | Sets admin atomically in the deploy operation (ADR-0005) |
 | `set_recorder(admin, recorder)` | Admin | Set the repayment contract as the only writer |
-| `record_outcome(originator, outcome)` | Recorder only | `0` = repaid, `1` = defaulted; updates outcome counts |
-| `get_score(originator)` | Anyone | `repayments − 2×defaults`, floored at 0 (ADR-0004) |
-| `get_record(originator)` | Anyone | Raw `{repayments, defaults}` counts — the source of truth |
+| `record_outcome(originator, outcome)` | Recorder only | `0` = repaid, `1` = defaulted; updates outcome counts and applies pending score decay (issue #139) |
+| `resolve_dispute(admin, originator, originator_favourable)` | Admin | Neutralize one recorded default when a dispute resolves in the originator's favour; applies pending decay and emits `rep_chg` with the corrected score (ADR-0004 §7, issue #134) |
+| `get_score(originator)` | Anyone | Cached decayed score — `weighted_repayments − weighted_defaults`, floored at 0; recomputed on each write (ADR-0004 §3, issue #139) |
+| `get_record(originator)` | Anyone | Raw `{repayments, defaults}` counts plus cumulative weighted values — the source of truth |
 
 ## Protocol Events
 
@@ -161,17 +174,31 @@ Every state-mutating function publishes a Soroban contract event. Topics are
 | `off_acc` | `accept_offer` | `(invoice_id, lender, amount)` |
 | `off_rej` | `reject_offer` | `invoice_id` |
 | `off_wdr` | `withdraw_offer` | `lender` |
+| `off_amd` | `amend_offer` | `(lender, amount, interest_rate, duration)` |
+| `ctr_off` | `counter_offer` | `(originator, amount, interest_rate, duration)` |
+| `neg_clsd` | `close_negotiation`, auto-accept, `withdraw_offer` / `reject_offer` on an open negotiation | `(NegotiationStatus, closer)` |
 | `off_def` | `reclaim_invoice` | `(invoice_id, lender)` |
 | `inv_rep` | `repay_invoice` | `(offer_id, amount, fully_repaid)` |
 | `inv_ovd` | `mark_overdue` | `due_date` |
 | `inv_cxl` | `cancel_invoice` | `originator` |
 | `inv_dsp` | `raise_dispute` | `originator` |
 | `inv_rsl` | `resolve_dispute` | `new_status` |
+| `ver_sub` | `attest` (registry) | `(verifier, type, hash, valid_until, fee)` |
+| `ver_done` | `attest` (registry) | `(type, VerificationStatus)` — emitted when a type reaches Verified or Rejected |
+| `ver_exp` | `expire_verifications` (registry) | `(verifier, type, valid_until)` |
 | `pos_mint` | `accept_offer` (financing) | `(lender, amount)` — position token minted |
 | `pool_stk` | `stake` (insurance) | `amount` |
 | `pool_un` | `unstake` (insurance) | `amount` |
 | `pool_pay` | `pay_out` (insurance) | `amount paid` |
+| `pool_yld` | `unstake` (insurance) | `yield paid` — emitted only when yield > 0 |
 | `reputn` | `record_outcome` (reputation) | `outcome` |
+| `rep_chg` | `record_outcome` / `resolve_dispute` (reputation) | score after recomputation — emitted when the stored score changes (issue #139, ADR-0004 §3) |
+
+---
+
+## Error Codes
+
+All contracts emit machine-readable `E_*` error codes (see [docs/error-codes.md](./docs/error-codes.md)). Clients must branch on these stable codes — never on free-text error messages. The SDK maps typed contract errors → codes; the frontend maps codes → UI behaviour (redirect on `E_UNAUTHORIZED`, toast on `E_PAUSED`, etc.).
 
 ---
 
@@ -182,7 +209,17 @@ Every state-mutating function publishes a Soroban contract event. Topics are
 | `GRACE_PERIOD_SECS` | 604,800 | 7-day grace period before lender can reclaim |
 | `MIN_OFFER_DURATION_SECS` | 86,400 | Minimum offer duration (1 day) |
 | `MAX_OFFER_DURATION_SECS` | 31,536,000 | Maximum offer duration (1 year) |
+| `MAX_INTEREST_BPS` | 10,000 | Maximum offer interest rate (100%) |
 | `MIN_INVOICE_AMOUNT` | 10,000,000 | Minimum invoice amount in stroops (10 XLM / 10 USDC) |
+| `DEFAULT_NEGOTIATION_WINDOW_SECS` | 259,200 | Default offer-negotiation window (72 hours) |
+| `MIN_NEGOTIATION_WINDOW_SECS` / `MAX_NEGOTIATION_WINDOW_SECS` | 3,600 / 2,592,000 | Bounds an admin may configure the window to (1 hour – 30 days) |
+| `MAX_NEGOTIATION_ROUNDS` | 20 | Cap on recorded negotiation rounds per offer |
+| `DEFAULT_ATTESTATION_VALIDITY_SECS` | 7,776,000 | Default verification attestation validity (90 days) |
+| `MIN_ATTESTATION_VALIDITY_SECS` / `MAX_ATTESTATION_VALIDITY_SECS` | 86,400 / 31,536,000 | Bounds an admin may configure attestation validity to (1–365 days) |
+| `MAX_VERIFICATION_FEE_BPS` | 500 | Verification fee ceiling (5% of invoice value) |
+| `MAX_VERIFIERS` | 20 | Maximum size of the trusted verifier set |
+| `MAX_ATTESTATIONS_PER_INVOICE` | 60 | Cap on stored attestations per invoice |
+| `DECAY_HALF_LIFE_SECS` | 7,776,000 | Reputation score decay half-life (90 days, issue #139) |
 
 ---
 
@@ -192,8 +229,11 @@ Every state-mutating function publishes a Soroban contract event. Topics are
 # Build
 cargo build --target wasm32v1-none --release
 
-# Run tests (110 tests across registry / financing / repayment / insurance / reputation)
-cargo test
+# Run tests (nextest in CI; cargo test also works)
+cargo nextest run --target "$(rustc -vV | sed -n 's/^host: //p')"
+
+# Line coverage (HTML + LCOV under coverage/local/)
+bash scripts/coverage.sh
 
 # Check WASM size stays under 256 KB
 bash scripts/check-size.sh
@@ -202,9 +242,35 @@ bash scripts/check-size.sh
 bash scripts/deploy.sh
 ```
 
+Per-crate coverage floors and the soft “no regression on touched crates” policy are documented in [`coverage/README.md`](./coverage/README.md).
+
 Or trigger the **[Deploy Contract](https://github.com/Stellar-VaultLink/invofi-contracts/actions/workflows/deploy-contract.yml)** GitHub Actions workflow for a one-click Testnet deploy.
 
 For a full redeploy and migration, follow the [migration runbook](./docs/migration-runbook.md).
+
+### Mainnet deployment
+
+Mainnet deploys use a separate, **manual-only** workflow:
+[**Deploy Contracts to Mainnet**](https://github.com/Stellar-VaultLink/invofi-contracts/actions/workflows/deploy-mainnet.yml)
+
+The workflow has **no push or pull_request trigger** — it can only be started from the Actions UI or the GitHub API with an explicit `workflow_dispatch` event. It runs in two stages:
+
+| Stage | Job | What happens |
+|---|---|---|
+| 1 | **Build & Hash (dry run)** | Compiles all five WASM artifacts, records their SHA-256 hashes in the job summary, checks sizes, and uploads the artifacts. Requires approval from the `production` environment's required reviewers before the next stage runs. |
+| 2 | **Deploy to Mainnet** | Downloads the exact artifacts from stage 1, re-verifies their hashes, then deploys all five contracts and wires cross-contract callers, currencies, and the POS token. Runs under the `production` environment (second reviewer gate). |
+
+**Prerequisites before triggering:**
+
+1. Create a `production` environment in the repository settings and add at least one required reviewer.
+2. Add the `STELLAR_MAINNET_DEPLOYER_SECRET_KEY` secret to that environment (not to the repository — scoping it to the environment ensures it is only accessible after reviewer approval).
+3. The deployer account must be funded on Mainnet before the workflow runs (Friendbot does not exist on Mainnet).
+
+**Rollback note:** Soroban contracts are immutable once deployed. There is no automated rollback. If a deployed contract contains a critical bug, the recovery path is:
+1. Deploy a patched build as a **new** contract using this same workflow.
+2. Re-point all cross-contract wiring and frontend env vars to the new contract IDs.
+3. Follow the [migration runbook](./docs/migration-runbook.md) for state migration details.
+4. Keep the old contract IDs recorded until the new deployment is fully verified.
 
 ---
 
@@ -215,7 +281,7 @@ For a full redeploy and migration, follow the [migration runbook](./docs/migrati
 - [x] Five auditable contract crates with restricted cross-contract auth
 - [x] SEP-41 token movement — `accept_offer` (lender → business), `repay_invoice` (principal + yield)
 - [x] Position tokens, transferable positions, insurance stake/unstake
-- [x] Insurance payout on default, reputation scoring
+- [x] Insurance payout on default, reputation scoring (with score decay, issue #139)
 - [x] Emergency pause / circuit breaker, full protocol event coverage
 - [x] Deployer-bound `__constructor` initialization (issue #75), CI: tests + clippy + Soroban Scout
 
@@ -232,6 +298,12 @@ For a full redeploy and migration, follow the [migration runbook](./docs/migrati
 ## Changelog
 
 See [CHANGELOG.md](./CHANGELOG.md) for version history.
+
+## Security
+
+- [Threat model](./docs/threat-model.md) — assets, trust boundaries, threat actors (originator, lender, admin, keeper, front-runner), mitigations mapped to enforcing functions/tests, and explicit accepted risks. The evaluation baseline for security reviewers and the SCF Audit Bank.
+- [Security policy](./SECURITY.md) — private vulnerability reporting.
+- [Security self-review](./docs/security-self-review.md) — engineering line-by-line review of token movement and pause paths.
 
 ## Compliance
 
@@ -257,6 +329,20 @@ Thanks to everyone who has contributed to InvoFi — the list below is generated
                 </a>
             </td>
             <td align="center">
+                <a href="https://github.com/Fury03">
+                    <img src="https://avatars.githubusercontent.com/u/98775983?v=4" width="100;" alt="Fury03"/>
+                    <br />
+                    <sub><b>Damilola Ogunrotimi</b></sub>
+                </a>
+            </td>
+            <td align="center">
+                <a href="https://github.com/KarenZita01">
+                    <img src="https://avatars.githubusercontent.com/u/261386615?v=4" width="100;" alt="KarenZita01"/>
+                    <br />
+                    <sub><b>Karen Agbo</b></sub>
+                </a>
+            </td>
+            <td align="center">
                 <a href="https://github.com/Abdulrasaq1515">
                     <img src="https://avatars.githubusercontent.com/u/209874744?v=4" width="100;" alt="Abdulrasaq1515"/>
                     <br />
@@ -271,19 +357,14 @@ Thanks to everyone who has contributed to InvoFi — the list below is generated
                 </a>
             </td>
             <td align="center">
-                <a href="https://github.com/hexlaapp">
-                    <img src="https://avatars.githubusercontent.com/u/287440938?v=4" width="100;" alt="hexlaapp"/>
-                    <br />
-                    <sub><b>hexlaapp</b></sub>
-                </a>
-            </td>
-            <td align="center">
                 <a href="https://github.com/p3ris0n">
                     <img src="https://avatars.githubusercontent.com/u/94976593?v=4" width="100;" alt="p3ris0n"/>
                     <br />
                     <sub><b>Promise Raji</b></sub>
                 </a>
             </td>
+		</tr>
+		<tr>
             <td align="center">
                 <a href="https://github.com/Awointa">
                     <img src="https://avatars.githubusercontent.com/u/82676631?v=4" width="100;" alt="Awointa"/>
@@ -291,20 +372,48 @@ Thanks to everyone who has contributed to InvoFi — the list below is generated
                     <sub><b>Bob_The_Builder</b></sub>
                 </a>
             </td>
-		</tr>
-		<tr>
             <td align="center">
-                <a href="https://github.com/DevSolex">
-                    <img src="https://avatars.githubusercontent.com/u/220715997?v=4" width="100;" alt="DevSolex"/>
+                <a href="https://github.com/Sendi0011">
+                    <img src="https://avatars.githubusercontent.com/u/175633768?v=4" width="100;" alt="Sendi0011"/>
                     <br />
-                    <sub><b>Dev solex</b></sub>
+                    <sub><b>Sendi John</b></sub>
                 </a>
             </td>
             <td align="center">
-                <a href="https://github.com/Fury03">
-                    <img src="https://avatars.githubusercontent.com/u/98775983?v=4" width="100;" alt="Fury03"/>
+                <a href="https://github.com/Emmanuellsensai">
+                    <img src="https://avatars.githubusercontent.com/u/86744981?v=4" width="100;" alt="Emmanuellsensai"/>
                     <br />
-                    <sub><b>Damilola Ogunrotimi</b></sub>
+                    <sub><b>Usang Emmanuel </b></sub>
+                </a>
+            </td>
+            <td align="center">
+                <a href="https://github.com/hexlaapp">
+                    <img src="https://avatars.githubusercontent.com/u/287440938?v=4" width="100;" alt="hexlaapp"/>
+                    <br />
+                    <sub><b>hexlaapp</b></sub>
+                </a>
+            </td>
+            <td align="center">
+                <a href="https://github.com/xeladev4">
+                    <img src="https://avatars.githubusercontent.com/u/171882586?v=4" width="100;" alt="xeladev4"/>
+                    <br />
+                    <sub><b>xeladev4</b></sub>
+                </a>
+            </td>
+            <td align="center">
+                <a href="https://github.com/Wetshakat">
+                    <img src="https://avatars.githubusercontent.com/u/182114004?v=4" width="100;" alt="Wetshakat"/>
+                    <br />
+                    <sub><b>Ishaku Dyelshak </b></sub>
+                </a>
+            </td>
+		</tr>
+		<tr>
+            <td align="center">
+                <a href="https://github.com/RawNuke">
+                    <img src="https://avatars.githubusercontent.com/u/67506722?v=4" width="100;" alt="RawNuke"/>
+                    <br />
+                    <sub><b>Raw_Nuke</b></sub>
                 </a>
             </td>
             <td align="center">
@@ -315,10 +424,54 @@ Thanks to everyone who has contributed to InvoFi — the list below is generated
                 </a>
             </td>
             <td align="center">
-                <a href="https://github.com/RawNuke">
-                    <img src="https://avatars.githubusercontent.com/u/67506722?v=4" width="100;" alt="RawNuke"/>
+                <a href="https://github.com/JinadJay">
+                    <img src="https://avatars.githubusercontent.com/u/103272555?v=4" width="100;" alt="JinadJay"/>
                     <br />
-                    <sub><b>Raw_Nuke</b></sub>
+                    <sub><b>JinadJay</b></sub>
+                </a>
+            </td>
+            <td align="center">
+                <a href="https://github.com/aigbagbobila">
+                    <img src="https://avatars.githubusercontent.com/u/286679235?v=4" width="100;" alt="aigbagbobila"/>
+                    <br />
+                    <sub><b>Hybrid</b></sub>
+                </a>
+            </td>
+            <td align="center">
+                <a href="https://github.com/EneGab">
+                    <img src="https://avatars.githubusercontent.com/u/157655503?v=4" width="100;" alt="EneGab"/>
+                    <br />
+                    <sub><b>EneGab</b></sub>
+                </a>
+            </td>
+            <td align="center">
+                <a href="https://github.com/DevSolex">
+                    <img src="https://avatars.githubusercontent.com/u/220715997?v=4" width="100;" alt="DevSolex"/>
+                    <br />
+                    <sub><b>Dev solex</b></sub>
+                </a>
+            </td>
+		</tr>
+		<tr>
+            <td align="center">
+                <a href="https://github.com/Just-Bamford">
+                    <img src="https://avatars.githubusercontent.com/u/233368823?v=4" width="100;" alt="Just-Bamford"/>
+                    <br />
+                    <sub><b>Bamford</b></sub>
+                </a>
+            </td>
+            <td align="center">
+                <a href="https://github.com/Ajibose">
+                    <img src="https://avatars.githubusercontent.com/u/99620327?v=4" width="100;" alt="Ajibose"/>
+                    <br />
+                    <sub><b>Ajibose Ibrahim</b></sub>
+                </a>
+            </td>
+            <td align="center">
+                <a href="https://github.com/Agbasimere">
+                    <img src="https://avatars.githubusercontent.com/u/107962282?v=4" width="100;" alt="Agbasimere"/>
+                    <br />
+                    <sub><b>Buik3m</b></sub>
                 </a>
             </td>
 		</tr>

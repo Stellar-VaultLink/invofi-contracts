@@ -1,0 +1,186 @@
+# ──────────────────────────────────────────────────────────────────────────────
+# Reproducible Build Verification
+#
+# Builds every cdylib crate's WASM twice (into isolated target directories,
+# with a pinned toolchain) and asserts byte-identical output.  This catches
+# toolchain drift, non-deterministic codegen, and environment bleed that would
+# silently break the reproducibility guarantee claimed by the deploy workflow
+# (see issue #61).
+#
+# HOW IT WORKS
+# 1. Install an exact Rust toolchain version (RUST_VERSION below).
+# 2. First build  → target-a/  (SHA-256 recorded).
+# 3. Second build → target-b/  (SHA-256 recorded).
+# 4. Diff every invofi_*.wasm artifact.  ANY mismatch → hard failure.
+#
+# EXPECTED FAILURE SCENARIO
+# Changing RUST_VERSION (e.g. 1.87.0 → 1.88.0) will almost certainly produce
+# different WASM bytes, causing this job to fail.  That is *intentional*: it
+# forces the team to consciously verify that a toolchain bump still produces
+# auditable, reproducible output before the change is merged.
+#
+# IMPORTANT: This workflow does NOT alter the release build process.  The
+# deploy workflows (deploy-contract.yml, deploy-mainnet.yml) and CI (ci.yml)
+# remain unchanged and continue using @stable.
+# ──────────────────────────────────────────────────────────────────────────────
+
+name: Reproducible Build Check
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+    branches: [master]
+
+permissions:
+  contents: read
+
+env:
+  # ┌──────────────────────────────────────────────────────────────────────────┐
+  # │ PINNED TOOLCHAIN VERSION                                                │
+  # │                                                                         │
+  # │ This is the single source of truth for the reproducibility check.       │
+  # │ Bump this value to verify reproducibility under a new compiler, then    │
+  # │ merge once the check passes.                                            │
+  # └──────────────────────────────────────────────────────────────────────────┘
+  RUST_VERSION: "1.87.0"
+  WASM_TARGET: wasm32v1-none
+  CARGO_INCREMENTAL: "0"
+
+jobs:
+  reproducible-build:
+    name: Verify Reproducible WASM Build
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v7
+
+      # Remove any rust-toolchain.toml that might exist in the repo so we
+      # are guaranteed to use RUST_VERSION and nothing else.
+      - name: Remove rust-toolchain.toml (if present)
+        run: rm -f rust-toolchain.toml rust-toolchain
+
+      - name: Install pinned Rust toolchain
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ env.RUST_VERSION }}
+          targets: ${{ env.WASM_TARGET }},wasm32-unknown-unknown
+
+      - name: Print toolchain info (audit trail)
+        run: |
+          echo "## Toolchain" >> "$GITHUB_STEP_SUMMARY"
+          echo '```' >> "$GITHUB_STEP_SUMMARY"
+          rustc -vV | tee -a "$GITHUB_STEP_SUMMARY"
+          echo '```' >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+
+      # ── Build A ────────────────────────────────────────────────────────────
+      - name: "Build A: compile WASM (fresh target dir)"
+        run: |
+          cargo build --target "$WASM_TARGET" --release --target-dir target-a
+        env:
+          # Lock down locale / time env vars to prevent non-determinism.
+          SOURCE_DATE_EPOCH: "0"
+          TZ: UTC
+          LC_ALL: C
+
+      - name: "Build A: record SHA-256 hashes"
+        id: hash_a
+        run: |
+          echo "## Build A — SHA-256 hashes" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "| Contract | SHA-256 |" >> "$GITHUB_STEP_SUMMARY"
+          echo "| --- | --- |" >> "$GITHUB_STEP_SUMMARY"
+
+          mkdir -p /tmp/hashes
+          for wasm in target-a/$WASM_TARGET/release/invofi_*.wasm; do
+            name=$(basename "$wasm")
+            hash=$(sha256sum "$wasm" | awk '{print $1}')
+            echo "$hash  $name" >> /tmp/hashes/build-a.txt
+            echo "| \`$name\` | \`$hash\` |" >> "$GITHUB_STEP_SUMMARY"
+          done
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+
+          echo "Build A hashes:"
+          cat /tmp/hashes/build-a.txt
+
+      # ── Build B ────────────────────────────────────────────────────────────
+      - name: "Build B: compile WASM (fresh target dir)"
+        run: |
+          cargo build --target "$WASM_TARGET" --release --target-dir target-b
+        env:
+          SOURCE_DATE_EPOCH: "0"
+          TZ: UTC
+          LC_ALL: C
+
+      - name: "Build B: record SHA-256 hashes"
+        id: hash_b
+        run: |
+          echo "## Build B — SHA-256 hashes" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "| Contract | SHA-256 |" >> "$GITHUB_STEP_SUMMARY"
+          echo "| --- | --- |" >> "$GITHUB_STEP_SUMMARY"
+
+          for wasm in target-b/$WASM_TARGET/release/invofi_*.wasm; do
+            name=$(basename "$wasm")
+            hash=$(sha256sum "$wasm" | awk '{print $1}')
+            echo "$hash  $name" >> /tmp/hashes/build-b.txt
+            echo "| \`$name\` | \`$hash\` |" >> "$GITHUB_STEP_SUMMARY"
+          done
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+
+          echo "Build B hashes:"
+          cat /tmp/hashes/build-b.txt
+
+      # ── Diff ───────────────────────────────────────────────────────────────
+      - name: Compare builds byte-for-byte
+        run: |
+          echo "## Reproducibility Verdict" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+
+          if diff /tmp/hashes/build-a.txt /tmp/hashes/build-b.txt; then
+            echo "✅ **All WASM artifacts are byte-identical across both builds.**" \
+              >> "$GITHUB_STEP_SUMMARY"
+            echo ""
+            echo "✅ Reproducible build verified — all artifacts match."
+          else
+            echo "❌ **WASM artifacts differ between builds — reproducibility is broken!**" \
+              >> "$GITHUB_STEP_SUMMARY"
+            echo "" >> "$GITHUB_STEP_SUMMARY"
+
+            # Per-file breakdown for debugging.
+            echo "### Per-file comparison" >> "$GITHUB_STEP_SUMMARY"
+            echo "" >> "$GITHUB_STEP_SUMMARY"
+            echo "| Contract | Build A | Build B | Match |" >> "$GITHUB_STEP_SUMMARY"
+            echo "| --- | --- | --- | --- |" >> "$GITHUB_STEP_SUMMARY"
+
+            while IFS='  ' read -r hash_a name; do
+              hash_b=$(grep "  ${name}$" /tmp/hashes/build-b.txt | awk '{print $1}')
+              if [ "$hash_a" = "$hash_b" ]; then
+                echo "| \`$name\` | \`${hash_a:0:16}…\` | \`${hash_b:0:16}…\` | ✅ |" \
+                  >> "$GITHUB_STEP_SUMMARY"
+              else
+                echo "| \`$name\` | \`${hash_a:0:16}…\` | \`${hash_b:0:16}…\` | ❌ |" \
+                  >> "$GITHUB_STEP_SUMMARY"
+              fi
+            done < /tmp/hashes/build-a.txt
+
+            echo ""
+            echo "::error::Reproducible build check FAILED — WASM artifacts differ between builds."
+            echo "This usually means the Rust toolchain or build environment introduced non-determinism."
+            echo "If you intentionally changed RUST_VERSION, verify the new output is correct and"
+            echo "update the pinned version in this workflow."
+            exit 1
+          fi
+
+      # Upload both sets of artifacts for manual inspection on failure.
+      - name: Upload WASM artifacts (both builds)
+        if: failure()
+        uses: actions/upload-artifact@v7
+        with:
+          name: reproducible-build-debug-${{ github.sha }}
+          path: |
+            target-a/${{ env.WASM_TARGET }}/release/invofi_*.wasm
+            target-b/${{ env.WASM_TARGET }}/release/invofi_*.wasm
+            /tmp/hashes/
+          retention-days: 7

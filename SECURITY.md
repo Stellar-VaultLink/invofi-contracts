@@ -35,6 +35,15 @@ reproduction steps, affected functions, and any suggested mitigation.
 
 ---
 
+## Threat Model
+
+Before reporting or evaluating a finding, read the [threat model](./docs/threat-model.md):
+assets, trust boundaries, threat actors, per-threat mitigation mappings
+(enforcing function + tests), and explicitly documented tradeoffs about what
+the protocol does **not** protect against.
+
+---
+
 ## What to Report
 
 Smart-contract specific:
