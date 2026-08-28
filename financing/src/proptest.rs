@@ -55,7 +55,7 @@ proptest! {
             &symbol_short!("USD"),
             &interest_rate,
             &duration,
-        );
+         0);
 
         assert_eq!(offer.interest_rate, interest_rate);
         assert_eq!(offer.amount, principal);

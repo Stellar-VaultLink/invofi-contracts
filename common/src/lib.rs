@@ -74,6 +74,9 @@ pub enum ContractError {
 
     /// The caller's address is on the blacklist.
     Blacklisted = 8,
+
+    /// The offer's expiry deadline has passed and it can no longer be accepted.
+    OfferExpired = 9,
 }
 
 // ─── Types ───────────────────────────────────────────────────────────────────
@@ -127,6 +130,9 @@ pub struct FinancingOffer {
     pub interest_rate: u32,
     /// Financing duration in seconds
     pub duration: u64,
+    /// Optional Unix timestamp after which the offer can no longer be accepted.
+    /// `0` means the offer never expires (backward compatible).
+    pub expires_at: u64,
     pub status: OfferStatus,
     /// Unix timestamp when the offer was accepted; 0 if not yet accepted
     pub funded_at: u64,
