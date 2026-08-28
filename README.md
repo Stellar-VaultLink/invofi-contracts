@@ -152,10 +152,10 @@ the frontend's portfolio offers a one-click trustline helper.
 |---|---|---|
 | `__constructor(admin)` | Deployer (at deploy) | Sets admin atomically in the deploy operation (ADR-0005) |
 | `set_recorder(admin, recorder)` | Admin | Set the repayment contract as the only writer |
-| `record_outcome(originator, outcome)` | Recorder only | `0` = repaid, `1` = defaulted; updates outcome counts |
-| `resolve_dispute(admin, originator, originator_favourable)` | Admin | Neutralize one recorded default when a dispute resolves in the originator's favour; emits `rep_chg` with the corrected score (ADR-0004 §7, issue #134) |
-| `get_score(originator)` | Anyone | `repayments − 2×defaults`, floored at 0 (ADR-0004) |
-| `get_record(originator)` | Anyone | Raw `{repayments, defaults}` counts — the source of truth |
+| `record_outcome(originator, outcome)` | Recorder only | `0` = repaid, `1` = defaulted; updates outcome counts and applies pending score decay (issue #139) |
+| `resolve_dispute(admin, originator, originator_favourable)` | Admin | Neutralize one recorded default when a dispute resolves in the originator's favour; applies pending decay and emits `rep_chg` with the corrected score (ADR-0004 §7, issue #134) |
+| `get_score(originator)` | Anyone | Cached decayed score — `weighted_repayments − weighted_defaults`, floored at 0; recomputed on each write (ADR-0004 §3, issue #139) |
+| `get_record(originator)` | Anyone | Raw `{repayments, defaults}` counts plus cumulative weighted values — the source of truth |
 
 ## Protocol Events
 
@@ -192,7 +192,7 @@ Every state-mutating function publishes a Soroban contract event. Topics are
 | `pool_pay` | `pay_out` (insurance) | `amount paid` |
 | `pool_yld` | `unstake` (insurance) | `yield paid` — emitted only when yield > 0 |
 | `reputn` | `record_outcome` (reputation) | `outcome` |
-| `rep_chg` | `resolve_dispute` (reputation) | corrected score — emitted when a dispute resolution neutralizes a default |
+| `rep_chg` | `record_outcome` / `resolve_dispute` (reputation) | score after recomputation — emitted when the stored score changes (issue #139, ADR-0004 §3) |
 
 ---
 
@@ -219,6 +219,7 @@ All contracts emit machine-readable `E_*` error codes (see [docs/error-codes.md]
 | `MAX_VERIFICATION_FEE_BPS` | 500 | Verification fee ceiling (5% of invoice value) |
 | `MAX_VERIFIERS` | 20 | Maximum size of the trusted verifier set |
 | `MAX_ATTESTATIONS_PER_INVOICE` | 60 | Cap on stored attestations per invoice |
+| `DECAY_HALF_LIFE_SECS` | 7,776,000 | Reputation score decay half-life (90 days, issue #139) |
 
 ---
 
@@ -280,7 +281,7 @@ The workflow has **no push or pull_request trigger** — it can only be started 
 - [x] Five auditable contract crates with restricted cross-contract auth
 - [x] SEP-41 token movement — `accept_offer` (lender → business), `repay_invoice` (principal + yield)
 - [x] Position tokens, transferable positions, insurance stake/unstake
-- [x] Insurance payout on default, reputation scoring
+- [x] Insurance payout on default, reputation scoring (with score decay, issue #139)
 - [x] Emergency pause / circuit breaker, full protocol event coverage
 - [x] Deployer-bound `__constructor` initialization (issue #75), CI: tests + clippy + Soroban Scout
 

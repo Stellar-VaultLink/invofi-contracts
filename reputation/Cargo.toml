@@ -11,6 +11,7 @@ crate-type = ["cdylib", "lib"]
 [dependencies]
 soroban-sdk = { workspace = true }
 invofi-common = { path = "../common" }
+libm = "0.2"
 
 [dev-dependencies]
 soroban-sdk = { workspace = true, features = ["testutils"] }
