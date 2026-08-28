@@ -149,7 +149,7 @@ pub enum ContractError {
 
     /// No retained previous executable is available for rollback.
     RollbackUnavailable = 12,
-r
+
     /// The offer has passed its expiration deadline and can no longer be accepted.
     OfferExpired = 13,
 }
