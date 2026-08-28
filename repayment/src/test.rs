@@ -146,6 +146,7 @@ fn test_repay_invoice_partial_then_full() {
         &symbol_short!("USDC"),
         &interest_rate,
         &(2_592_000u64),
+        &0u64,
     );
     fin.accept_offer(&offer_id, &originator);
 
@@ -259,6 +260,7 @@ fn test_repay_invoice_overpayment_panics() {
         &symbol_short!("USDC"),
         &interest_rate,
         &(2_592_000u64),
+        &0u64,
     );
     fin.accept_offer(&symbol_short!("off_op"), &originator);
 
@@ -301,6 +303,7 @@ fn test_repay_unfinanced_invoice_panics() {
         &symbol_short!("USDC"),
         &500u32,
         &(2_592_000u64),
+        &0u64,
     );
     // Offer NOT accepted — invoice stays Pending
     rep.repay_invoice(
@@ -364,6 +367,7 @@ fn test_repay_zero_amount_panics() {
         &symbol_short!("USDC"),
         &500u32,
         &(2_592_000u64),
+        &0u64,
     );
     fin.accept_offer(&symbol_short!("off_za"), &originator);
 
@@ -432,6 +436,7 @@ fn test_reclaim_invoice_after_grace_period() {
         &symbol_short!("USDC"),
         &500u32,
         &(2_592_000u64),
+        &0u64,
     );
     fin.accept_offer(&offer_id, &originator);
 
@@ -506,6 +511,7 @@ fn test_reclaim_before_grace_period_panics() {
         &symbol_short!("USDC"),
         &500u32,
         &(2_592_000u64),
+        &0u64,
     );
     fin.accept_offer(&offer_id, &originator);
 
@@ -569,6 +575,7 @@ fn test_reclaim_on_non_overdue_panics() {
         &symbol_short!("USDC"),
         &500u32,
         &(2_592_000u64),
+        &0u64,
     );
     fin.accept_offer(&symbol_short!("off_nr"), &originator);
 
@@ -629,6 +636,7 @@ fn test_calculate_total_due() {
         &symbol_short!("XLM"),
         &1_000u32, // 10%
         &86_400u64,
+        &0u64,
     );
     fin.accept_offer(&symbol_short!("off_td"), &originator);
 
@@ -693,6 +701,7 @@ fn test_calculate_total_due_after_partial() {
         &symbol_short!("USDC"),
         &interest_rate,
         &(2_592_000u64),
+        &0u64,
     );
     fin.accept_offer(&symbol_short!("off_tp"), &originator);
 
@@ -841,6 +850,7 @@ fn test_pause_blocks_repay_invoice() {
         &symbol_short!("USDC"),
         &500u32,
         &2_592_000u64,
+        &0u64,
     );
     fin.accept_offer(&offer_id, &originator);
 
@@ -988,6 +998,7 @@ fn test_reclaim_triggers_defaulted_payout_and_reputation() {
         &symbol_short!("USDC"),
         &500u32,
         &(2_592_000u64),
+        &0u64,
     );
     fin.accept_offer(&offer_id, &originator);
 
@@ -1083,6 +1094,7 @@ fn test_full_repay_records_reputation_success() {
         &symbol_short!("USDC"),
         &500u32,
         &(2_592_000u64),
+        &0u64,
     );
     fin.accept_offer(&offer_id, &originator);
 
@@ -1135,6 +1147,7 @@ fn test_repayment_get_installment_due_proxy() {
         &symbol_short!("USDC"),
         &500u32,
         &(31_536_000u64),
+        &0u64,
     );
 
     // 4 weekly installments.
@@ -1199,6 +1212,7 @@ fn test_repayment_get_installment_due_zero_after_full_repay() {
         &symbol_short!("USDC"),
         &interest_rate,
         &(31_536_000u64),
+        &0u64,
     );
 
     let first_due = env.ledger().timestamp() + 604_800;
@@ -1314,6 +1328,7 @@ fn setup_penalty_case<'a>(env: &'a Env) -> PenCase<'a> {
         &symbol_short!("USDC"),
         &PEN_RATE,
         &(2_592_000u64),
+        &0u64,
     );
     fin.accept_offer(&symbol_short!("off_pen"), &originator);
 

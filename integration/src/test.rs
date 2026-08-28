@@ -201,6 +201,7 @@ fn test_registry_financing_accept_offer_transitions_invoice() {
         &symbol_short!("USDC"),
         &500u32,
         &2_592_000u64,
+        &0u64,
     );
     assert_eq!(offer.status, OfferStatus::Pending);
 
@@ -249,6 +250,7 @@ fn test_registry_financing_offer_on_financed_invoice_panics() {
         &symbol_short!("USDC"),
         &500u32,
         &86_400u64,
+        &0u64,
     );
 }
 
@@ -295,6 +297,7 @@ fn test_financing_repayment_full_repay_syncs_state() {
         &symbol_short!("USDC"),
         &interest_rate,
         &2_592_000u64,
+        &0u64,
     );
     p.fin.accept_offer(&offer_id, &p.originator);
 
@@ -349,6 +352,7 @@ fn test_financing_repayment_partial_keeps_financed() {
         &symbol_short!("USDC"),
         &500u32,
         &2_592_000u64,
+        &0u64,
     );
     p.fin.accept_offer(&offer_id, &p.originator);
 
@@ -394,6 +398,7 @@ fn test_financing_repayment_on_pending_panics() {
         &symbol_short!("USDC"),
         &500u32,
         &86_400u64,
+        &0u64,
     );
     // Offer NOT accepted — invoice is still Pending.
     p.rep.repay_invoice(
@@ -446,6 +451,7 @@ fn test_repayment_insurance_default_triggers_payout() {
         &symbol_short!("USDC"),
         &500u32,
         &2_592_000u64,
+        &0u64,
     );
     p.fin.accept_offer(&offer_id, &p.originator);
 
@@ -508,6 +514,7 @@ fn test_repayment_insurance_reclaim_before_grace_panics() {
         &symbol_short!("USDC"),
         &500u32,
         &2_592_000u64,
+        &0u64,
     );
     p.fin.accept_offer(&offer_id, &p.originator);
 
@@ -560,6 +567,7 @@ fn test_repayment_reputation_success_on_full_repay() {
         &symbol_short!("USDC"),
         &interest_rate,
         &2_592_000u64,
+        &0u64,
     );
     p.fin.accept_offer(&offer_id, &p.originator);
 
@@ -635,6 +643,7 @@ fn test_repayment_reputation_default_on_reclaim() {
             &symbol_short!("USDC"),
             &500u32,
             &2_592_000u64,
+            &0u64,
         );
         p.fin.accept_offer(&off_id, &p.originator);
 
@@ -672,6 +681,7 @@ fn test_repayment_reputation_default_on_reclaim() {
         &symbol_short!("USDC"),
         &500u32,
         &2_592_000u64,
+        &0u64,
     );
     p.fin.accept_offer(&offer_id, &p.originator);
 
@@ -722,6 +732,7 @@ fn test_registry_repayment_overdue_delegates_to_registry() {
         &symbol_short!("USDC"),
         &500u32,
         &2_592_000u64,
+        &0u64,
     );
     p.fin.accept_offer(&symbol_short!("off_ov"), &p.originator);
 
@@ -796,6 +807,7 @@ fn test_full_lifecycle_register_offer_accept_repay() {
         &symbol_short!("USDC"),
         &interest_rate,
         &1_296_000u64,
+        &0u64,
     );
     assert_eq!(offer.status, OfferStatus::Pending);
     assert_eq!(offer.interest_rate, interest_rate);

@@ -100,6 +100,7 @@ proptest! {
             &symbol_short!("USD"),
             &interest_rate,
             &2_592_000u64,
+            &0u64,
         );
 
         // Mint and approve for lender
@@ -229,7 +230,7 @@ proptest! {
         reg.set_financing_contract(&one(&env, &admin), &financing_id);
 
         reg.register_invoice(&invoice_id, &originator, &principal, &symbol_short!("USD"), &2_000_000u64);
-        fin.create_offer(&offer_id, &invoice_id, &lender, &principal, &symbol_short!("USD"), &interest_rate, &2_592_000u64);
+        fin.create_offer(&offer_id, &invoice_id, &lender, &principal, &symbol_short!("USD"), &interest_rate, &2_592_000u64, &0u64);
         asset_client.mint(&lender, &principal);
         token_client.approve(&lender, &financing_id, &principal, &(env.ledger().sequence() + 1000));
         fin.accept_offer(&offer_id, &originator);
@@ -283,7 +284,7 @@ proptest! {
         reg.set_financing_contract(&one(&env, &admin), &financing_id);
 
         reg.register_invoice(&invoice_id, &originator, &principal, &symbol_short!("USD"), &2_000_000u64);
-        fin.create_offer(&offer_id, &invoice_id, &lender, &principal, &symbol_short!("USD"), &interest_rate, &31_536_000u64);
+        fin.create_offer(&offer_id, &invoice_id, &lender, &principal, &symbol_short!("USD"), &interest_rate, &31_536_000u64, &0u64);
         asset_client.mint(&lender, &principal);
         token_client.approve(&lender, &financing_id, &principal, &(env.ledger().sequence() + 1000));
         fin.accept_offer(&offer_id, &originator);

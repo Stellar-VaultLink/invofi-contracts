@@ -30,7 +30,7 @@ proptest! {
         let invoice_id = symbol_short!("inv_e2e");
         let offer_id = symbol_short!("off_e2e");
         p.reg.register_invoice(&invoice_id, &p.originator, &principal, &symbol_short!("USD"), &2_000_000u64);
-        p.fin.create_offer(&offer_id, &invoice_id, &p.lender, &principal, &symbol_short!("USD"), &interest_rate, &2_592_000u64);
+        p.fin.create_offer(&offer_id, &invoice_id, &p.lender, &principal, &symbol_short!("USD"), &interest_rate, &2_592_000u64, &0u64);
         mint_and_approve(&env, &p.token_id, &p.financing_id, &p.lender, principal);
         p.fin.accept_offer(&offer_id, &p.originator);
 

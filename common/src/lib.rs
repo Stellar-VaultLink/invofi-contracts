@@ -149,6 +149,9 @@ pub enum ContractError {
 
     /// No retained previous executable is available for rollback.
     RollbackUnavailable = 12,
+
+    /// The offer has passed its expiration deadline and can no longer be accepted.
+    OfferExpired = 13,
 }
 
 /// Numeric components of a strict `MAJOR.MINOR.PATCH` version.
@@ -366,6 +369,9 @@ pub struct FinancingOffer {
     pub interest_rate: u32,
     /// Financing duration in seconds
     pub duration: u64,
+    /// Optional Unix timestamp after which the offer can no longer be accepted.
+    /// `0` means the offer never expires (backward compatible).
+    pub expires_at: u64,
     pub status: OfferStatus,
     /// Unix timestamp when the offer was accepted; 0 if not yet accepted
     pub funded_at: u64,

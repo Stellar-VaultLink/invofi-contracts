@@ -356,6 +356,7 @@ impl FinancingContract {
         currency: Symbol,
         interest_rate: u32,
         duration: u64,
+        expires_at: u64,
     ) -> FinancingOffer {
         assert_not_paused(&env);
         lender.require_auth();
@@ -411,6 +412,7 @@ impl FinancingContract {
             currency,
             interest_rate,
             duration,
+            expires_at,
             status: OfferStatus::Pending,
             funded_at: 0,
             amount_repaid: 0,
@@ -485,6 +487,12 @@ impl FinancingContract {
             .unwrap_or_else(|| env.panic_with_error(ContractError::NotFound));
         if offer.status != OfferStatus::Pending {
             env.panic_with_error(ContractError::InvalidTransition);
+        }
+
+        // Reject stale offers whose deadline has passed. An offer with
+        // expires_at == 0 never expires (backward compatible).
+        if offer.expires_at != 0 && env.ledger().timestamp() >= offer.expires_at {
+            env.panic_with_error(ContractError::OfferExpired);
         }
 
         // Cross-contract: read invoice from registry
