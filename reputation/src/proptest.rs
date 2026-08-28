@@ -3,7 +3,7 @@ extern crate std;
 
 use crate::{ReputationContract, OUTCOME_DEFAULTED, OUTCOME_REPAID};
 use proptest::prelude::*;
-use soroban_sdk::{testutils::Address as _, Address, Env};
+use soroban_sdk::{testutils::{Address as _, Ledger as _}, Address, Env};
 
 fn setup(env: &Env) -> (crate::ReputationContractClient<'static>, Address, Address) {
     let admin = Address::generate(env);
@@ -104,5 +104,63 @@ proptest! {
         }
 
         prop_assert_eq!(repu_x.get_score(&originator_x), repu_y.get_score(&originator_y));
+    }
+
+    /// Decay property: a sequence of outcomes recorded at time T and then
+    /// one fresh repayment at T + N*half_life must produce a score ≥ 0
+    /// for any N (issue #139).
+    #[test]
+    fn test_decay_score_nonnegative_with_time_advancement(
+        outcomes in prop::collection::vec(prop::bool::ANY, 1..10),
+        half_lives in 1u64..20u64,
+    ) {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (repu, _admin, _recorder) = setup(&env);
+        let originator = Address::generate(&env);
+
+        env.ledger().set_timestamp(1_000_000);
+        for is_default in &outcomes {
+            let outcome = if *is_default { OUTCOME_DEFAULTED } else { OUTCOME_REPAID };
+            repu.record_outcome(&originator, &outcome);
+        }
+
+        // Advance well into the future.
+        let advance = half_lives * crate::DECAY_HALF_LIFE_SECS;
+        env.ledger().set_timestamp(1_000_000 + advance);
+
+        // Record one fresh repayment to trigger recomputation.
+        repu.record_outcome(&originator, &OUTCOME_REPAID);
+        prop_assert!(repu.get_score(&originator) >= 0, "score must not be negative after decay");
+    }
+
+    /// Fresh outcome has full weight: recording one repayment at time T,
+    /// advancing by N half-lives, then recording one default must produce
+    /// a score that is at least 0 (floor) and never exceeds 1 (the
+    /// repayment has decayed, but the default adds its full −2 weight).
+    #[test]
+    fn test_fresh_default_full_weight_after_decay(
+        half_lives in 1u64..50u64,
+    ) {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (repu, _admin, _recorder) = setup(&env);
+        let originator = Address::generate(&env);
+
+        env.ledger().set_timestamp(1_000_000);
+        repu.record_outcome(&originator, &OUTCOME_REPAID);
+        let before = repu.get_score(&originator);
+        prop_assert_eq!(before, 1);
+
+        // Advance.
+        let advance = half_lives * crate::DECAY_HALF_LIFE_SECS;
+        env.ledger().set_timestamp(1_000_000 + advance);
+
+        // Fresh default at full weight (−2).
+        repu.record_outcome(&originator, &OUTCOME_DEFAULTED);
+        let after = repu.get_score(&originator);
+        prop_assert!(after >= 0, "score must floor at 0, got {after}");
+        // The old repayment has decayed but the fresh default has full weight.
+        prop_assert!(after <= 1, "fresh default should overwhelm decayed repayment, got {after}");
     }
 }

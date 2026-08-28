@@ -28,15 +28,39 @@ raw counts into a simple, transparent, publicly-readable score.
    (`get_record`) is public so any richer off-chain model can be computed
    from the same source data.
 
+   **Score decay (issue #139):** outcomes older than the configured
+   half-life (`DECAY_HALF_LIFE_SECS`, default 90 days) contribute less
+   via exponential decay. The cumulative weighted values
+   (`weighted_repayments`, `weighted_defaults`) are recomputed on each
+   `record_outcome` or `resolve_dispute` call: pending decay is applied
+   first (scaling existing values by `2^(-elapsed / half_life)`), then
+   the new outcome is added at full weight. `get_score` reads the cached
+   recomputed value in O(1). A `ReputationChanged` event (`rep_chg`) is
+   emitted whenever the recomputation changes the stored score.
+
+   Key properties:
+   - **Fresh outcomes hit immediately** — a new default contributes its
+     full −2 weight with no gaming window.
+   - **Old outcomes decay** — an originator's one old default weighs less
+     after months of clean repayment.
+   - **Score floor at 0 is preserved** — decayed scores are still floored.
+   - **Cheap reads** — `get_score` returns the cached value, no
+     recomputation on read.
+   - **Dispute resolution applies pending decay** — when a default is
+     neutralized, the cumulative values are decayed first, then the
+     default's weight is removed.
+
 4. **Reading: no auth.** `get_score` / `get_record` are callable by anyone
    — the frontend can display a score without signing.
 
 5. **Pause-guarded writes.** `record_outcome` checks the shared pause flag.
 
-6. **Explicitly deferred (follow-up issue):** an amount-weighted or
-   recency-decayed model, and migration of existing on-chain history into a
-   new formula. The public `get_record` API makes a future re-scoring safe
-   — scores are derived, raw outcomes remain the source of truth.
+6. **Fully-weighted historical model (deferred follow-up):** a richer
+   amount-weighted model that considers invoice sizes is tracked as a
+   separate follow-up issue. The public `get_record` API makes a future
+   re-scoring safe — scores are derived, raw outcomes remain the source
+   of truth. Score decay (issue #139) is now implemented as the
+   recency-decayed model.
 
 7. **Dispute-aware adjustment (issue #134):** a default that a dispute
    later overturns must not keep punishing the originator. Because the

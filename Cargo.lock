@@ -834,6 +834,7 @@ name = "invofi-reputation"
 version = "0.7.0"
 dependencies = [
  "invofi-common",
+ "libm",
  "proptest",
  "soroban-sdk",
 ]
