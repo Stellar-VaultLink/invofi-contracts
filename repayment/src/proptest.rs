@@ -100,7 +100,8 @@ proptest! {
             &symbol_short!("USD"),
             &interest_rate,
             &2_592_000u64,
-         0);
+            &0u64,
+        );
 
         // Mint and approve for lender
         asset_client.mint(&lender, &principal);

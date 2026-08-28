@@ -146,7 +146,8 @@ fn test_repay_invoice_partial_then_full() {
         &symbol_short!("USDC"),
         &interest_rate,
         &(2_592_000u64),
-     0);
+        &0u64,
+    );
     fin.accept_offer(&offer_id, &originator);
 
     // Advance 1 day to accrue pro-rata interest.
@@ -259,7 +260,8 @@ fn test_repay_invoice_overpayment_panics() {
         &symbol_short!("USDC"),
         &interest_rate,
         &(2_592_000u64),
-     0);
+        &0u64,
+    );
     fin.accept_offer(&symbol_short!("off_op"), &originator);
 
     let asset_client = token::StellarAssetClient::new(&env, &token_id);
@@ -301,7 +303,8 @@ fn test_repay_unfinanced_invoice_panics() {
         &symbol_short!("USDC"),
         &500u32,
         &(2_592_000u64),
-     0);
+        &0u64,
+    );
     // Offer NOT accepted — invoice stays Pending
     rep.repay_invoice(
         &symbol_short!("inv_uf"),
@@ -364,7 +367,8 @@ fn test_repay_zero_amount_panics() {
         &symbol_short!("USDC"),
         &500u32,
         &(2_592_000u64),
-     0);
+        &0u64,
+    );
     fin.accept_offer(&symbol_short!("off_za"), &originator);
 
     rep.repay_invoice(
@@ -432,7 +436,8 @@ fn test_reclaim_invoice_after_grace_period() {
         &symbol_short!("USDC"),
         &500u32,
         &(2_592_000u64),
-     0);
+        &0u64,
+    );
     fin.accept_offer(&offer_id, &originator);
 
     // Move past due_date + grace period
@@ -506,7 +511,8 @@ fn test_reclaim_before_grace_period_panics() {
         &symbol_short!("USDC"),
         &500u32,
         &(2_592_000u64),
-     0);
+        &0u64,
+    );
     fin.accept_offer(&offer_id, &originator);
 
     // Just past due_date, but not past grace period
@@ -569,7 +575,8 @@ fn test_reclaim_on_non_overdue_panics() {
         &symbol_short!("USDC"),
         &500u32,
         &(2_592_000u64),
-     0);
+        &0u64,
+    );
     fin.accept_offer(&symbol_short!("off_nr"), &originator);
 
     // Invoice is Financed, not Overdue — should panic
@@ -629,7 +636,8 @@ fn test_calculate_total_due() {
         &symbol_short!("XLM"),
         &1_000u32, // 10%
         &86_400u64,
-     0);
+        &0u64,
+    );
     fin.accept_offer(&symbol_short!("off_td"), &originator);
 
     // Advance 365 days so pro-rata interest = principal * rate * 365 / 3_650_000
@@ -693,7 +701,8 @@ fn test_calculate_total_due_after_partial() {
         &symbol_short!("USDC"),
         &interest_rate,
         &(2_592_000u64),
-     0);
+        &0u64,
+    );
     fin.accept_offer(&symbol_short!("off_tp"), &originator);
 
     // Advance 365 days so pro-rata interest = 1_000_000_000 * 500 * 365 / 3_650_000 = 50_000_000
@@ -841,7 +850,8 @@ fn test_pause_blocks_repay_invoice() {
         &symbol_short!("USDC"),
         &500u32,
         &2_592_000u64,
-     0);
+        &0u64,
+    );
     fin.accept_offer(&offer_id, &originator);
 
     rep.pause(&one(&env, &admin));
@@ -988,7 +998,8 @@ fn test_reclaim_triggers_defaulted_payout_and_reputation() {
         &symbol_short!("USDC"),
         &500u32,
         &(2_592_000u64),
-     0);
+        &0u64,
+    );
     fin.accept_offer(&offer_id, &originator);
 
     // Past due + grace period, then mark overdue.
@@ -1083,7 +1094,8 @@ fn test_full_repay_records_reputation_success() {
         &symbol_short!("USDC"),
         &500u32,
         &(2_592_000u64),
-     0);
+        &0u64,
+    );
     fin.accept_offer(&offer_id, &originator);
 
     // Advance 365 days so pro-rata interest = 50_000_000 (matches flat yield).
@@ -1135,7 +1147,8 @@ fn test_repayment_get_installment_due_proxy() {
         &symbol_short!("USDC"),
         &500u32,
         &(31_536_000u64),
-     0);
+        &0u64,
+    );
 
     // 4 weekly installments.
     // installment_principal = 1_200_000_000 / 4 = 300_000_000
@@ -1199,7 +1212,8 @@ fn test_repayment_get_installment_due_zero_after_full_repay() {
         &symbol_short!("USDC"),
         &interest_rate,
         &(31_536_000u64),
-     0);
+        &0u64,
+    );
 
     let first_due = env.ledger().timestamp() + 604_800;
     fin.schedule_repayment(
@@ -1314,7 +1328,8 @@ fn setup_penalty_case<'a>(env: &'a Env) -> PenCase<'a> {
         &symbol_short!("USDC"),
         &PEN_RATE,
         &(2_592_000u64),
-     0);
+        &0u64,
+    );
     fin.accept_offer(&symbol_short!("off_pen"), &originator);
 
     // Fund the originator beyond the capped worst case.

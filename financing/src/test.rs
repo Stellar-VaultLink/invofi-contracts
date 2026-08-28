@@ -96,7 +96,8 @@ fn test_create_and_get_offer() {
         &symbol_short!("USDC"),
         &500u32,
         &(2_592_000u64),
-     0);
+        &0u64,
+    );
 
     assert_eq!(offer.id, offer_id);
     assert_eq!(offer.invoice_id, invoice_id);
@@ -136,7 +137,8 @@ fn test_create_offer_zero_amount() {
         &symbol_short!("USDC"),
         &500u32,
         &86_400u64,
-     0);
+        &0u64,
+    );
 }
 
 #[test]
@@ -167,7 +169,8 @@ fn test_create_offer_interest_rate_too_high_panics() {
         &symbol_short!("USDC"),
         &10_001u32,
         &86_400u64,
-     0);
+        &0u64,
+    );
 }
 
 #[test]
@@ -229,7 +232,8 @@ fn test_create_offer_short_duration_panics() {
         &symbol_short!("USDC"),
         &500u32,
         &3_600u64,
-     0);
+        &0u64,
+    );
 }
 
 #[test]
@@ -260,7 +264,8 @@ fn test_max_offer_duration_rejected() {
         &symbol_short!("USDC"),
         &500_u32,
         &31_622_400_u64,
-     0);
+        &0u64,
+    );
 }
 
 #[test]
@@ -290,12 +295,13 @@ fn test_create_offer_self_dealing_panics() {
         &symbol_short!("USDC"),
         &500u32,
         &86_400u64,
-     0);
+        &0u64,
+    );
 }
 
 #[test]
 #[should_panic(expected = "Error(Contract, #8)")]
-fn test_blacklisted_cannot_create_offer(, 0) {
+fn test_blacklisted_cannot_create_offer() {
     let env = Env::default();
     env.mock_all_auths();
     env.ledger().set_timestamp(1_000_000);
@@ -322,7 +328,8 @@ fn test_blacklisted_cannot_create_offer(, 0) {
         &symbol_short!("XLM"),
         &200u32,
         &86_400u64,
-     0);
+        &0u64,
+    );
 }
 
 // ─── Accept / Reject tests ──────────────────────────────────────────────────
@@ -368,7 +375,8 @@ fn test_accept_offer() {
         &symbol_short!("USDC"),
         &300u32,
         &(1_296_000u64),
-     0);
+        &0u64,
+    );
 
     let accepted = fin.accept_offer(&offer_id, &originator);
     assert_eq!(accepted.status, OfferStatus::Accepted);
@@ -438,7 +446,7 @@ fn test_accept_offer_before_expiry_succeeds() {
     );
     let fin = super::FinancingContractClient::new(&env, &financing_id);
 
-    reg.set_financing_contract(&admin, &financing_id);
+    reg.set_financing_contract(&one(&env, &admin), &financing_id);
     mint_and_approve(&env, &token_id, &financing_id, &lender, amount);
 
     reg.register_invoice(
@@ -490,7 +498,7 @@ fn test_accept_offer_after_expiry_panics() {
     );
     let fin = super::FinancingContractClient::new(&env, &financing_id);
 
-    reg.set_financing_contract(&admin, &financing_id);
+    reg.set_financing_contract(&one(&env, &admin), &financing_id);
     mint_and_approve(&env, &token_id, &financing_id, &lender, amount);
 
     reg.register_invoice(
@@ -540,7 +548,7 @@ fn test_accept_offer_at_expiry_boundary_panics() {
     );
     let fin = super::FinancingContractClient::new(&env, &financing_id);
 
-    reg.set_financing_contract(&admin, &financing_id);
+    reg.set_financing_contract(&one(&env, &admin), &financing_id);
     mint_and_approve(&env, &token_id, &financing_id, &lender, amount);
 
     reg.register_invoice(
@@ -596,7 +604,8 @@ fn test_reject_offer() {
         &symbol_short!("XLM"),
         &200u32,
         &(864_000u64),
-     0);
+        &0u64,
+    );
 
     let rejected = fin.reject_offer(&offer_id, &originator);
     assert_eq!(rejected.status, OfferStatus::Rejected);
@@ -632,7 +641,8 @@ fn test_withdraw_offer() {
         &symbol_short!("USDC"),
         &300u32,
         &86_400u64,
-     0);
+        &0u64,
+    );
 
     let withdrawn = fin.withdraw_offer(&symbol_short!("off_w1"), &lender);
     assert_eq!(withdrawn.status, OfferStatus::Rejected);
@@ -667,7 +677,8 @@ fn test_withdraw_offer_wrong_lender_panics() {
         &symbol_short!("USDC"),
         &300u32,
         &86_400u64,
-     0);
+        &0u64,
+    );
     fin.withdraw_offer(&symbol_short!("off_w2"), &other);
 }
 
@@ -700,7 +711,8 @@ fn test_get_offers_by_invoice() {
         &symbol_short!("USDC"),
         &300u32,
         &86_400u64,
-     0);
+        &0u64,
+    );
     fin.create_offer(
         &symbol_short!("off_g1b"),
         &symbol_short!("inv_g1"),
@@ -709,7 +721,8 @@ fn test_get_offers_by_invoice() {
         &symbol_short!("USDC"),
         &400u32,
         &86_400u64,
-     0);
+        &0u64,
+    );
 
     let offers = fin.get_offers_by_invoice(&symbol_short!("inv_g1"));
     assert_eq!(offers.len(), 2);
@@ -743,7 +756,8 @@ fn test_get_offers_by_lender() {
         &symbol_short!("XLM"),
         &200u32,
         &86_400u64,
-     0);
+        &0u64,
+    );
     fin.create_offer(
         &symbol_short!("off_l2"),
         &symbol_short!("inv_l1"),
@@ -752,7 +766,8 @@ fn test_get_offers_by_lender() {
         &symbol_short!("XLM"),
         &300u32,
         &86_400u64,
-     0);
+        &0u64,
+    );
 
     let lender_offers = fin.get_offers_by_lender(&lender);
     assert_eq!(lender_offers.len(), 1);
@@ -788,7 +803,8 @@ fn test_get_offers_count() {
         &symbol_short!("USDC"),
         &300_u32,
         &86_400_u64,
-     0);
+        &0u64,
+    );
     assert_eq!(fin.get_offers_count(), 1);
 }
 
@@ -819,7 +835,8 @@ fn test_get_offers_by_status_filters_correctly() {
         &symbol_short!("USDC"),
         &300u32,
         &86_400u64,
-     0);
+        &0u64,
+    );
     fin.create_offer(
         &symbol_short!("off2"),
         &symbol_short!("inv1"),
@@ -828,7 +845,8 @@ fn test_get_offers_by_status_filters_correctly() {
         &symbol_short!("USDC"),
         &400u32,
         &86_400u64,
-     0);
+        &0u64,
+    );
 
     let pending = fin.get_offers_by_status(&OfferStatus::Pending);
     assert_eq!(pending.len(), 2);
@@ -867,7 +885,8 @@ fn test_get_pending_offers_by_invoice_excludes_rejected() {
         &symbol_short!("USDC"),
         &300u32,
         &86_400u64,
-     0);
+        &0u64,
+    );
     fin.create_offer(
         &symbol_short!("off2"),
         &symbol_short!("inv1"),
@@ -876,7 +895,8 @@ fn test_get_pending_offers_by_invoice_excludes_rejected() {
         &symbol_short!("USDC"),
         &250u32,
         &86_400u64,
-     0);
+        &0u64,
+    );
 
     let pending = fin.get_pending_offers_by_invoice(&symbol_short!("inv1"));
     assert_eq!(pending.len(), 2);
@@ -917,7 +937,8 @@ fn test_get_offers_paginated() {
             &symbol_short!("USDC"),
             &rate,
             &86_400u64,
-         0);
+            &0u64,
+    );
     }
 
     let page1 = fin.get_offers_paginated(&0_u32, &2_u32);
@@ -959,7 +980,8 @@ fn test_update_offer_status_and_amount_repaid() {
         &symbol_short!("USDC"),
         &300u32,
         &86_400u64,
-     0);
+        &0u64,
+    );
 
     // Register a fake repayment contract (auth is mocked)
     let repayment_id = env.register(
@@ -1008,7 +1030,8 @@ fn test_update_lender_stats_repaid() {
         &symbol_short!("USDC"),
         &300u32,
         &86_400u64,
-     0);
+        &0u64,
+    );
 
     let stats_before = fin.get_lender_stats(&lender);
     assert_eq!(stats_before.offers_repaid, 0);
@@ -1148,7 +1171,7 @@ fn test_financing_set_signers_requires_threshold() {
 
 #[test]
 #[should_panic(expected = "Error(Contract, #4)")]
-fn test_pause_blocks_create_offer(, 0) {
+fn test_pause_blocks_create_offer() {
     let env = Env::default();
     env.mock_all_auths();
     env.ledger().set_timestamp(1_000_000);
@@ -1177,7 +1200,8 @@ fn test_pause_blocks_create_offer(, 0) {
         &symbol_short!("USDC"),
         &500u32,
         &2_592_000u64,
-     0);
+        &0u64,
+    );
 }
 
 #[test]
@@ -1212,7 +1236,8 @@ fn test_pause_blocks_all_financing_state_changes() {
             &symbol_short!("USDC"),
             &500u32,
             &86_400u64,
-         0);
+            &0u64,
+    );
     });
     assert_paused(|| {
         fin.withdraw_offer(&symbol_short!("offx2"), &lender);
@@ -1306,7 +1331,8 @@ fn test_accept_offer_mints_position_token() {
         &symbol_short!("USDC"),
         &300u32,
         &1_296_000u64,
-     0);
+        &0u64,
+    );
 
     fin.accept_offer(&offer_id, &originator);
 
@@ -1363,7 +1389,8 @@ fn test_accept_offer_without_position_token_still_works() {
         &symbol_short!("USDC"),
         &300u32,
         &1_296_000u64,
-     0);
+        &0u64,
+    );
 
     let accepted = fin.accept_offer(&offer_id, &originator);
     assert_eq!(accepted.status, OfferStatus::Accepted);
@@ -1405,7 +1432,8 @@ fn setup_offer_for_schedule<'a>(
         &symbol_short!("USDC"),
         &500u32, // 5.00% per installment slice
         &(31_536_000u64),
-     0);
+        &0u64,
+    );
 
     (reg, fin, originator, lender)
 }
