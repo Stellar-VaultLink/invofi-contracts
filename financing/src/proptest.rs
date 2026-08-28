@@ -106,12 +106,12 @@ proptest! {
             // Over the invoice amount must be rejected.
             let over = invoice_amount + overshoot;
             let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                fin.create_offer(&symbol_short!("off_over"), &invoice_id, &lender, &over, &symbol_short!("USD"), &500u32, &604_800u64)
+                fin.create_offer(&symbol_short!("off_over"), &invoice_id, &lender, &over, &symbol_short!("USD"), &500u32, &604_800u64, &0u64)
             }));
             prop_assert!(result.is_err(), "offer above invoice amount must be rejected");
 
             // Exactly the invoice amount must succeed.
-            let offer = fin.create_offer(&symbol_short!("off_ok"), &invoice_id, &lender, &invoice_amount, &symbol_short!("USD"), &500u32, &604_800u64);
+            let offer = fin.create_offer(&symbol_short!("off_ok"), &invoice_id, &lender, &invoice_amount, &symbol_short!("USD"), &500u32, &604_800u64, &0u64);
             prop_assert_eq!(offer.amount, invoice_amount);
         }
 
@@ -143,8 +143,8 @@ proptest! {
             reg.register_invoice(&invoice_id, &originator, &principal, &symbol_short!("USD"), &2_000_000u64);
 
             let half = principal / 2;
-            fin.create_offer(&symbol_short!("off_a"), &invoice_id, &lender_a, &half, &symbol_short!("USD"), &500u32, &604_800u64);
-            fin.create_offer(&symbol_short!("off_b"), &invoice_id, &lender_b, &half, &symbol_short!("USD"), &500u32, &604_800u64);
+            fin.create_offer(&symbol_short!("off_a"), &invoice_id, &lender_a, &half, &symbol_short!("USD"), &500u32, &604_800u64, &0u64);
+            fin.create_offer(&symbol_short!("off_b"), &invoice_id, &lender_b, &half, &symbol_short!("USD"), &500u32, &604_800u64, &0u64);
 
             // Fund lender_a and accept their offer.
             let asset_client = soroban_sdk::token::StellarAssetClient::new(&env, &token_id);
@@ -199,7 +199,7 @@ proptest! {
                 let inv_id = soroban_sdk::Symbol::new(&env, &std::format!("inv{}", i));
                 let off_id = soroban_sdk::Symbol::new(&env, &std::format!("off{}", i));
                 reg.register_invoice(&inv_id, &originator, amount, &symbol_short!("USD"), &2_000_000u64);
-                fin.create_offer(&off_id, &inv_id, &lender, amount, &symbol_short!("USD"), &500u32, &604_800u64);
+                fin.create_offer(&off_id, &inv_id, &lender, amount, &symbol_short!("USD"), &500u32, &604_800u64, &0u64);
                 asset_client.mint(&lender, amount);
                 token_client.approve(&lender, &financing_id, amount, &(env.ledger().sequence() + 1000));
                 fin.accept_offer(&off_id, &originator);
@@ -241,7 +241,7 @@ proptest! {
             reg.register_invoice(&invoice_id, &originator, &principal, &symbol_short!("USD"), &2_000_000u64);
 
             let offer_id = symbol_short!("off_wd");
-            fin.create_offer(&offer_id, &invoice_id, &lender, &principal, &symbol_short!("USD"), &500u32, &604_800u64);
+            fin.create_offer(&offer_id, &invoice_id, &lender, &principal, &symbol_short!("USD"), &500u32, &604_800u64, &0u64);
             fin.withdraw_offer(&offer_id, &lender);
 
             prop_assert_eq!(pos_client.balance(&lender), 0);
@@ -286,6 +286,7 @@ proptest! {
             &symbol_short!("USD"),
             &valid_rate,
             &duration,
+            &0u64,
         );
         prop_assert_eq!(offer.interest_rate, valid_rate);
 
@@ -300,13 +301,14 @@ proptest! {
                 &symbol_short!("USD"),
                 &over_rate,
                 &duration,
+                &0u64,
             );
         }));
         prop_assert!(result.is_err(), "create_offer: rate {} above cap must be rejected", over_rate);
 
         // ── 3. amend_offer with rate = MAX + 1 must be rejected ─────────────
         let offer_id = symbol_short!("off_amd");
-        fin.create_offer(&offer_id, &invoice_id, &lender, &principal, &symbol_short!("USD"), &valid_rate, &duration);
+        fin.create_offer(&offer_id, &invoice_id, &lender, &principal, &symbol_short!("USD"), &valid_rate, &duration, &0u64);
         let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             fin.amend_offer(&offer_id, &lender, &0u32, &principal, &over_rate, &duration);
         }));

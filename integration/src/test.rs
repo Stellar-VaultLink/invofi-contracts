@@ -643,6 +643,7 @@ fn test_repayment_reputation_default_on_reclaim() {
             &symbol_short!("USDC"),
             &500u32,
             &2_592_000u64,
+            &0u64,
         );
         p.fin.accept_offer(&off_id, &p.originator);
 

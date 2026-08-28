@@ -200,6 +200,7 @@ fn test_create_offer_interest_rate_at_cap_passes() {
         &symbol_short!("USDC"),
         &invofi_common::MAX_INTEREST_BPS,
         &86_400u64,
+        &0u64,
     );
     assert_eq!(offer.interest_rate, invofi_common::MAX_INTEREST_BPS);
 }
@@ -1877,6 +1878,7 @@ fn setup_negotiation<'a>(
         &symbol_short!("USDC"),
         &500u32,
         &(1_296_000u64),
+        &0u64,
     );
 
     (reg, fin, admin, originator, lender, token_id)
