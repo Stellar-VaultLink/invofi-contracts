@@ -8,6 +8,7 @@ on:
 
 permissions:
   contents: read
+  pull-requests: write
 
 jobs:
   test:
@@ -19,11 +20,71 @@ jobs:
         with:
           targets: wasm32-unknown-unknown,wasm32v1-none
       - uses: Swatinem/rust-cache@v2
+      - name: Install cargo-nextest
+        uses: taiki-e/install-action@v2
+        with:
+          tool: nextest
       - name: Run tests
-        # .cargo/config.toml defaults to wasm32v1-none; override to the host
-        # so tests actually compile and execute on the runner.
+        # .cargo/config.toml may pin a WASM target; override to the host so
+        # tests actually compile and execute on the runner. nextest runs the
+        # same assertions as `cargo test`, in parallel.
         run: |
-          PROPTEST_CASES=2000 cargo test --target "$(rustc -vV | sed -n 's/^host: //p')" -- --nocapture
+          HOST="$(rustc -vV | sed -n 's/^host: //p')"
+          PROPTEST_CASES=2000 cargo nextest run --target "$HOST" --no-capture
+
+  coverage:
+    name: Coverage
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: llvm-tools-preview
+          targets: wasm32-unknown-unknown,wasm32v1-none
+      - uses: Swatinem/rust-cache@v2
+      - name: Install cargo-llvm-cov and nextest
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-llvm-cov,nextest
+      - name: Collect coverage
+        # Soft gate only: regressions on touched crates emit warnings /
+        # PR comments; the job itself stays green (no repo-wide % hard gate).
+        # Emit LCOV in the same invocation as the tests — splitting into
+        # `--no-report` + `report` fails when `--target` is set.
+        run: |
+          HOST="$(rustc -vV | sed -n 's/^host: //p')"
+          PROPTEST_CASES=2000 cargo llvm-cov nextest \
+            --workspace \
+            --target "$HOST" \
+            --lcov \
+            --output-path lcov.info \
+            --summary-only \
+            | tee coverage-summary.txt
+          # JSON summary is optional; LCOV drives the soft regression check.
+          cargo llvm-cov report --json --summary-only --output-path coverage-summary.json \
+            || echo "Note: JSON summary unavailable; continuing with LCOV"
+      - name: Per-crate summary + soft regression check
+        id: coverage_check
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: bash scripts/check-coverage-regression.sh
+      - name: Upload LCOV to Codecov
+        uses: codecov/codecov-action@v7
+        with:
+          files: lcov.info
+          fail_ci_if_error: false
+          token: ${{ secrets.CODECOV_TOKEN }}
+      - name: Upload coverage artifacts
+        uses: actions/upload-artifact@v7
+        with:
+          name: coverage-report
+          path: |
+            lcov.info
+            coverage-summary.json
+            coverage-summary.txt
+          retention-days: 30
 
   build:
     name: Build WASM

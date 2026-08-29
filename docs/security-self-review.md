@@ -149,7 +149,10 @@ Three hardening follow-ups are noted for the audit phase (§7).
    (persist `Accepted` before the external transfer) once the token
    contract is itself audited — currently protected by allowance
    consumption, but the reorder removes reliance on that property.
-2. Cap `interest_rate` at a documented maximum (e.g. `MAX_INTEREST_BPS`) in
+2. ~~Cap `interest_rate` at a documented maximum (e.g. `MAX_INTEREST_BPS`) in
    `create_offer` to bound `yield_amount` arithmetic from input, not just
-   overflow-checks.
+   overflow-checks.~~ **DONE** — `MAX_INTEREST_BPS` (10 000 bps = 100%) is
+   enforced on all three term-setting entrypoints: `create_offer` (inline
+   assertion), `amend_offer`, and `counter_offer` (via `assert_terms_valid`).
+   Proptest confirms the cap holds across random inputs.
 3. Mainnet must be preceded by the SCF Audit Bank (or equivalent) audit.

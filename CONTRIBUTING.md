@@ -34,14 +34,42 @@ stellar contract build
 
 ### Test
 
+CI runs the suite with [cargo-nextest](https://nexte.st/) (parallel, same assertions as `cargo test`). Locally you can use either:
+
 ```bash
-cargo test
+# Fast parallel runner (preferred; matches CI)
+cargo nextest run --target "$(rustc -vV | sed -n 's/^host: //p')"
+
+# Classic serial runner
+cargo test --target "$(rustc -vV | sed -n 's/^host: //p')"
 ```
+
+Install nextest once with `cargo install cargo-nextest --locked`, or on Windows grab the [pre-built binary](https://get.nexte.st/).
+
+Property tests use fewer cases locally by default; CI sets `PROPTEST_CASES=2000`. Override locally when needed:
+
+```bash
+PROPTEST_CASES=2000 cargo nextest run --target "$(rustc -vV | sed -n 's/^host: //p')"
+```
+
+### Coverage
+
+We collect line coverage with [cargo-llvm-cov](https://github.com/taiki-e/cargo-llvm-cov) wrapping nextest (LLVM instrumentation — the modern alternative to tarpaulin/grcov).
+
+```bash
+# One-time: rustup component add llvm-tools-preview
+#           cargo install cargo-llvm-cov cargo-nextest --locked
+bash scripts/coverage.sh
+```
+
+HTML output lands in `coverage/local/html/`. Per-crate floors live in [`coverage/baseline.json`](./coverage/baseline.json) and are shown on the README badge via [`coverage/badge.json`](./coverage/badge.json).
+
+**Soft PR policy:** changing a crate must not reduce that crate’s line coverage vs the baseline. CI posts a comment / `::warning::` annotation on regressions but does **not** fail the job yet, and there is no repo-wide percentage hard gate. See [`coverage/README.md`](./coverage/README.md).
 
 ### Lint
 
 ```bash
-cargo clippy -- -D warnings
+cargo clippy --target wasm32v1-none -- -D warnings
 ```
 
 ### Check contract size

@@ -1,0 +1,40 @@
+rust-contract:
+  - changed-files:
+    - any-glob-to-any-file:
+      - '**/src/lib.rs'
+      - '**/src/test.rs'
+      - '**/src/storage.rs'
+
+testing:
+  - changed-files:
+    - any-glob-to-any-file:
+      - '**/test.rs'
+      - '**/tests/**'
+
+docs:
+  - changed-files:
+    - any-glob-to-any-file:
+      - 'docs/**'
+      - '**/*.md'
+      - 'CHANGELOG.md'
+
+ci:
+  - changed-files:
+    - any-glob-to-any-file:
+      - '.github/workflows/**'
+
+security:
+  - changed-files:
+    - any-glob-to-any-file:
+      - '**/common/src/**'
+
+dependencies:
+  - changed-files:
+    - any-glob-to-any-file:
+      - '**/Cargo.toml'
+      - '**/Cargo.lock'
+
+infra:
+  - changed-files:
+    - any-glob-to-any-file:
+      - 'scripts/**'

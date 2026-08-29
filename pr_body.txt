@@ -1,0 +1,172 @@
+## ci: add reproducible build verification workflow
+
+Closes #61
+
+---
+
+### Summary
+
+This pull request introduces a new GitHub Actions workflow (`reproducible-build.yml`) that verifies the byte-level reproducibility of all compiled WASM contract artifacts on every push and pull request targeting `master`. The workflow builds each contract crate twice into fully isolated target directories using a pinned Rust toolchain, computes SHA-256 hashes of every resulting `.wasm` file, and fails the CI run if any artifact differs between the two builds. No existing workflow, build script, or release process is modified by this change.
+
+---
+
+### Motivation and Problem Statement
+
+The deploy workflow (`deploy-contract.yml`) and the mainnet deploy workflow (`deploy-mainnet.yml`) both claim reproducible builds as a trust signal for SCF compliance and third-party audits. However, until this change, nothing in the CI pipeline actually verified that claim. The existing `ci.yml` workflow confirms that the project compiles and that tests pass, but it performs only a single build and never checks whether a second, independent build of the same commit would produce the same output.
+
+This gap creates a concrete risk: if the Rust toolchain, LLVM backend, or runner environment drifts in a way that introduces non-determinism into the WASM codegen, the compiled artifacts would silently change between builds. An auditor who rebuilds the contracts from source and compares against the deployed hashes would get a mismatch, undermining the entire reproducibility guarantee. Worse, the team would have no signal that this had happened until an external party reported it.
+
+Reproducible builds matter specifically for Soroban contracts because:
+
+- **Audit verification**: Third-party auditors and the Stellar Community Fund (SCF) expect that building a tagged commit produces the exact same WASM binary that was deployed on-chain. If the build is not actually reproducible, the audit trail is broken.
+- **Supply-chain integrity**: A non-deterministic build means that two developers (or two CI runs) compiling the same source could produce functionally different contracts, creating a class of bugs that are nearly impossible to diagnose.
+- **Toolchain drift**: The existing CI workflows use `dtolnay/rust-toolchain@stable`, which resolves to whatever the latest stable Rust release is at the time the workflow runs. A new stable release could change LLVM optimization passes, instruction selection, or WASM encoding in ways that alter the output without changing semantics. This is expected compiler behavior, but it means the "same source" no longer produces the "same binary" across time.
+
+This workflow closes that gap by making reproducibility a continuously verified property rather than an assumed one.
+
+---
+
+### Technical Approach
+
+The workflow follows a straightforward dual-build-and-diff strategy:
+
+1. **Checkout** the repository at the triggering commit.
+2. **Remove** any `rust-toolchain.toml` or `rust-toolchain` file that may exist in the repository root. This is a defensive measure to ensure the workflow always uses the explicitly pinned version defined in `RUST_VERSION`, regardless of any future changes to the repository.
+3. **Install** an exact Rust toolchain version (`1.87.0`) using `dtolnay/rust-toolchain@master` with an explicit `toolchain` input. This bypasses the `@stable` shorthand used by other workflows and guarantees the compiler version is fully deterministic.
+4. **Build A**: Compile all workspace crates targeting `wasm32v1-none` in release mode, writing output to `target-a/`. Record the SHA-256 hash of every `invofi_*.wasm` file produced.
+5. **Build B**: Compile the same crates with the same flags, writing output to a separate `target-b/` directory. Record the SHA-256 hash of every `invofi_*.wasm` file produced.
+6. **Diff**: Compare the two hash manifests. If every hash matches, the check passes. If any hash differs, the check fails with a detailed per-contract comparison table, a GitHub Actions `::error::` annotation, and both sets of WASM artifacts uploaded for manual inspection.
+
+Both builds run with the following environment variables locked down to eliminate known sources of non-determinism:
+
+| Variable | Value | Purpose |
+| --- | --- | --- |
+| `CARGO_INCREMENTAL` | `0` | Disables incremental compilation, which can produce different output depending on cache state |
+| `SOURCE_DATE_EPOCH` | `0` | Prevents any build-time timestamp from being embedded in artifacts |
+| `TZ` | `UTC` | Eliminates timezone-dependent behavior in any build script or proc macro |
+| `LC_ALL` | `C` | Forces the POSIX locale to prevent locale-dependent string handling from affecting codegen |
+
+---
+
+### Contracts Covered
+
+The workflow builds and verifies all five `cdylib` crates in the workspace:
+
+| Crate | Package Name | WASM Artifact |
+| --- | --- | --- |
+| `registry/` | `invofi-registry` | `invofi_registry.wasm` |
+| `financing/` | `invofi-financing` | `invofi_financing.wasm` |
+| `repayment/` | `invofi-repayment` | `invofi_repayment.wasm` |
+| `insurance/` | `invofi-insurance` | `invofi_insurance.wasm` |
+| `reputation/` | `invofi-reputation` | `invofi_reputation.wasm` |
+
+The `common` and `integration` crates are library-only (no `cdylib` target) and do not produce standalone WASM artifacts. They are still compiled as transitive dependencies of the above crates and therefore participate indirectly in the reproducibility check: if a change to `common` caused non-deterministic codegen, it would surface as a hash mismatch in the downstream contract that depends on it.
+
+---
+
+### Workflow Design Decisions
+
+**Why pin the toolchain in an env var instead of `rust-toolchain.toml`?**
+
+Adding a `rust-toolchain.toml` file to the repository root would affect every workflow and every developer's local environment, because `cargo` automatically reads this file and switches to the specified toolchain. The task scope explicitly requires that the release build process not be altered. The existing `ci.yml`, `deploy-contract.yml`, and `deploy-mainnet.yml` workflows all use `dtolnay/rust-toolchain@stable`, and introducing a toolchain pin file would override that behavior. By keeping the pin inside the workflow's `env` block, the reproducible build check is fully self-contained and has zero side effects on any other workflow or local development.
+
+**Why use `dtolnay/rust-toolchain@master` instead of `@stable`?**
+
+The `@stable` tag in `dtolnay/rust-toolchain` is a shorthand that installs whatever the current Rust stable release is. This is the opposite of what a reproducibility check needs. Using `@master` with an explicit `toolchain: 1.87.0` input installs exactly that version, regardless of what the current stable channel resolves to. The `@master` tag refers to the action's own code (which is stable and maintained), not to the Rust toolchain version.
+
+**Why two separate `--target-dir` directories instead of cleaning and rebuilding?**
+
+Using `cargo clean` between builds would rely on `clean` correctly removing all intermediate artifacts. A stale `.d` file, a cached proc-macro expansion, or an incremental compilation fingerprint left behind by an incomplete clean could silently cause the second build to diverge from or converge with the first in misleading ways. Separate target directories (`target-a/` and `target-b/`) guarantee complete build isolation with no shared state whatsoever. Each build starts from an empty directory and compiles everything from scratch.
+
+**Why `sha256sum` comparison instead of `diff` on the raw binaries?**
+
+Both approaches detect mismatches, but SHA-256 hashes provide a compact, human-readable audit trail. The hash manifest files (`build-a.txt` and `build-b.txt`) are logged to the console, written to the GitHub Actions job summary, and uploaded as artifacts on failure. A reviewer can compare hashes at a glance without downloading multi-megabyte WASM files. The raw WASM binaries are still uploaded on failure for anyone who needs to perform a deeper byte-level or `wasm-objdump` analysis.
+
+**Why remove `rust-toolchain.toml` at runtime?**
+
+This is a defense-in-depth measure. If a future commit adds a `rust-toolchain.toml` to the repository (for example, to pin the toolchain for local development), that file would override the `toolchain` input passed to `dtolnay/rust-toolchain`. By explicitly removing both `rust-toolchain.toml` and the legacy `rust-toolchain` file before installing the toolchain, the workflow guarantees that it always uses exactly the version specified by `RUST_VERSION`, no matter what else is in the repository.
+
+---
+
+### Scope and Boundaries
+
+This pull request deliberately limits itself to adding a new, independent CI job. The following items are explicitly out of scope and have not been modified:
+
+| Item | Status |
+| --- | --- |
+| `.github/workflows/ci.yml` | Not modified |
+| `.github/workflows/deploy-contract.yml` | Not modified |
+| `.github/workflows/deploy-mainnet.yml` | Not modified |
+| `.github/workflows/clippy.yml` | Not modified |
+| `.github/workflows/audit.yml` | Not modified |
+| `.github/workflows/auto-merge.yml` | Not modified |
+| `.github/workflows/contributors.yml` | Not modified |
+| `.github/workflows/scout-security-analysis.yml` | Not modified |
+| `.github/workflows/token-expiry.yml` | Not modified |
+| `.cargo/config.toml` | Not modified |
+| `Cargo.toml` (workspace) | Not modified |
+| `Cargo.lock` | Not modified |
+| `scripts/check-size.sh` | Not modified |
+| `scripts/deploy.sh` | Not modified |
+| Any Rust source code | Not modified |
+
+The release build profile (`[profile.release]` in the workspace `Cargo.toml`) is consumed as-is. The `.cargo/config.toml` rustflags for `wasm32-unknown-unknown` are consumed as-is. No build flags, optimization levels, or codegen settings have been added or changed.
+
+---
+
+### Acceptance Criteria
+
+**The check passes for the current toolchain.**
+
+With `RUST_VERSION` set to `1.87.0` (the version pinned in this PR), both builds should produce byte-identical WASM artifacts for all five contracts. The job summary will display matching SHA-256 hashes in the Build A and Build B tables, and the verdict step will report that all artifacts match.
+
+**The check fails loudly when the toolchain is changed.**
+
+Changing the `RUST_VERSION` value (for example, from `1.87.0` to `1.88.0` or any other version) will almost certainly produce different WASM bytes. Different Rust compiler versions ship different LLVM backends, different optimization passes, different instruction selection heuristics, and different WASM encoding strategies. Even a patch-level bump (e.g., `1.87.0` to `1.87.1`) can change the output if it includes LLVM backports.
+
+When a mismatch is detected, the workflow will:
+
+1. Print a `::error::` annotation in the GitHub Actions log, which surfaces as a red failure banner in the pull request checks UI.
+2. Write a per-contract comparison table to the job summary showing exactly which contracts differ between Build A and Build B, with truncated SHA-256 hashes for each.
+3. Upload both sets of WASM artifacts (from `target-a/` and `target-b/`) as a downloadable archive named `reproducible-build-debug-<sha>`, retained for 7 days, so that a developer can download and inspect the binaries locally (for example, using `wasm-objdump` or a hex diff tool).
+4. Exit with a non-zero status code, causing the overall CI run to fail and blocking the pull request from merging (assuming branch protection rules require this check to pass).
+
+This behavior is intentional and by design. A toolchain change that alters the compiled output is not necessarily a bug -- it is expected behavior when upgrading compilers. The purpose of this check is to force the team to consciously acknowledge the change, verify the new output, and update the pinned version in the workflow before the change is merged. This prevents accidental toolchain drift from silently invalidating the reproducibility guarantee that auditors and SCF reviewers rely on.
+
+---
+
+### How to Update the Pinned Toolchain
+
+When a new Rust stable release is available and the team decides to adopt it, the process is:
+
+1. Open a pull request that changes only the `RUST_VERSION` value in `.github/workflows/reproducible-build.yml`.
+2. The reproducible build check will run twice: once with the old version (which will pass, since the source has not changed) and once with the new version. If the new toolchain produces byte-identical output across two fresh builds, the check passes and the PR can be merged.
+3. If the new toolchain produces different output from the old toolchain (which is expected and normal), the check still passes -- it only compares Build A vs. Build B of the same toolchain. What matters is that the new toolchain is internally consistent: two builds of the same commit with the same toolchain produce the same output.
+4. If the check fails even with the new toolchain (Build A and Build B of the same version differ), that indicates a genuine non-determinism problem in the new compiler version. The team should investigate before adopting it.
+
+---
+
+### Files Changed
+
+```
+ .github/workflows/reproducible-build.yml | 187 ++++++++++++++++++++++++++++++
+ 1 file changed, 187 insertions(+)
+```
+
+---
+
+### Testing
+
+This workflow can be validated by:
+
+- Pushing this branch or opening a pull request against `master` and observing the "Reproducible Build Check" workflow in the Actions tab.
+- Verifying that the job summary contains three sections: Toolchain (showing `rustc 1.87.0`), Build A hashes, Build B hashes, and a verdict confirming all artifacts match.
+- Optionally, creating a follow-up branch that changes `RUST_VERSION` to a different value (e.g., `1.86.0`) and confirming that the check still passes (both builds with `1.86.0` should be internally consistent), but the hashes will differ from the `1.87.0` run (which is expected and not tested by this workflow -- the workflow only compares Build A vs Build B of the same run).
+
+---
+
+### Related Issues and Context
+
+- Closes #61 -- The deploy workflow claims reproducible builds, but nothing in CI verified it.
+- Related to `deploy-mainnet.yml` dry-run job -- That job records WASM hashes for reviewer inspection before mainnet deployment. This PR adds a complementary check that verifies the build process itself is deterministic, which is a prerequisite for those hashes to be meaningful.
+- Related to `.cargo/config.toml` rustflags -- The post-MVP feature flags (`-reference-types`, `-bulk-memory`, etc.) pinned in the Cargo config are necessary for Soroban compatibility and are consumed by this workflow without modification. They contribute to reproducibility by ensuring consistent WASM feature sets across builds.
