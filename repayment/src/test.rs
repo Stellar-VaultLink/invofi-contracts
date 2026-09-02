@@ -148,7 +148,7 @@ fn test_repay_invoice_partial_then_full() {
         &(2_592_000u64),
         &0u64,
     );
-    fin.accept_offer(&offer_id, &originator);
+    fin.accept_offer(&offer_id, &originator, &0);
 
     // Advance 1 day to accrue pro-rata interest.
     // accrued = 1B * 500 * 1 / 3_650_000 = 136_986
@@ -161,7 +161,7 @@ fn test_repay_invoice_partial_then_full() {
 
     // Partial repayment via Repayment contract (50% of principal)
     let partial_amount = amount / 2;
-    let repaid = rep.repay_invoice(&invoice_id, &offer_id, &originator, &partial_amount);
+    let repaid = rep.repay_invoice(&invoice_id, &offer_id, &originator, &partial_amount, &1);
     assert_eq!(repaid.status, InvoiceStatus::Financed);
 
     // Verify offer state via Financing contract
@@ -173,6 +173,9 @@ fn test_repay_invoice_partial_then_full() {
     let token_client = token::TokenClient::new(&env, &token_id);
     assert_eq!(token_client.balance(&lender), partial_amount);
 
+    // Full repayment — version is now 2 (partial repay bumped it).
+    let final_amount = total_due - partial_amount;
+    let repaid_final = rep.repay_invoice(&invoice_id, &offer_id, &originator, &final_amount, &2);
     // Verify payment history has 1 record
     let history = rep.get_payment_history(&invoice_id);
     assert_eq!(history.len(), 1);
@@ -262,7 +265,7 @@ fn test_repay_invoice_overpayment_panics() {
         &(2_592_000u64),
         &0u64,
     );
-    fin.accept_offer(&symbol_short!("off_op"), &originator);
+    fin.accept_offer(&symbol_short!("off_op"), &originator, &0);
 
     let asset_client = token::StellarAssetClient::new(&env, &token_id);
     asset_client.mint(&originator, &total_due);
@@ -272,6 +275,7 @@ fn test_repay_invoice_overpayment_panics() {
         &symbol_short!("off_op"),
         &originator,
         &(total_due + 1),
+        &1,
     );
 }
 
@@ -311,6 +315,7 @@ fn test_repay_unfinanced_invoice_panics() {
         &symbol_short!("off_uf"),
         &originator,
         &1,
+        &0,
     );
 }
 
@@ -369,13 +374,14 @@ fn test_repay_zero_amount_panics() {
         &(2_592_000u64),
         &0u64,
     );
-    fin.accept_offer(&symbol_short!("off_za"), &originator);
+    fin.accept_offer(&symbol_short!("off_za"), &originator, &0);
 
     rep.repay_invoice(
         &symbol_short!("inv_za"),
         &symbol_short!("off_za"),
         &originator,
         &0,
+        &1,
     );
 }
 
@@ -438,7 +444,7 @@ fn test_reclaim_invoice_after_grace_period() {
         &(2_592_000u64),
         &0u64,
     );
-    fin.accept_offer(&offer_id, &originator);
+    fin.accept_offer(&offer_id, &originator, &0);
 
     // Move past due_date + grace period
     env.ledger()
@@ -513,7 +519,7 @@ fn test_reclaim_before_grace_period_panics() {
         &(2_592_000u64),
         &0u64,
     );
-    fin.accept_offer(&offer_id, &originator);
+    fin.accept_offer(&offer_id, &originator, &0);
 
     // Just past due_date, but not past grace period
     env.ledger().set_timestamp(due_date + 1);
@@ -577,7 +583,7 @@ fn test_reclaim_on_non_overdue_panics() {
         &(2_592_000u64),
         &0u64,
     );
-    fin.accept_offer(&symbol_short!("off_nr"), &originator);
+    fin.accept_offer(&symbol_short!("off_nr"), &originator, &0);
 
     // Invoice is Financed, not Overdue — should panic
     rep.reclaim_invoice(&symbol_short!("inv_nr"), &symbol_short!("off_nr"), &lender);
@@ -638,7 +644,7 @@ fn test_calculate_total_due() {
         &86_400u64,
         &0u64,
     );
-    fin.accept_offer(&symbol_short!("off_td"), &originator);
+    fin.accept_offer(&symbol_short!("off_td"), &originator, &0);
 
     // Advance 365 days so pro-rata interest = principal * rate * 365 / 3_650_000
     // = 10_000 * 1_000 * 365 / 3_650_000 = 1_000 (same as flat yield)
@@ -703,7 +709,7 @@ fn test_calculate_total_due_after_partial() {
         &(2_592_000u64),
         &0u64,
     );
-    fin.accept_offer(&symbol_short!("off_tp"), &originator);
+    fin.accept_offer(&symbol_short!("off_tp"), &originator, &0);
 
     // Advance 365 days so pro-rata interest = 1_000_000_000 * 500 * 365 / 3_650_000 = 50_000_000
     env.ledger().set_timestamp(funded_at + 365 * 86_400);
@@ -718,6 +724,7 @@ fn test_calculate_total_due_after_partial() {
         &symbol_short!("off_tp"),
         &originator,
         &partial,
+        &1,
     );
 
     // After partial payment of 500M:
@@ -852,7 +859,7 @@ fn test_pause_blocks_repay_invoice() {
         &2_592_000u64,
         &0u64,
     );
-    fin.accept_offer(&offer_id, &originator);
+    fin.accept_offer(&offer_id, &originator, &0);
 
     rep.pause(&one(&env, &admin));
     rep.repay_invoice(&invoice_id, &offer_id, &originator, &amount);
@@ -884,6 +891,7 @@ fn test_pause_blocks_all_repayment_state_changes() {
             &symbol_short!("offx"),
             &Address::generate(&env),
             &1_000i128,
+            &0,
         );
     });
     assert_paused(|| {
@@ -1000,7 +1008,7 @@ fn test_reclaim_triggers_defaulted_payout_and_reputation() {
         &(2_592_000u64),
         &0u64,
     );
-    fin.accept_offer(&offer_id, &originator);
+    fin.accept_offer(&offer_id, &originator, &0);
 
     // Past due + grace period, then mark overdue.
     env.ledger()
@@ -1096,7 +1104,7 @@ fn test_full_repay_records_reputation_success() {
         &(2_592_000u64),
         &0u64,
     );
-    fin.accept_offer(&offer_id, &originator);
+    fin.accept_offer(&offer_id, &originator, &0);
 
     // Advance 365 days so pro-rata interest = 50_000_000 (matches flat yield).
     env.ledger().set_timestamp(1_000_000 + 365 * 86_400);
@@ -1105,7 +1113,7 @@ fn test_full_repay_records_reputation_success() {
     let total_due = amount + amount * 500 / 10_000;
     let asset = token::StellarAssetClient::new(&env, &token_id);
     asset.mint(&originator, &total_due);
-    rep.repay_invoice(&invoice_id, &offer_id, &originator, &total_due);
+    rep.repay_invoice(&invoice_id, &offer_id, &originator, &total_due, &1);
 
     // Reputation: one successful repayment -> score 1.
     assert_eq!(repu.get_score(&originator), 1);
@@ -1234,12 +1242,13 @@ fn test_repayment_get_installment_due_zero_after_full_repay() {
     let asset = token::StellarAssetClient::new(&env, &token_id);
     asset.mint(&originator, &total_due);
 
-    // Fully repay.
+    // Fully repay — version is 1 after accept_offer.
     rep.repay_invoice(
         &symbol_short!("inv_fd"),
         &symbol_short!("off_fd"),
         &originator,
         &total_due,
+        &1,
     );
 
     // Advance past all 12 periods — proxy must return 0 (Repaid offer).
@@ -1330,7 +1339,7 @@ fn setup_penalty_case<'a>(env: &'a Env) -> PenCase<'a> {
         &(2_592_000u64),
         &0u64,
     );
-    fin.accept_offer(&symbol_short!("off_pen"), &originator);
+    fin.accept_offer(&symbol_short!("off_pen"), &originator, &0);
 
     // Fund the originator beyond the capped worst case.
     token::StellarAssetClient::new(env, &token_id).mint(&originator, &2_000_000_000);
@@ -1505,11 +1514,13 @@ fn test_penalty_base_frozen_across_partial_repayment() {
     assert_eq!(before, 5 * PEN_PER_DAY);
 
     // Pay down almost the entire obligation at day 5.
+    // Version is 1 after accept_offer in setup_penalty_case.
     c.rep.repay_invoice(
         &symbol_short!("inv_pen"),
         &symbol_short!("off_pen"),
         &c.originator,
         &1_000_000_000i128,
+        &1,
     );
 
     // The accrued penalty is unchanged. This is the retroactive-erasure hole
@@ -1559,6 +1570,8 @@ fn test_penalty_must_be_settled_for_full_repayment() {
         &symbol_short!("inv_pen"),
         &symbol_short!("off_pen"),
         &c.originator,
+        &PEN_TOTAL_DUE,
+        &1,
         &partial_payment,
     );
     assert_eq!(inv.status, InvoiceStatus::Financed);
@@ -1577,6 +1590,8 @@ fn test_penalty_must_be_settled_for_full_repayment() {
         &symbol_short!("inv_pen"),
         &symbol_short!("off_pen"),
         &c.originator,
+        &penalty,
+        &2,
         &remaining_after,
     );
     assert_eq!(inv.status, InvoiceStatus::Repaid);
@@ -1603,6 +1618,8 @@ fn test_penalty_overpayment_beyond_accrued_total_panics() {
         &symbol_short!("inv_pen"),
         &symbol_short!("off_pen"),
         &c.originator,
+        &(PEN_TOTAL_DUE + 5 * PEN_PER_DAY + 1),
+        &1,
         &(total + 1),
     );
 }
@@ -1730,4 +1747,121 @@ fn test_set_penalty_blocked_while_paused() {
 
     c.rep.pause(&one(&env, &c.admin));
     c.rep.set_penalty(&one(&env, &c.admin), &PEN_BPS, &PEN_CAP_BPS);
+}
+
+// ─── Concurrency / version-guard tests (issue #110) ──────────────────────────
+//
+// Two callers both read the invoice at the same version (simulating a race),
+// then:
+//   1. Caller A executes first — version advances.
+//   2. Caller B retries with the *stale* version it originally read —
+//      guard fires with `Error(Contract, #9)` (StaleVersion).
+
+/// After `accept_offer` the invoice is at version 1. Two originators racing
+/// to repay the same invoice: only the first succeeds; the second is rejected.
+#[test]
+fn test_repay_invoice_race_first_succeeds() {
+    let env = Env::default();
+    env.mock_all_auths();
+    env.ledger().set_timestamp(1_000_000);
+
+    let admin = Address::generate(&env);
+    let originator = Address::generate(&env);
+    let lender = Address::generate(&env);
+    let invoice_id = symbol_short!("inv_rr1");
+    let offer_id = symbol_short!("off_rr1");
+    let amount: i128 = 1_000_000_000;
+    let interest_rate: u32 = 500;
+    let yield_amount = amount * (interest_rate as i128) / 10_000;
+    let total_due = amount + yield_amount;
+
+    let token_id = create_token(&env);
+    let (reg, fin, rep) = setup_contracts(&env, &admin, &token_id);
+
+    mint_and_approve(&env, &token_id, &fin.address, &lender, amount);
+    reg.set_financing_contract(&admin, &fin.address);
+
+    reg.register_invoice(
+        &invoice_id,
+        &originator,
+        &amount,
+        &symbol_short!("USDC"),
+        &3_000_000u64,
+    );
+    fin.create_offer(
+        &offer_id,
+        &invoice_id,
+        &lender,
+        &amount,
+        &symbol_short!("USDC"),
+        &interest_rate,
+        &2_592_000u64,
+    );
+    fin.accept_offer(&offer_id, &originator, &0);
+
+    // Both callers read the invoice at version 1 (after accept_offer).
+    let version_at_read: u64 = 1;
+
+    // Mint enough for two full repayments to isolate the version guard.
+    let asset = token::StellarAssetClient::new(&env, &token_id);
+    asset.mint(&originator, &(total_due * 2));
+
+    // Caller A wins the race.
+    let repaid = rep.repay_invoice(&invoice_id, &offer_id, &originator, &total_due, &version_at_read);
+    assert_eq!(repaid.status, InvoiceStatus::Repaid);
+
+    // Caller B arrives late with the stale version — must be rejected.
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        rep.repay_invoice(&invoice_id, &offer_id, &originator, &total_due, &version_at_read);
+    }));
+    assert!(result.is_err(), "second concurrent repay_invoice must panic with StaleVersion");
+}
+
+/// Direct unit test: supplying an explicit wrong version to `repay_invoice`
+/// always panics with `StaleVersion` (Error(Contract, #9)).
+#[test]
+#[should_panic(expected = "Error(Contract, #9)")]
+fn test_repay_invoice_stale_version_panics() {
+    let env = Env::default();
+    env.mock_all_auths();
+    env.ledger().set_timestamp(1_000_000);
+
+    let admin = Address::generate(&env);
+    let originator = Address::generate(&env);
+    let lender = Address::generate(&env);
+    let invoice_id = symbol_short!("inv_sv2");
+    let offer_id = symbol_short!("off_sv2");
+    let amount: i128 = 1_000_000_000;
+    let interest_rate: u32 = 500;
+    let total_due = amount + amount * (interest_rate as i128) / 10_000;
+
+    let token_id = create_token(&env);
+    let (reg, fin, rep) = setup_contracts(&env, &admin, &token_id);
+
+    mint_and_approve(&env, &token_id, &fin.address, &lender, amount);
+    reg.set_financing_contract(&admin, &fin.address);
+
+    reg.register_invoice(
+        &invoice_id,
+        &originator,
+        &amount,
+        &symbol_short!("USDC"),
+        &3_000_000u64,
+    );
+    fin.create_offer(
+        &offer_id,
+        &invoice_id,
+        &lender,
+        &amount,
+        &symbol_short!("USDC"),
+        &interest_rate,
+        &2_592_000u64,
+    );
+    fin.accept_offer(&offer_id, &originator, &0);
+
+    let asset = token::StellarAssetClient::new(&env, &token_id);
+    asset.mint(&originator, &total_due);
+
+    // Invoice is at version 1 after accept_offer; passing 0 must fire StaleVersion.
+    rep.repay_invoice(&invoice_id, &offer_id, &originator, &total_due, &0);
 }

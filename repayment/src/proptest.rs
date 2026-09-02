@@ -131,8 +131,8 @@ proptest! {
         let initial_lender_bal = token_client.balance(&lender);
         let initial_orig_bal = token_client.balance(&originator);
 
-        // Perform partial repayment
-        rep.repay_invoice(&invoice_id, &offer_id, &originator, &partial_repay_amount);
+        // Perform partial repayment. Version is 1 after accept_offer.
+        rep.repay_invoice(&invoice_id, &offer_id, &originator, &partial_repay_amount, &1);
 
         // Verify partial repayment math
         let actual_fee_bps = fin.get_fee_bps();

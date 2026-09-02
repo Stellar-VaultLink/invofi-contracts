@@ -206,7 +206,7 @@ fn test_registry_financing_accept_offer_transitions_invoice() {
     assert_eq!(offer.status, OfferStatus::Pending);
 
     // Step 3: Originator accepts the offer.
-    let accepted = p.fin.accept_offer(&offer_id, &p.originator);
+    let accepted = p.fin.accept_offer(&offer_id, &p.originator, &0);
     assert_eq!(accepted.status, OfferStatus::Accepted);
 
     // Assertion: Invoice is now Financed in the registry (cross-crate status sync).
@@ -299,7 +299,7 @@ fn test_financing_repayment_full_repay_syncs_state() {
         &2_592_000u64,
         &0u64,
     );
-    p.fin.accept_offer(&offer_id, &p.originator);
+    p.fin.accept_offer(&offer_id, &p.originator, &0);
 
     // Advance 365 days so pro-rata interest = flat yield.
     env.ledger().set_timestamp(funded_at + 365 * 86_400);
@@ -354,7 +354,7 @@ fn test_financing_repayment_partial_keeps_financed() {
         &2_592_000u64,
         &0u64,
     );
-    p.fin.accept_offer(&offer_id, &p.originator);
+    p.fin.accept_offer(&offer_id, &p.originator, &0);
 
     // Advance 1 day to accrue some interest.
     env.ledger().set_timestamp(funded_at + 86_400);
@@ -406,6 +406,7 @@ fn test_financing_repayment_on_pending_panics() {
         &symbol_short!("off_np"),
         &p.originator,
         &1,
+        &0,
     );
 }
 
@@ -453,7 +454,7 @@ fn test_repayment_insurance_default_triggers_payout() {
         &2_592_000u64,
         &0u64,
     );
-    p.fin.accept_offer(&offer_id, &p.originator);
+    p.fin.accept_offer(&offer_id, &p.originator, &0);
 
     // Fund the insurance pool.
     let coverage: i128 = 300_000_000;
@@ -516,7 +517,7 @@ fn test_repayment_insurance_reclaim_before_grace_panics() {
         &2_592_000u64,
         &0u64,
     );
-    p.fin.accept_offer(&offer_id, &p.originator);
+    p.fin.accept_offer(&offer_id, &p.originator, &0);
 
     // Past due_date but NOT past the grace period.
     env.ledger().set_timestamp(due_date + 1);
@@ -569,7 +570,7 @@ fn test_repayment_reputation_success_on_full_repay() {
         &2_592_000u64,
         &0u64,
     );
-    p.fin.accept_offer(&offer_id, &p.originator);
+    p.fin.accept_offer(&offer_id, &p.originator, &0);
 
     // Advance 365 days so pro-rata interest = flat yield.
     env.ledger().set_timestamp(funded_at + 365 * 86_400);
@@ -683,7 +684,7 @@ fn test_repayment_reputation_default_on_reclaim() {
         &2_592_000u64,
         &0u64,
     );
-    p.fin.accept_offer(&offer_id, &p.originator);
+    p.fin.accept_offer(&offer_id, &p.originator, &0);
 
     env.ledger()
         .set_timestamp(due_date + invofi_common::GRACE_PERIOD_SECS + 1);
@@ -734,7 +735,7 @@ fn test_registry_repayment_overdue_delegates_to_registry() {
         &2_592_000u64,
         &0u64,
     );
-    p.fin.accept_offer(&symbol_short!("off_ov"), &p.originator);
+    p.fin.accept_offer(&symbol_short!("off_ov"), &p.originator, &0);
 
     // After due_date, anyone can mark overdue through Repayment.
     env.ledger().set_timestamp(due_date + 1);
@@ -814,7 +815,7 @@ fn test_full_lifecycle_register_offer_accept_repay() {
 
     // ── Step 3: Accept offer (Financing → Registry) ────────────────────────
     mint_and_approve(&env, &p.token_id, &p.financing_id, &p.lender, amount);
-    let accepted = p.fin.accept_offer(&offer_id, &p.originator);
+    let accepted = p.fin.accept_offer(&offer_id, &p.originator, &0);
     assert_eq!(accepted.status, OfferStatus::Accepted);
 
     // Invoice is now Financed.

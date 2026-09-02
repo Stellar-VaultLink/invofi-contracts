@@ -1392,6 +1392,26 @@ impl RegistryContract {
     /// executable to complete the lifecycle.
     pub fn upgrade(
         env: Env,
+        admin: Address,
+        invoice_id: Symbol,
+        target_status: InvoiceStatus,
+    ) -> Invoice {
+        assert_not_paused(&env);
+        assert_admin(&env, &admin);
+        let mut invoices = load_invoices(&env);
+        let mut invoice = invoices
+            .get(invoice_id.clone())
+            .unwrap_or_else(|| env.panic_with_error(ContractError::NotFound));
+        assert_transition(&env, invoice.status.clone(), target_status.clone());
+        invoice.status = target_status;
+        invoice.version += 1;
+        invoices.set(invoice_id, invoice.clone());
+        save_invoices(&env, &invoices);
+        env.events().publish(
+            (symbol_short!("inv_rsl"), invoice.id.clone()),
+            invoice.status.clone(),
+        );
+        invoice
         signers: Vec<Address>,
         current_wasm_hash: BytesN<32>,
         new_wasm_hash: BytesN<32>,

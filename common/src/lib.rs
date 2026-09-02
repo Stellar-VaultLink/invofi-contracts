@@ -138,6 +138,11 @@ pub enum ContractError {
     /// The caller's address is on the blacklist.
     Blacklisted = 8,
 
+    /// The caller supplied an expected invoice version that no longer matches
+    /// the stored version — another transaction raced and mutated the invoice
+    /// between the caller's read and write. The caller should re-read the
+    /// invoice (to get the current version) and retry.
+    StaleVersion = 9,
     /// A version is not in strict `MAJOR.MINOR.PATCH` form.
     InvalidVersion = 9,
 
@@ -330,6 +335,16 @@ pub struct Invoice {
     pub currency: Symbol,
     pub due_date: u64,
     pub status: InvoiceStatus,
+    /// Optimistic-concurrency version counter. Starts at `0` when the invoice
+    /// is first registered and increments by exactly 1 on every state-
+    /// mutating write. Callers supply the version they read; the write is
+    /// rejected with `StaleVersion` if the stored counter has advanced
+    /// (meaning another transaction raced and mutated the invoice first).
+    ///
+    /// Initial value: 0 (set by `register_invoice`).
+    /// Increment rule: +1 on every persistent write that changes `status`,
+    ///   `amount`, or any other field — regardless of *which* field changed.
+    pub version: u64,
 }
 
 /// Lifecycle status of an invoice.
@@ -824,6 +839,47 @@ pub fn assert_threshold(env: &Env, cfg: &AdminConfig, provided: &Vec<Address>) {
     }
     if counted.len() < cfg.threshold {
         env.panic_with_error(ContractError::Unauthorized);
+    }
+}
+
+// ─── Optimistic Concurrency ───────────────────────────────────────────────────
+
+/// Assert that the caller's expected invoice version matches the stored
+/// version, panicking with `StaleVersion` if not.
+///
+/// ## Protocol
+///
+/// Call this **before** any write that mutates an invoice, passing the version
+/// the caller read from storage. If another transaction has already written
+/// the invoice between this caller's read and write, the stored version will
+/// have advanced and this guard fires, aborting the transaction cleanly.
+///
+/// After a successful check, always increment `invoice.version` by 1 before
+/// writing back to storage so subsequent callers see the new counter.
+///
+/// ## Panic message
+///
+/// The host encodes `ContractError::StaleVersion` (discriminant 9) as a typed
+/// XDR error, so the SDK surface is `Error(Contract, #9)`. The string
+/// `"stale invoice version"` is not the panic payload here — it lives in the
+/// ADR and the client-facing docs.
+///
+/// ## Example
+///
+/// ```ignore
+/// // 1. Read
+/// let invoice = load_invoice(&env, &id);
+/// // 2. Check version supplied by caller
+/// check_invoice_version(&env, invoice.version, expected_version);
+/// // 3. Mutate
+/// invoice.status = new_status;
+/// invoice.version += 1;
+/// // 4. Write back
+/// save_invoice(&env, &invoice);
+/// ```
+pub fn check_invoice_version(env: &Env, stored: u64, expected: u64) {
+    if stored != expected {
+        env.panic_with_error(ContractError::StaleVersion);
     }
 }
 
