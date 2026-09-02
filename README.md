@@ -329,17 +329,17 @@ Thanks to everyone who has contributed to InvoFi — the list below is generated
                 </a>
             </td>
             <td align="center">
-                <a href="https://github.com/Fury03">
-                    <img src="https://avatars.githubusercontent.com/u/98775983?v=4" width="100;" alt="Fury03"/>
-                    <br />
-                    <sub><b>Damilola Ogunrotimi</b></sub>
-                </a>
-            </td>
-            <td align="center">
                 <a href="https://github.com/KarenZita01">
                     <img src="https://avatars.githubusercontent.com/u/261386615?v=4" width="100;" alt="KarenZita01"/>
                     <br />
                     <sub><b>Karen Agbo</b></sub>
+                </a>
+            </td>
+            <td align="center">
+                <a href="https://github.com/Fury03">
+                    <img src="https://avatars.githubusercontent.com/u/98775983?v=4" width="100;" alt="Fury03"/>
+                    <br />
+                    <sub><b>Damilola Ogunrotimi</b></sub>
                 </a>
             </td>
             <td align="center">
