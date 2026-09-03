@@ -445,15 +445,10 @@ impl RepaymentContract {
         // CEI: External interaction. Safe because this contract has no local state to protect.
         token_client.transfer(&repayer, &offer.lender, &lender_amount);
         if fee_amount > 0 {
-            // Fees settle to the primary signer (the first configured admin
-            // address) — the same recipient as before under single-admin
-            // bootstrap mode; see ADR-0010.
-            let admin: Address = invofi_common::load_admin_config(&env)
-                .signers
-                .get(0)
-                .unwrap_or_else(|| panic!("Not initialized"));
             // CEI: External interaction. Safe because this contract has no local state to protect.
-            token_client.transfer(&repayer, &admin, &fee_amount);
+            // Fees settle to the configurable protocol-fee recipient (default: admin).
+            let fee_recipient: Address = registry_client.get_fee_recipient();
+            token_client.transfer(&repayer, &fee_recipient, &fee_amount);
         }
 
         // ── Store payment record ───────────────────────────────────────────

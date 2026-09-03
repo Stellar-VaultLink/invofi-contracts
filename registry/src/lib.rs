@@ -292,6 +292,30 @@ impl RegistryContract {
         invofi_common::initialize_contract_version(&env, env!("CARGO_PKG_VERSION"));
     }
 
+    /// Returns the configured protocol-fee recipient address.
+    pub fn get_fee_recipient(env: Env) -> Address {
+        env.storage()
+            .instance()
+            .get(&symbol_short!("feercpt"))
+            .unwrap_or_else(|| {
+                // Fallback for deployments that pre-date the explicit fee recipient.
+                Self::get_admin(env.clone())
+            })
+    }
+
+    /// Set the address that receives protocol fees. Admin only.
+    pub fn set_fee_recipient(env: Env, signers: Vec<Address>, recipient: Address) {
+        assert_not_paused(&env);
+        assert_admin(&env, &signers);
+        env.storage()
+            .instance()
+            .set(&symbol_short!("feercpt"), &recipient);
+        env.events().publish(
+            (symbol_short!("fee_rcpt"),),
+            recipient.clone(),
+        );
+    }
+
     /// Returns the primary admin address (the first configured signer).
     /// Panics if not yet initialized. In single-admin bootstrap mode this is
     /// the only signer; under true M-of-N it is a convenience for tooling

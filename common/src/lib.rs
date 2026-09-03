@@ -878,6 +878,9 @@ pub trait RegistryInterface {
 
     /// Read the admin address.
     fn get_admin(env: Env) -> Address;
+
+    /// Read the protocol-fee recipient address.
+    fn get_fee_recipient(env: Env) -> Address;
 }
 
 // ─── Financing Cross-Contract Interface ──────────────────────────────────────
