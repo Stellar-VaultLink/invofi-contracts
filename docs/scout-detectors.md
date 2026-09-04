@@ -20,6 +20,7 @@ active and fails CI on new findings.
 | `soroban-version` | 6 | The SDK is pinned at `22.0.0`; upgrades are breaking and are managed deliberately via `CHANGELOG.md`, not adopted automatically. |
 | `assert-violation` | 17 | `assert!` with a clear panic message is this codebase's documented error-handling style (CONTRIBUTING: "Panic messages must be clear English"). All assertions validate inputs before any state change. |
 | `avoid-vec-map-input` | 1 | `registry::batch_get_invoices` accepts a `Vec<Symbol>` of ids in a **read-only** batch getter. It never stores the input and is bounded by transaction size limits. |
+| `unprotected-update-current-contract-wasm` | 10 | Every flagged site is `upgrade` or `rollback`, which call `assert_admin(&env, &signers)` — the ADR-0010 threshold check that invokes `require_auth()` on every provided signer and enforces the admin threshold — **before** `env.deployer().update_current_contract_wasm(...)`. The detector only recognises auth it can trace inside the flagged function to an `admin` parameter; it cannot follow the cross-crate `invofi_common::assert_threshold` helper, so it reports the protected pattern as unprotected. Reaching the wasm update without satisfying the multisig threshold panics with `Unauthorized`. |
 
 ## Keeping the check honest
 

@@ -44,7 +44,7 @@ jobs:
           # or are enhancement-level guidance. All other detectors stay active
           # and fail CI on new findings. To change this list, update the doc
           # and the PR template checkbox together.
-          scout_extra_args: --exclude integer-overflow-or-underflow,unrestricted-transfer-from,unsafe-map-get,storage-change-events,dos-unexpected-revert-with-storage,unnecessary-admin-parameter,dynamic-storage,soroban-version,assert-violation,avoid-vec-map-input
+          scout_extra_args: --exclude integer-overflow-or-underflow,unrestricted-transfer-from,unsafe-map-get,storage-change-events,dos-unexpected-revert-with-storage,unnecessary-admin-parameter,dynamic-storage,soroban-version,assert-violation,avoid-vec-map-input,unprotected-update-current-contract-wasm
 
       - name: Upload Scout report
         if: always()
