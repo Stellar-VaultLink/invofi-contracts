@@ -366,13 +366,6 @@ Thanks to everyone who has contributed to InvoFi — the list below is generated
 		</tr>
 		<tr>
             <td align="center">
-                <a href="https://github.com/Awointa">
-                    <img src="https://avatars.githubusercontent.com/u/82676631?v=4" width="100;" alt="Awointa"/>
-                    <br />
-                    <sub><b>Bob_The_Builder</b></sub>
-                </a>
-            </td>
-            <td align="center">
                 <a href="https://github.com/Sendi0011">
                     <img src="https://avatars.githubusercontent.com/u/175633768?v=4" width="100;" alt="Sendi0011"/>
                     <br />
@@ -380,10 +373,10 @@ Thanks to everyone who has contributed to InvoFi — the list below is generated
                 </a>
             </td>
             <td align="center">
-                <a href="https://github.com/Emmanuellsensai">
-                    <img src="https://avatars.githubusercontent.com/u/86744981?v=4" width="100;" alt="Emmanuellsensai"/>
+                <a href="https://github.com/Awointa">
+                    <img src="https://avatars.githubusercontent.com/u/82676631?v=4" width="100;" alt="Awointa"/>
                     <br />
-                    <sub><b>Usang Emmanuel </b></sub>
+                    <sub><b>Bob_The_Builder</b></sub>
                 </a>
             </td>
             <td align="center">
@@ -394,10 +387,33 @@ Thanks to everyone who has contributed to InvoFi — the list below is generated
                 </a>
             </td>
             <td align="center">
+                <a href="https://github.com/Emmanuellsensai">
+                    <img src="https://avatars.githubusercontent.com/u/86744981?v=4" width="100;" alt="Emmanuellsensai"/>
+                    <br />
+                    <sub><b>Usang Emmanuel </b></sub>
+                </a>
+            </td>
+            <td align="center">
                 <a href="https://github.com/xeladev4">
                     <img src="https://avatars.githubusercontent.com/u/171882586?v=4" width="100;" alt="xeladev4"/>
                     <br />
                     <sub><b>xeladev4</b></sub>
+                </a>
+            </td>
+            <td align="center">
+                <a href="https://github.com/web-flow">
+                    <img src="https://avatars.githubusercontent.com/u/19864447?v=4" width="100;" alt="web-flow"/>
+                    <br />
+                    <sub><b>GitHub Web Flow</b></sub>
+                </a>
+            </td>
+		</tr>
+		<tr>
+            <td align="center">
+                <a href="https://github.com/ZacLou">
+                    <img src="https://avatars.githubusercontent.com/u/97340247?v=4" width="100;" alt="ZacLou"/>
+                    <br />
+                    <sub><b>Zac Lou</b></sub>
                 </a>
             </td>
             <td align="center">
@@ -407,8 +423,6 @@ Thanks to everyone who has contributed to InvoFi — the list below is generated
                     <sub><b>Ishaku Dyelshak </b></sub>
                 </a>
             </td>
-		</tr>
-		<tr>
             <td align="center">
                 <a href="https://github.com/RawNuke">
                     <img src="https://avatars.githubusercontent.com/u/67506722?v=4" width="100;" alt="RawNuke"/>
@@ -437,6 +451,8 @@ Thanks to everyone who has contributed to InvoFi — the list below is generated
                     <sub><b>Hybrid</b></sub>
                 </a>
             </td>
+		</tr>
+		<tr>
             <td align="center">
                 <a href="https://github.com/EneGab">
                     <img src="https://avatars.githubusercontent.com/u/157655503?v=4" width="100;" alt="EneGab"/>
@@ -451,8 +467,6 @@ Thanks to everyone who has contributed to InvoFi — the list below is generated
                     <sub><b>Dev solex</b></sub>
                 </a>
             </td>
-		</tr>
-		<tr>
             <td align="center">
                 <a href="https://github.com/Just-Bamford">
                     <img src="https://avatars.githubusercontent.com/u/233368823?v=4" width="100;" alt="Just-Bamford"/>
