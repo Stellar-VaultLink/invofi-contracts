@@ -1276,6 +1276,48 @@ fn test_set_fee_too_high_panics() {
 }
 
 // ─── Blacklist tests ───────────────────────────────────────────────────────────
+// ─── Fee recipient tests ─────────────────────────────────────────────────────
+
+#[test]
+fn test_default_fee_recipient_is_admin() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let admin = Address::generate(&env);
+    let contract_id = env.register(RegistryContract, (admin.clone(),));
+    let client = super::RegistryContractClient::new(&env, &contract_id);
+
+    assert_eq!(client.get_fee_recipient(), admin);
+}
+
+#[test]
+fn test_set_and_get_fee_recipient() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let admin = Address::generate(&env);
+    let new_recipient = Address::generate(&env);
+    let contract_id = env.register(RegistryContract, (admin.clone(),));
+    let client = super::RegistryContractClient::new(&env, &contract_id);
+
+    assert_eq!(client.get_fee_recipient(), admin);
+    client.set_fee_recipient(&one(&env, &admin), &new_recipient);
+    assert_eq!(client.get_fee_recipient(), new_recipient);
+}
+
+#[test]
+#[should_panic(expected = "Error(Contract, #1)")]
+fn test_set_fee_recipient_unauthorized_panics() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let admin = Address::generate(&env);
+    let not_admin = Address::generate(&env);
+    let new_recipient = Address::generate(&env);
+    let contract_id = env.register(RegistryContract, (admin.clone(),));
+    let client = super::RegistryContractClient::new(&env, &contract_id);
+
+    client.set_fee_recipient(&one(&env, &not_admin), &new_recipient);
+}
+
+// ─── Blacklist tests ───────────────────────────────────────────────────────────
 
 #[test]
 fn test_blacklist_and_unblacklist() {
