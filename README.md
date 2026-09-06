@@ -293,6 +293,18 @@ The workflow has **no push or pull_request trigger** — it can only be started 
 - [ ] Multisig admin governance
 - [ ] Contract upgradeability with timelock
 
+### Phase 2 — Trustless Work escrow rail
+
+Planned integration of [Trustless Work](https://www.trustlesswork.com) (audited,
+SCF-funded escrow infrastructure on Stellar Soroban) as the payment rail for the
+riskiest transfers: disbursement escrow on `accept_offer` with delivery-verified
+release to originators, repayment escrow for guaranteed principal + yield,
+dispute routing through their Dispute Resolver role, and insurance payouts
+released through escrow. Integration is API/SDK-level behind an `escrowAdapter`
+in `@invofi/sdk` (USDC-only scope) — the five contract crates remain the system
+of record. Full research and plan:
+[invofi — docs/trustless-work-integration.md](https://github.com/Stellar-VaultLink/invofi/blob/main/docs/trustless-work-integration.md)
+
 ---
 
 ## Changelog
