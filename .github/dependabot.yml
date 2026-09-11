@@ -1,10 +1,31 @@
 version: 2
 updates:
+  # ── Cargo dependencies (Soroban contracts) ───────────────────────────────
   - package-ecosystem: "cargo"
     directory: "/"
     schedule:
       interval: "weekly"
+      # Batch everything into one Monday wave: one review/merge cycle per
+      # week instead of a PR per dependency all week long.
+      day: "monday"
+      time: "16:00"
+      timezone: "Etc/UTC"
     open-pull-requests-limit: 5
+    # Conventional Commits — the commitlint CI gate enforces this format.
+    commit-message:
+      prefix: "chore(deps)"
+    # One grouped PR for all minor+patch bumps that need no migration.
+    groups:
+      # Security-only updates get their own PR (kept small for fast,
+      # focused review; dependabot raises these immediately, outside the
+      # weekly wave, when a vulnerability is disclosed).
+      security-updates:
+        applies-to: security-updates
+      # Everything else minor/patch lands together in a single weekly PR.
+      minor-and-patch:
+        update-types:
+          - "minor"
+          - "patch"
     ignore:
       # Major bumps to a deployed smart contract's SDK need a deliberate,
       # reviewed migration (possible ABI/behavior changes), not an automated
@@ -12,7 +33,17 @@ updates:
       - dependency-name: "*"
         update-types: ["version-update:semver-major"]
 
+  # ── GitHub Actions versions ──────────────────────────────────────────────
   - package-ecosystem: "github-actions"
     directory: "/"
     schedule:
       interval: "weekly"
+      day: "monday"
+      time: "16:00"
+      timezone: "Etc/UTC"
+    commit-message:
+      prefix: "chore(ci)"
+    # All action bumps land together in a single weekly PR.
+    groups:
+      all-actions:
+        patterns: ["*"]
