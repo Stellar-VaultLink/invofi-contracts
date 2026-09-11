@@ -393,6 +393,64 @@ fn test_accept_offer() {
 }
 
 #[test]
+#[should_panic(expected = "Error(Contract, #3)")] // ContractError::InvalidTransition
+fn test_accept_offer_reentrancy_fails() {
+    // Regression test for issue #40: once `accept_offer` persists the Accepted
+    // status *before* the external token transfer (CEI), a second/reentrant
+    // invocation must fail on the status guard instead of double-spending the
+    // offer.
+    let env = Env::default();
+    env.mock_all_auths();
+    env.ledger().set_timestamp(1_000_000);
+
+    let admin = Address::generate(&env);
+    let originator = Address::generate(&env);
+    let lender = Address::generate(&env);
+    let invoice_id = symbol_short!("inv_r1");
+    let offer_id = symbol_short!("off_r1");
+    let amount: i128 = 1_000_000_000;
+
+    let token_id = create_token(&env);
+    let registry_id = env.register(RegistryContract, (admin.clone(),));
+    let reg = invofi_registry::RegistryContractClient::new(&env, &registry_id);
+
+    let financing_id = env.register(
+        FinancingContract,
+        (admin.clone(), registry_id.clone(), token_id.clone()),
+    );
+    let fin = super::FinancingContractClient::new(&env, &financing_id);
+
+    reg.set_financing_contract(&one(&env, &admin), &financing_id);
+    mint_and_approve(&env, &token_id, &financing_id, &lender, amount);
+
+    reg.register_invoice(
+        &invoice_id,
+        &originator,
+        &amount,
+        &symbol_short!("USDC"),
+        &(3_000_000u64),
+    );
+    fin.create_offer(
+        &offer_id,
+        &invoice_id,
+        &lender,
+        &amount,
+        &symbol_short!("USDC"),
+        &300u32,
+        &(1_296_000u64),
+        &0u64,
+    );
+
+    // First accept succeeds and moves the principal.
+    let accepted = fin.accept_offer(&offer_id, &originator);
+    assert_eq!(accepted.status, OfferStatus::Accepted);
+
+    // A second (reentrant or duplicate) accept MUST fail: the status guard
+    // fires before any further transfer can happen.
+    fin.accept_offer(&offer_id, &originator);
+}
+
+#[test]
 fn test_create_offer_stores_expires_at() {
     let env = Env::default();
     env.mock_all_auths();
