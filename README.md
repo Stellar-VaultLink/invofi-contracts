@@ -413,14 +413,21 @@ Thanks to everyone who has contributed to InvoFi — the list below is generated
                 </a>
             </td>
             <td align="center">
+                <a href="https://github.com/mansur-codes">
+                    <img src="https://avatars.githubusercontent.com/u/114710463?v=4" width="100;" alt="mansur-codes"/>
+                    <br />
+                    <sub><b>Levi</b></sub>
+                </a>
+            </td>
+		</tr>
+		<tr>
+            <td align="center">
                 <a href="https://github.com/web-flow">
                     <img src="https://avatars.githubusercontent.com/u/19864447?v=4" width="100;" alt="web-flow"/>
                     <br />
                     <sub><b>GitHub Web Flow</b></sub>
                 </a>
             </td>
-		</tr>
-		<tr>
             <td align="center">
                 <a href="https://github.com/ZacLou">
                     <img src="https://avatars.githubusercontent.com/u/97340247?v=4" width="100;" alt="ZacLou"/>
@@ -456,6 +463,8 @@ Thanks to everyone who has contributed to InvoFi — the list below is generated
                     <sub><b>JinadJay</b></sub>
                 </a>
             </td>
+		</tr>
+		<tr>
             <td align="center">
                 <a href="https://github.com/aigbagbobila">
                     <img src="https://avatars.githubusercontent.com/u/286679235?v=4" width="100;" alt="aigbagbobila"/>
@@ -463,8 +472,6 @@ Thanks to everyone who has contributed to InvoFi — the list below is generated
                     <sub><b>Hybrid</b></sub>
                 </a>
             </td>
-		</tr>
-		<tr>
             <td align="center">
                 <a href="https://github.com/EneGab">
                     <img src="https://avatars.githubusercontent.com/u/157655503?v=4" width="100;" alt="EneGab"/>
