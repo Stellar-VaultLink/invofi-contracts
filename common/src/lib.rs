@@ -929,6 +929,9 @@ pub trait FinancingInterface {
     /// Read a financing offer by ID.
     fn get_offer(env: Env, id: Symbol) -> FinancingOffer;
 
+    /// Read all offers associated with an invoice.
+    fn get_offers_by_invoice(env: Env, invoice_id: Symbol) -> Vec<FinancingOffer>;
+
     /// Update the status of an offer. Called by Repayment after accept/reject/
     /// repay/reclaim to keep offer state in sync.
     fn update_offer_status(env: Env, id: Symbol, new_status: OfferStatus);
