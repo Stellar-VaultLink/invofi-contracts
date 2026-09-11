@@ -15,6 +15,7 @@ get the next number; append, never rewrite (status updates go in the file).
 | 0008 | [Offer amendment and counter-offer](./0008-offer-negotiation.md) | Proposed |
 | 0009 | [Invoice verification oracle](./0009-verification-oracle.md) | Proposed |
 | 0010 | [M-of-N admin governance (multisig)](./0010-multisig-admin-governance.md) | Accepted |
+| 0011 | [Emergency withdrawal path while the insurance pool is paused](./0011-emergency-unstake-while-paused.md) | Accepted |
 
 App-layer decisions (wallet allowlist, indexer, SDK) live in the monorepo:
 [invofi/docs/adr](https://github.com/Stellar-VaultLink/invofi/tree/main/docs/adr).
