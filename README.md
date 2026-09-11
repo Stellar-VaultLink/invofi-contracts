@@ -413,14 +413,21 @@ Thanks to everyone who has contributed to InvoFi — the list below is generated
                 </a>
             </td>
             <td align="center">
+                <a href="https://github.com/payfoxX">
+                    <img src="https://avatars.githubusercontent.com/u/171681873?v=4" width="100;" alt="payfoxX"/>
+                    <br />
+                    <sub><b>Abdulsalam Muhammed</b></sub>
+                </a>
+            </td>
+		</tr>
+		<tr>
+            <td align="center">
                 <a href="https://github.com/mansur-codes">
                     <img src="https://avatars.githubusercontent.com/u/114710463?v=4" width="100;" alt="mansur-codes"/>
                     <br />
                     <sub><b>Levi</b></sub>
                 </a>
             </td>
-		</tr>
-		<tr>
             <td align="center">
                 <a href="https://github.com/web-flow">
                     <img src="https://avatars.githubusercontent.com/u/19864447?v=4" width="100;" alt="web-flow"/>
@@ -443,12 +450,21 @@ Thanks to everyone who has contributed to InvoFi — the list below is generated
                 </a>
             </td>
             <td align="center">
+                <a href="https://github.com/wagmiiii">
+                    <img src="https://avatars.githubusercontent.com/u/130152505?v=4" width="100;" alt="wagmiiii"/>
+                    <br />
+                    <sub><b>WAGMI</b></sub>
+                </a>
+            </td>
+            <td align="center">
                 <a href="https://github.com/RawNuke">
                     <img src="https://avatars.githubusercontent.com/u/67506722?v=4" width="100;" alt="RawNuke"/>
                     <br />
                     <sub><b>Raw_Nuke</b></sub>
                 </a>
             </td>
+		</tr>
+		<tr>
             <td align="center">
                 <a href="https://github.com/Chigybillionz">
                     <img src="https://avatars.githubusercontent.com/u/184784116?v=4" width="100;" alt="Chigybillionz"/>
@@ -463,8 +479,6 @@ Thanks to everyone who has contributed to InvoFi — the list below is generated
                     <sub><b>JinadJay</b></sub>
                 </a>
             </td>
-		</tr>
-		<tr>
             <td align="center">
                 <a href="https://github.com/aigbagbobila">
                     <img src="https://avatars.githubusercontent.com/u/286679235?v=4" width="100;" alt="aigbagbobila"/>
@@ -493,6 +507,8 @@ Thanks to everyone who has contributed to InvoFi — the list below is generated
                     <sub><b>Bamford</b></sub>
                 </a>
             </td>
+		</tr>
+		<tr>
             <td align="center">
                 <a href="https://github.com/Ajibose">
                     <img src="https://avatars.githubusercontent.com/u/99620327?v=4" width="100;" alt="Ajibose"/>
