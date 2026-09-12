@@ -3,8 +3,8 @@ extern crate std;
 
 use super::RegistryContract;
 use invofi_common::{
-    AmendmentField, AmendmentStatus, InvoiceStatus, RiskTier, VerificationStatus,
-    VerificationType,
+    AmendmentField, AmendmentStatus, FinancingOffer, InvoiceStatus, OfferStatus, RiskTier,
+    VerificationStatus, VerificationType,
 };
 use soroban_sdk::{
     symbol_short,
@@ -2092,7 +2092,7 @@ fn setup_oracle<'a>(
         &symbol_short!("USDC"),
         &(9_000_000u64),
     );
-    client.add_verifier(&one(&env, &admin), &verifier);
+    client.add_verifier(&one(env, &admin), &verifier);
 
     (client, admin, originator, verifier)
 }
@@ -3520,11 +3520,25 @@ fn test_request_amendment_invalid_amount_panics() {
     );
 }
 
+#[soroban_sdk::contract]
+pub struct MockFinancingContract;
+
+#[soroban_sdk::contractimpl]
+impl MockFinancingContract {
+    pub fn get_offers_by_invoice(env: Env, invoice_id: Symbol) -> soroban_sdk::Vec<FinancingOffer> {
+        env.storage()
+            .instance()
+            .get(&invoice_id)
+            .unwrap_or_else(|| soroban_sdk::Vec::new(&env))
+    }
+
+    pub fn set_offers(env: Env, invoice_id: Symbol, offers: soroban_sdk::Vec<FinancingOffer>) {
+        env.storage().instance().set(&invoice_id, &offers);
+    }
+}
+
 #[test]
-#[should_panic(expected = "Error(Contract, #3)")] // ContractError::InvalidTransition
-fn test_request_amendment_on_financed_panics() {
-    // Only Pending invoices are amendable in this pass; Financed invoices need
-    // the lender-approval flow (follow-up issue).
+fn test_request_amendment_on_financed_creates_pending() {
     let env = Env::default();
     env.mock_all_auths();
     env.ledger().set_timestamp(1_000_000);
@@ -3545,7 +3559,7 @@ fn test_request_amendment_on_financed_panics() {
         &InvoiceStatus::Financed,
     );
 
-    client.request_amendment(
+    let amendment = client.request_amendment(
         &symbol_short!("amd5"),
         &originator,
         &AmendmentField::Amount,
@@ -3553,6 +3567,365 @@ fn test_request_amendment_on_financed_panics() {
         &0u64,
         &symbol_short!("fix"),
     );
+
+    // On Financed invoices, amendment must remain Pending (not auto-approved)
+    assert_eq!(amendment.status, AmendmentStatus::Pending);
+    assert_eq!(amendment.old_amount, 10_000_000i128);
+    assert_eq!(amendment.new_amount, 20_000_000i128);
+
+    // Invoice itself must NOT be modified yet
+    let inv = client.get_invoice(&symbol_short!("amd5"));
+    assert_eq!(inv.amount, 10_000_000i128);
+
+    let list = client.get_amendments(&symbol_short!("amd5"));
+    assert_eq!(list.len(), 1);
+    assert_eq!(list.get(0).unwrap().status, AmendmentStatus::Pending);
+}
+
+#[test]
+fn test_approve_amendment_by_lender_on_financed() {
+    let env = Env::default();
+    env.mock_all_auths();
+    env.ledger().set_timestamp(1_000_000);
+    let admin = Address::generate(&env);
+    let contract_id = env.register(RegistryContract, (admin.clone(),));
+    let client = super::RegistryContractClient::new(&env, &contract_id);
+
+    let financing_id = env.register(MockFinancingContract, ());
+    let mock_fin = MockFinancingContractClient::new(&env, &financing_id);
+    client.set_financing_contract(&one(&env, &admin), &financing_id);
+
+    let originator = Address::generate(&env);
+    let lender = Address::generate(&env);
+    let invoice_id = symbol_short!("amd6");
+
+    client.register_invoice(
+        &invoice_id,
+        &originator,
+        &10_000_000i128,
+        &symbol_short!("XLM"),
+        &3_000_000u64,
+    );
+    client.update_invoice_status(&invoice_id, &originator, &InvoiceStatus::Financed);
+
+    let mut offers = soroban_sdk::Vec::new(&env);
+    offers.push_back(FinancingOffer {
+        id: symbol_short!("off1"),
+        invoice_id: invoice_id.clone(),
+        lender: lender.clone(),
+        amount: 8_000_000i128,
+        currency: symbol_short!("XLM"),
+        interest_rate: 500,
+        duration: 86400,
+        expires_at: 0,
+        status: OfferStatus::Financed,
+        funded_at: 1_000_000,
+        amount_repaid: 0,
+    });
+    mock_fin.set_offers(&invoice_id, &offers);
+
+    client.request_amendment(
+        &invoice_id,
+        &originator,
+        &AmendmentField::Amount,
+        &15_000_000i128,
+        &0u64,
+        &symbol_short!("inc"),
+    );
+
+    let approved = client.approve_amendment(&invoice_id, &0, &lender);
+    assert_eq!(approved.status, AmendmentStatus::Approved);
+    assert_eq!(approved.new_amount, 15_000_000i128);
+
+    let inv = client.get_invoice(&invoice_id);
+    assert_eq!(inv.amount, 15_000_000i128);
+}
+
+#[test]
+#[should_panic(expected = "Error(Contract, #1)")] // ContractError::Unauthorized
+fn test_approve_amendment_by_non_lender_panics() {
+    let env = Env::default();
+    env.mock_all_auths();
+    env.ledger().set_timestamp(1_000_000);
+    let admin = Address::generate(&env);
+    let contract_id = env.register(RegistryContract, (admin.clone(),));
+    let client = super::RegistryContractClient::new(&env, &contract_id);
+
+    let financing_id = env.register(MockFinancingContract, ());
+    let mock_fin = MockFinancingContractClient::new(&env, &financing_id);
+    client.set_financing_contract(&one(&env, &admin), &financing_id);
+
+    let originator = Address::generate(&env);
+    let lender = Address::generate(&env);
+    let stranger = Address::generate(&env);
+    let invoice_id = symbol_short!("amd7");
+
+    client.register_invoice(
+        &invoice_id,
+        &originator,
+        &10_000_000i128,
+        &symbol_short!("XLM"),
+        &3_000_000u64,
+    );
+    client.update_invoice_status(&invoice_id, &originator, &InvoiceStatus::Financed);
+
+    let mut offers = soroban_sdk::Vec::new(&env);
+    offers.push_back(FinancingOffer {
+        id: symbol_short!("off1"),
+        invoice_id: invoice_id.clone(),
+        lender,
+        amount: 8_000_000i128,
+        currency: symbol_short!("XLM"),
+        interest_rate: 500,
+        duration: 86400,
+        expires_at: 0,
+        status: OfferStatus::Financed,
+        funded_at: 1_000_000,
+        amount_repaid: 0,
+    });
+    mock_fin.set_offers(&invoice_id, &offers);
+
+    client.request_amendment(
+        &invoice_id,
+        &originator,
+        &AmendmentField::Amount,
+        &15_000_000i128,
+        &0u64,
+        &symbol_short!("inc"),
+    );
+
+    // Stranger attempts to approve -> Unauthorized
+    client.approve_amendment(&invoice_id, &0, &stranger);
+}
+
+#[test]
+fn test_approve_amendment_due_date_by_lender_on_financed() {
+    let env = Env::default();
+    env.mock_all_auths();
+    env.ledger().set_timestamp(1_000_000);
+    let admin = Address::generate(&env);
+    let contract_id = env.register(RegistryContract, (admin.clone(),));
+    let client = super::RegistryContractClient::new(&env, &contract_id);
+
+    let financing_id = env.register(MockFinancingContract, ());
+    let mock_fin = MockFinancingContractClient::new(&env, &financing_id);
+    client.set_financing_contract(&one(&env, &admin), &financing_id);
+
+    let originator = Address::generate(&env);
+    let lender = Address::generate(&env);
+    let invoice_id = symbol_short!("amd8");
+
+    client.register_invoice(
+        &invoice_id,
+        &originator,
+        &10_000_000i128,
+        &symbol_short!("XLM"),
+        &3_000_000u64,
+    );
+    client.update_invoice_status(&invoice_id, &originator, &InvoiceStatus::Financed);
+
+    let mut offers = soroban_sdk::Vec::new(&env);
+    offers.push_back(FinancingOffer {
+        id: symbol_short!("off1"),
+        invoice_id: invoice_id.clone(),
+        lender: lender.clone(),
+        amount: 8_000_000i128,
+        currency: symbol_short!("XLM"),
+        interest_rate: 500,
+        duration: 86400,
+        expires_at: 0,
+        status: OfferStatus::Financed,
+        funded_at: 1_000_000,
+        amount_repaid: 0,
+    });
+    mock_fin.set_offers(&invoice_id, &offers);
+
+    client.request_amendment(
+        &invoice_id,
+        &originator,
+        &AmendmentField::DueDate,
+        &0i128,
+        &5_000_000u64,
+        &symbol_short!("ext"),
+    );
+
+    let approved = client.approve_amendment(&invoice_id, &0, &lender);
+    assert_eq!(approved.status, AmendmentStatus::Approved);
+    assert_eq!(approved.new_due_date, 5_000_000u64);
+
+    let inv = client.get_invoice(&invoice_id);
+    assert_eq!(inv.due_date, 5_000_000u64);
+}
+
+#[test]
+fn test_reject_amendment_by_lender_on_financed() {
+    let env = Env::default();
+    env.mock_all_auths();
+    env.ledger().set_timestamp(1_000_000);
+    let admin = Address::generate(&env);
+    let contract_id = env.register(RegistryContract, (admin.clone(),));
+    let client = super::RegistryContractClient::new(&env, &contract_id);
+
+    let financing_id = env.register(MockFinancingContract, ());
+    let mock_fin = MockFinancingContractClient::new(&env, &financing_id);
+    client.set_financing_contract(&one(&env, &admin), &financing_id);
+
+    let originator = Address::generate(&env);
+    let lender = Address::generate(&env);
+    let invoice_id = symbol_short!("amd9");
+
+    client.register_invoice(
+        &invoice_id,
+        &originator,
+        &10_000_000i128,
+        &symbol_short!("XLM"),
+        &3_000_000u64,
+    );
+    client.update_invoice_status(&invoice_id, &originator, &InvoiceStatus::Financed);
+
+    let mut offers = soroban_sdk::Vec::new(&env);
+    offers.push_back(FinancingOffer {
+        id: symbol_short!("off1"),
+        invoice_id: invoice_id.clone(),
+        lender: lender.clone(),
+        amount: 8_000_000i128,
+        currency: symbol_short!("XLM"),
+        interest_rate: 500,
+        duration: 86400,
+        expires_at: 0,
+        status: OfferStatus::Financed,
+        funded_at: 1_000_000,
+        amount_repaid: 0,
+    });
+    mock_fin.set_offers(&invoice_id, &offers);
+
+    client.request_amendment(
+        &invoice_id,
+        &originator,
+        &AmendmentField::Amount,
+        &15_000_000i128,
+        &0u64,
+        &symbol_short!("inc"),
+    );
+
+    let rejected = client.reject_amendment(&invoice_id, &0, &lender);
+    assert_eq!(rejected.status, AmendmentStatus::Rejected);
+
+    let inv = client.get_invoice(&invoice_id);
+    assert_eq!(inv.amount, 10_000_000i128); // unchanged
+}
+
+#[test]
+#[should_panic(expected = "Error(Contract, #1)")] // ContractError::Unauthorized
+fn test_reject_amendment_by_non_lender_panics() {
+    let env = Env::default();
+    env.mock_all_auths();
+    env.ledger().set_timestamp(1_000_000);
+    let admin = Address::generate(&env);
+    let contract_id = env.register(RegistryContract, (admin.clone(),));
+    let client = super::RegistryContractClient::new(&env, &contract_id);
+
+    let financing_id = env.register(MockFinancingContract, ());
+    let mock_fin = MockFinancingContractClient::new(&env, &financing_id);
+    client.set_financing_contract(&one(&env, &admin), &financing_id);
+
+    let originator = Address::generate(&env);
+    let lender = Address::generate(&env);
+    let stranger = Address::generate(&env);
+    let invoice_id = symbol_short!("amd10");
+
+    client.register_invoice(
+        &invoice_id,
+        &originator,
+        &10_000_000i128,
+        &symbol_short!("XLM"),
+        &3_000_000u64,
+    );
+    client.update_invoice_status(&invoice_id, &originator, &InvoiceStatus::Financed);
+
+    let mut offers = soroban_sdk::Vec::new(&env);
+    offers.push_back(FinancingOffer {
+        id: symbol_short!("off1"),
+        invoice_id: invoice_id.clone(),
+        lender,
+        amount: 8_000_000i128,
+        currency: symbol_short!("XLM"),
+        interest_rate: 500,
+        duration: 86400,
+        expires_at: 0,
+        status: OfferStatus::Financed,
+        funded_at: 1_000_000,
+        amount_repaid: 0,
+    });
+    mock_fin.set_offers(&invoice_id, &offers);
+
+    client.request_amendment(
+        &invoice_id,
+        &originator,
+        &AmendmentField::Amount,
+        &15_000_000i128,
+        &0u64,
+        &symbol_short!("inc"),
+    );
+
+    client.reject_amendment(&invoice_id, &0, &stranger);
+}
+
+#[test]
+#[should_panic(expected = "Error(Contract, #6)")] // ContractError::InvalidInput
+fn test_approve_amendment_amount_below_funded_principal_panics() {
+    let env = Env::default();
+    env.mock_all_auths();
+    env.ledger().set_timestamp(1_000_000);
+    let admin = Address::generate(&env);
+    let contract_id = env.register(RegistryContract, (admin.clone(),));
+    let client = super::RegistryContractClient::new(&env, &contract_id);
+
+    let financing_id = env.register(MockFinancingContract, ());
+    let mock_fin = MockFinancingContractClient::new(&env, &financing_id);
+    client.set_financing_contract(&one(&env, &admin), &financing_id);
+
+    let originator = Address::generate(&env);
+    let lender = Address::generate(&env);
+    let invoice_id = symbol_short!("amd11");
+
+    client.register_invoice(
+        &invoice_id,
+        &originator,
+        &30_000_000i128,
+        &symbol_short!("XLM"),
+        &3_000_000u64,
+    );
+    client.update_invoice_status(&invoice_id, &originator, &InvoiceStatus::Financed);
+
+    let mut offers = soroban_sdk::Vec::new(&env);
+    offers.push_back(FinancingOffer {
+        id: symbol_short!("off1"),
+        invoice_id: invoice_id.clone(),
+        lender: lender.clone(),
+        amount: 20_000_000i128,
+        currency: symbol_short!("XLM"),
+        interest_rate: 500,
+        duration: 86400,
+        expires_at: 0,
+        status: OfferStatus::Financed,
+        funded_at: 1_000_000,
+        amount_repaid: 0,
+    });
+    mock_fin.set_offers(&invoice_id, &offers);
+
+    // Request new_amount = 15_000_000 (valid at request time since >= MIN_INVOICE_AMOUNT 10_000_000)
+    client.request_amendment(
+        &invoice_id,
+        &originator,
+        &AmendmentField::Amount,
+        &15_000_000i128,
+        &0u64,
+        &symbol_short!("dec"),
+    );
+
+    // Approval must panic because new_amount (15_000_000) < funded_amount (20_000_000)
+    client.approve_amendment(&invoice_id, &0, &lender);
 }
 
 #[test]
@@ -3577,11 +3950,7 @@ fn test_request_amendment_on_repaid_panics() {
         &originator,
         &InvoiceStatus::Financed,
     );
-    client.update_invoice_status(
-        &symbol_short!("amd6"),
-        &originator,
-        &InvoiceStatus::Repaid,
-    );
+    client.update_invoice_status(&symbol_short!("amd6"), &originator, &InvoiceStatus::Repaid);
 
     client.request_amendment(
         &symbol_short!("amd6"),

@@ -950,6 +950,9 @@ pub trait FinancingInterface {
     /// Read the protocol fee in basis points.
     fn get_fee_bps(env: Env) -> u32;
 
+    /// Read all financing offers submitted for an invoice.
+    fn get_offers_by_invoice(env: Env, invoice_id: Symbol) -> Vec<FinancingOffer>;
+
     /// Create a fixed installment repayment schedule for an offer.
     /// `first_due` is the Unix timestamp of the first installment.
     fn schedule_repayment(

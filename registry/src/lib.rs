@@ -6,11 +6,11 @@ use soroban_sdk::{
 
 use invofi_common::{
     assert_not_paused, assert_transition, get_transition_history, AdminConfig, AmendmentField,
-    AmendmentRecord, AmendmentStatus, Attestation, ContractError, Invoice, InvoiceStatus,
-    ProtocolStats, RiskTier, TransitionRecord, VerificationStatus, VerificationType,
-    DEFAULT_ATTESTATION_VALIDITY_SECS,
-    MAX_ATTESTATIONS_PER_INVOICE, MAX_ATTESTATION_VALIDITY_SECS, MAX_VERIFICATION_FEE_BPS,
-    MAX_VERIFIERS, MIN_ATTESTATION_VALIDITY_SECS, MIN_INVOICE_AMOUNT, VERIFICATION_TYPES,
+    AmendmentRecord, AmendmentStatus, Attestation, ContractError, FinancingClient, Invoice,
+    InvoiceStatus, OfferStatus, ProtocolStats, RiskTier, TransitionRecord, VerificationStatus,
+    VerificationType, DEFAULT_ATTESTATION_VALIDITY_SECS, MAX_ATTESTATIONS_PER_INVOICE,
+    MAX_ATTESTATION_VALIDITY_SECS, MAX_VERIFICATION_FEE_BPS, MAX_VERIFIERS,
+    MIN_ATTESTATION_VALIDITY_SECS, MIN_INVOICE_AMOUNT, VERIFICATION_TYPES,
 };
 
 // ─── Storage Helpers ─────────────────────────────────────────────────────────
@@ -81,7 +81,6 @@ fn save_amendments(env: &Env, map: &Map<Symbol, Vec<AmendmentRecord>>) {
         .persistent()
         .set(&symbol_short!("amends"), map);
 }
-
 
 // ─── Verification Oracle Storage Helpers (issue #181) ────────────────────────
 //
@@ -325,10 +324,8 @@ impl RegistryContract {
         env.storage()
             .instance()
             .set(&symbol_short!("feercpt"), &recipient);
-        env.events().publish(
-            (symbol_short!("fee_rcpt"),),
-            recipient.clone(),
-        );
+        env.events()
+            .publish((symbol_short!("fee_rcpt"),), recipient.clone());
     }
 
     /// Returns the primary admin address (the first configured signer).
@@ -1420,13 +1417,31 @@ impl RegistryContract {
         newly_expired
     }
 
+    // ── Invoice amendments (#185, #227) ──────────────────────────────────────
 
-    // ── Invoice amendments (#185) ────────────────────────────────────────────
+    /// Looks up the active lender and funded principal for a Financed invoice
+    /// via cross-contract call to the financing contract (ADR-0012).
+    fn resolve_lender_for_financed_invoice(env: &Env, invoice_id: &Symbol) -> (Address, i128) {
+        let financing_addr: Address = env
+            .storage()
+            .instance()
+            .get(&symbol_short!("financing"))
+            .unwrap_or_else(|| env.panic_with_error(ContractError::NotFound));
+        let financing_client = FinancingClient::new(env, &financing_addr);
+        let offers = financing_client.get_offers_by_invoice(invoice_id);
+        for offer in offers.iter() {
+            if offer.status == OfferStatus::Accepted || offer.status == OfferStatus::Financed {
+                return (offer.lender, offer.amount);
+            }
+        }
+        env.panic_with_error(ContractError::NotFound)
+    }
 
-    /// Request an amendment to a Pending invoice. Only the originator can call
-    /// this. Because a Pending invoice has no lender yet, the amendment is
-    /// auto-approved and applied immediately. Financed invoices need the
-    /// amendment + lender-approval flow tracked in the follow-up issue.
+    /// Request an amendment to a Pending or Financed invoice. Only the
+    /// originator can call this.
+    /// - Pending invoices: auto-approved and applied immediately (no lender yet).
+    /// - Financed invoices: stored as Pending, requiring approval from the
+    ///   active lender (ADR-0012).
     ///
     /// Supported fields: `amount` (updates amount), `due_date` (updates
     /// due_date).
@@ -1449,7 +1464,7 @@ impl RegistryContract {
         if invoice.originator != originator {
             env.panic_with_error(ContractError::Unauthorized);
         }
-        if invoice.status != InvoiceStatus::Pending {
+        if invoice.status != InvoiceStatus::Pending && invoice.status != InvoiceStatus::Financed {
             env.panic_with_error(ContractError::InvalidTransition);
         }
 
@@ -1478,9 +1493,12 @@ impl RegistryContract {
             status: AmendmentStatus::Pending,
         };
 
-        // Pending invoice (no lender yet) -> auto-approve and apply now.
-        amendment.status = AmendmentStatus::Approved;
-        Self::apply_amendment_to_invoice(&env, &invoice_id, &amendment);
+        if invoice.status == InvoiceStatus::Pending {
+            // Pending invoice (no lender yet) -> auto-approve and apply now.
+            amendment.status = AmendmentStatus::Approved;
+            Self::apply_amendment_to_invoice(&env, &invoice_id, &amendment);
+        }
+        // Financed invoice -> remains Pending, awaiting lender approval.
 
         let mut amendments = load_amendments(&env);
         let mut list = amendments
@@ -1497,9 +1515,10 @@ impl RegistryContract {
         amendment
     }
 
-    /// Approve a pending amendment. Only the invoice originator may call this
-    /// (Pending invoices have no lender; lender approval for Financed
-    /// amendments ships with the follow-up flow).
+    /// Approve a pending amendment.
+    /// - For Pending invoices: only the invoice originator may call this.
+    /// - For Financed invoices: only the lender of the active accepted offer
+    ///   may call this (ADR-0012).
     pub fn approve_amendment(
         env: Env,
         invoice_id: Symbol,
@@ -1512,10 +1531,6 @@ impl RegistryContract {
         let invoice = invoices
             .get(invoice_id.clone())
             .unwrap_or_else(|| env.panic_with_error(ContractError::NotFound));
-
-        if approver != invoice.originator {
-            env.panic_with_error(ContractError::Unauthorized);
-        }
 
         let mut amendments = load_amendments(&env);
         let mut list = amendments
@@ -1531,7 +1546,33 @@ impl RegistryContract {
             env.panic_with_error(ContractError::InvalidTransition);
         }
 
+        if invoice.status == InvoiceStatus::Financed {
+            let (lender, funded_amount) =
+                Self::resolve_lender_for_financed_invoice(&env, &invoice_id);
+            if approver != lender {
+                env.panic_with_error(ContractError::Unauthorized);
+            }
+            // Re-validate bounds on approval for Financed invoices
+            match amendment.field {
+                AmendmentField::Amount => {
+                    if amendment.new_amount < MIN_INVOICE_AMOUNT
+                        || amendment.new_amount < funded_amount
+                    {
+                        env.panic_with_error(ContractError::InvalidInput);
+                    }
+                }
+                AmendmentField::DueDate => {
+                    if amendment.new_due_date <= env.ledger().timestamp() {
+                        env.panic_with_error(ContractError::InvalidInput);
+                    }
+                }
+            }
+        } else if approver != invoice.originator {
+            env.panic_with_error(ContractError::Unauthorized);
+        }
+
         amendment.status = AmendmentStatus::Approved;
+        Self::apply_amendment_to_invoice(&env, &invoice_id, &amendment);
         list.set(amendment_index, amendment.clone());
         amendments.set(invoice_id.clone(), list);
         save_amendments(&env, &amendments);
@@ -1543,7 +1584,10 @@ impl RegistryContract {
         amendment
     }
 
-    /// Reject a pending amendment. Only the invoice originator may call this.
+    /// Reject a pending amendment.
+    /// - For Pending invoices: only the invoice originator may call this.
+    /// - For Financed invoices: only the lender of the active accepted offer
+    ///   may call this (ADR-0012).
     pub fn reject_amendment(
         env: Env,
         invoice_id: Symbol,
@@ -1557,7 +1601,12 @@ impl RegistryContract {
             .get(invoice_id.clone())
             .unwrap_or_else(|| env.panic_with_error(ContractError::NotFound));
 
-        if rejector != invoice.originator {
+        if invoice.status == InvoiceStatus::Financed {
+            let (lender, _) = Self::resolve_lender_for_financed_invoice(&env, &invoice_id);
+            if rejector != lender {
+                env.panic_with_error(ContractError::Unauthorized);
+            }
+        } else if rejector != invoice.originator {
             env.panic_with_error(ContractError::Unauthorized);
         }
 
@@ -1595,11 +1644,7 @@ impl RegistryContract {
     }
 
     /// Apply an approved amendment to the invoice state.
-    fn apply_amendment_to_invoice(
-        env: &Env,
-        invoice_id: &Symbol,
-        amendment: &AmendmentRecord,
-    ) {
+    fn apply_amendment_to_invoice(env: &Env, invoice_id: &Symbol, amendment: &AmendmentRecord) {
         let mut invoices = load_invoices(env);
         let mut invoice = invoices
             .get(invoice_id.clone())
