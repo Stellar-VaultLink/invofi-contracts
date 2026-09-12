@@ -7,6 +7,8 @@ Soroban smart contracts for the [InvoFi](https://github.com/Stellar-VaultLink/in
 [![Scout](https://github.com/Stellar-VaultLink/invofi-contracts/actions/workflows/scout-security-analysis.yml/badge.svg)](https://github.com/Stellar-VaultLink/invofi-contracts/actions/workflows/scout-security-analysis.yml)
 [![Coverage](https://img.shields.io/endpoint?url=https://raw.githubusercontent.com/Stellar-VaultLink/invofi-contracts/master/coverage/badge.json)](./coverage/README.md)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](./LICENSE)
+[![Telegram](https://img.shields.io/badge/Community-Telegram-26A5E4)](https://t.me/+K56Xkd2pfPM4NDE0)
+[![LinkedIn](https://img.shields.io/badge/Company-LinkedIn-0A66C2)](https://www.linkedin.com/company/stellar-vaultlink)
 
 ---
 
@@ -527,6 +529,12 @@ Thanks to everyone who has contributed to InvoFi — the list below is generated
 	<tbody>
 </table>
 <!-- readme: contributors -end -->
+
+## Community
+
+- [Telegram](https://t.me/+K56Xkd2pfPM4NDE0) — community chat for questions and updates
+- [LinkedIn](https://www.linkedin.com/company/stellar-vaultlink) — Stellar VaultLink company page
+- Main repo: [invofi](https://github.com/Stellar-VaultLink/invofi) — frontend, SDK, and full community links
 
 ## Contributing
 
