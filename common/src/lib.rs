@@ -967,6 +967,14 @@ pub trait FinancingInterface {
     /// due timestamp ≤ now) and has not yet been covered by `amount_repaid`.
     /// Returns 0 when all installments are paid or no schedule exists.
     fn get_installment_due(env: Env, offer_id: Symbol) -> u32;
+
+    /// Return paginated active financed positions for a lender.
+    fn get_lender_positions(
+        env: Env,
+        lender: Address,
+        cursor: Option<Symbol>,
+        limit: u32,
+    ) -> Vec<FinancingOffer>;
 }
 
 // ─── Insurance Cross-Contract Interface ──────────────────────────────────────

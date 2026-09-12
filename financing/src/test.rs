@@ -997,7 +997,7 @@ fn test_get_offers_paginated() {
             &rate,
             &86_400u64,
             &0u64,
-    );
+        );
     }
 
     let page1 = fin.get_offers_paginated(&0_u32, &2_u32);
@@ -1008,6 +1008,204 @@ fn test_get_offers_paginated() {
 
     let page3 = fin.get_offers_paginated(&4_u32, &2_u32);
     assert_eq!(page3.len(), 0);
+}
+
+#[test]
+fn test_get_lender_positions_empty() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let admin = Address::generate(&env);
+    let token = Address::generate(&env);
+    let (_reg, fin) = setup_contracts(&env, &admin, &token);
+
+    let lender = Address::generate(&env);
+    let positions = fin.get_lender_positions(&lender, &None, &10_u32);
+    assert_eq!(positions.len(), 0);
+}
+
+#[test]
+fn test_get_lender_positions_status_filtering() {
+    let env = Env::default();
+    env.mock_all_auths();
+    env.ledger().set_timestamp(1_000_000);
+
+    let admin = Address::generate(&env);
+    let token_id = create_token(&env);
+    let (reg, fin) = setup_contracts(&env, &admin, &token_id);
+    let rep_addr = Address::generate(&env);
+    fin.set_repayment_contract(&one(&env, &admin), &rep_addr);
+
+    let originator = Address::generate(&env);
+    let lender = Address::generate(&env);
+    let other_lender = Address::generate(&env);
+
+    // Register invoice
+    let inv_id = symbol_short!("inv_f");
+    reg.register_invoice(
+        &inv_id,
+        &originator,
+        &10_000_000_000i128,
+        &symbol_short!("USDC"),
+        &2_000_000u64,
+    );
+
+    // Offer 1: Pending (not accepted)
+    fin.create_offer(
+        &symbol_short!("off_pnd"),
+        &inv_id,
+        &lender,
+        &1_000_000_000i128,
+        &symbol_short!("USDC"),
+        &300u32,
+        &86_400u64,
+        &0u64,
+    );
+
+    // Offer 2: Accepted position
+    fin.create_offer(
+        &symbol_short!("off_acc"),
+        &inv_id,
+        &lender,
+        &2_000_000_000i128,
+        &symbol_short!("USDC"),
+        &400u32,
+        &86_400u64,
+        &0u64,
+    );
+    fin.update_offer_status(&symbol_short!("off_acc"), &OfferStatus::Accepted);
+
+    // Offer 3: Financed position (partially repaid ongoing)
+    fin.create_offer(
+        &symbol_short!("off_fin"),
+        &inv_id,
+        &lender,
+        &3_000_000_000i128,
+        &symbol_short!("USDC"),
+        &500u32,
+        &86_400u64,
+        &0u64,
+    );
+    fin.update_offer_status(&symbol_short!("off_fin"), &OfferStatus::Financed);
+
+    // Offer 4: Repaid (closed, no longer active position)
+    fin.create_offer(
+        &symbol_short!("off_rpd"),
+        &inv_id,
+        &lender,
+        &4_000_000_000i128,
+        &symbol_short!("USDC"),
+        &600u32,
+        &86_400u64,
+        &0u64,
+    );
+    fin.update_offer_status(&symbol_short!("off_rpd"), &OfferStatus::Repaid);
+
+    // Offer 5: Rejected
+    fin.create_offer(
+        &symbol_short!("off_rej"),
+        &inv_id,
+        &lender,
+        &5_000_000_000i128,
+        &symbol_short!("USDC"),
+        &700u32,
+        &86_400u64,
+        &0u64,
+    );
+    fin.update_offer_status(&symbol_short!("off_rej"), &OfferStatus::Rejected);
+
+    // Offer 6: Another lender's accepted position
+    fin.create_offer(
+        &symbol_short!("off_oth"),
+        &inv_id,
+        &other_lender,
+        &1_000_000_000i128,
+        &symbol_short!("USDC"),
+        &300u32,
+        &86_400u64,
+        &0u64,
+    );
+    fin.update_offer_status(&symbol_short!("off_oth"), &OfferStatus::Accepted);
+
+    let positions = fin.get_lender_positions(&lender, &None, &10_u32);
+    // Only off_acc and off_fin should be present
+    assert_eq!(positions.len(), 2);
+    let id0 = positions.get(0).unwrap().id;
+    let id1 = positions.get(1).unwrap().id;
+    assert!(id0 == symbol_short!("off_acc") || id0 == symbol_short!("off_fin"));
+    assert!(id1 == symbol_short!("off_acc") || id1 == symbol_short!("off_fin"));
+    assert_ne!(id0, id1);
+}
+
+#[test]
+fn test_get_lender_positions_cursor_pagination() {
+    let env = Env::default();
+    env.mock_all_auths();
+    env.ledger().set_timestamp(1_000_000);
+
+    let admin = Address::generate(&env);
+    let token = Address::generate(&env);
+    let (reg, fin) = setup_contracts(&env, &admin, &token);
+    let rep_addr = Address::generate(&env);
+    fin.set_repayment_contract(&one(&env, &admin), &rep_addr);
+
+    let originator = Address::generate(&env);
+    let lender = Address::generate(&env);
+    let inv_id = symbol_short!("inv_pg");
+    reg.register_invoice(
+        &inv_id,
+        &originator,
+        &10_000_000_000i128,
+        &symbol_short!("USDC"),
+        &2_000_000u64,
+    );
+
+    // Create 5 financed offers: p1, p2, p3, p4, p5
+    for id_str in ["p1", "p2", "p3", "p4", "p5"] {
+        let sym = soroban_sdk::Symbol::new(&env, id_str);
+        fin.create_offer(
+            &sym,
+            &inv_id,
+            &lender,
+            &100_000_000i128,
+            &symbol_short!("USDC"),
+            &300u32,
+            &86_400u64,
+            &0u64,
+        );
+        fin.update_offer_status(&sym, &OfferStatus::Financed);
+    }
+
+    // Page 1: limit 2, cursor None
+    let page1 = fin.get_lender_positions(&lender, &None, &2_u32);
+    assert_eq!(page1.len(), 2);
+    let p1_id = page1.get(0).unwrap().id;
+    let p2_id = page1.get(1).unwrap().id;
+
+    // Page 2: limit 2, cursor = Some(p2_id)
+    let page2 = fin.get_lender_positions(&lender, &Some(p2_id.clone()), &2_u32);
+    assert_eq!(page2.len(), 2);
+    let p3_id = page2.get(0).unwrap().id;
+    let p4_id = page2.get(1).unwrap().id;
+
+    // Verify no overlap between page 1 and page 2
+    assert_ne!(p1_id, p3_id);
+    assert_ne!(p2_id, p3_id);
+    assert_ne!(p1_id, p4_id);
+    assert_ne!(p2_id, p4_id);
+
+    // Page 3: limit 2, cursor = Some(p4_id)
+    let page3 = fin.get_lender_positions(&lender, &Some(p4_id.clone()), &2_u32);
+    assert_eq!(page3.len(), 1);
+    let p5_id = page3.get(0).unwrap().id;
+    assert_ne!(p5_id, p4_id);
+
+    // Page 4: limit 2, cursor = Some(p5_id)
+    let page4 = fin.get_lender_positions(&lender, &Some(p5_id), &2_u32);
+    assert_eq!(page4.len(), 0);
+
+    // Limit 0 returns empty
+    let page_zero = fin.get_lender_positions(&lender, &None, &0_u32);
+    assert_eq!(page_zero.len(), 0);
 }
 
 // ─── Cross-contract callback tests ────────────────────────────────────────
@@ -1188,7 +1386,11 @@ fn test_financing_bootstrap_admin_config_defaults() {
     let admin = Address::generate(&env);
     let financing_id = env.register(
         FinancingContract,
-        (admin.clone(), Address::generate(&env), Address::generate(&env)),
+        (
+            admin.clone(),
+            Address::generate(&env),
+            Address::generate(&env),
+        ),
     );
     let fin = super::FinancingContractClient::new(&env, &financing_id);
 
@@ -1205,7 +1407,11 @@ fn test_financing_set_signers_requires_threshold() {
     let admin = Address::generate(&env);
     let financing_id = env.register(
         FinancingContract,
-        (admin.clone(), Address::generate(&env), Address::generate(&env)),
+        (
+            admin.clone(),
+            Address::generate(&env),
+            Address::generate(&env),
+        ),
     );
     let fin = super::FinancingContractClient::new(&env, &financing_id);
 
@@ -1296,7 +1502,7 @@ fn test_pause_blocks_all_financing_state_changes() {
             &500u32,
             &86_400u64,
             &0u64,
-    );
+        );
     });
     assert_paused(|| {
         fin.withdraw_offer(&symbol_short!("offx2"), &lender);
@@ -1314,7 +1520,11 @@ fn test_pause_blocks_all_financing_state_changes() {
         fin.transfer_admin(&one(&env, &admin), &new_admin);
     });
     assert_paused(|| {
-        fin.register_currency(&one(&env, &admin), &symbol_short!("EUR"), &Address::generate(&env));
+        fin.register_currency(
+            &one(&env, &admin),
+            &symbol_short!("EUR"),
+            &Address::generate(&env),
+        );
     });
     assert_paused(|| {
         fin.set_position_token(&one(&env, &admin), &pos_token);
@@ -1915,7 +2125,7 @@ fn setup_negotiation<'a>(
     );
     let fin = super::FinancingContractClient::new(env, &financing_id);
 
-    reg.set_financing_contract(&one(&env, &admin), &financing_id);
+    reg.set_financing_contract(&one(env, &admin), &financing_id);
     // The lender's standing allowance to the financing contract is their
     // pre-commitment: it is what makes auto-accept executable without a second
     // signature from them at match time.
@@ -3129,5 +3339,8 @@ fn test_counter_offer_interest_rate_at_cap_records_in_history() {
     // The rate is recorded in negotiation history
     let history = fin.get_negotiation(&offer_id);
     assert_eq!(history.len(), 1);
-    assert_eq!(history.get(0).unwrap().interest_rate, invofi_common::MAX_INTEREST_BPS);
+    assert_eq!(
+        history.get(0).unwrap().interest_rate,
+        invofi_common::MAX_INTEREST_BPS
+    );
 }
