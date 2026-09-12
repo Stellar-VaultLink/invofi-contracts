@@ -315,6 +315,126 @@ fn test_repay_unfinanced_invoice_panics() {
 }
 
 #[test]
+#[should_panic(expected = "Error(Contract, #3)")]
+fn test_repay_invoice_double_repayment_panics() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let funded_at: u64 = 1_000_000;
+    env.ledger().set_timestamp(funded_at);
+
+    let admin = Address::generate(&env);
+    let originator = Address::generate(&env);
+    let lender = Address::generate(&env);
+    let token_id = create_token(&env);
+    let (reg, fin, rep) = setup_contracts(&env, &admin, &token_id);
+
+    let invoice_id = symbol_short!("inv_dup");
+    let offer_id = symbol_short!("off_dup");
+    let amount: i128 = 1_000_000_000;
+    let interest_rate: u32 = 500;
+
+    mint_and_approve(&env, &token_id, &fin.address, &lender, amount);
+
+    reg.register_invoice(
+        &invoice_id,
+        &originator,
+        &amount,
+        &symbol_short!("USDC"),
+        &(3_000_000u64),
+    );
+    fin.create_offer(
+        &offer_id,
+        &invoice_id,
+        &lender,
+        &amount,
+        &symbol_short!("USDC"),
+        &interest_rate,
+        &(2_592_000u64),
+        &0u64,
+    );
+    fin.accept_offer(&offer_id, &originator);
+
+    // Fast-forward 1 day
+    env.ledger().set_timestamp(funded_at + 86_400);
+    let expected_interest = amount * (interest_rate as i128) / 3_650_000;
+    let total_due = amount + expected_interest;
+
+    // Mint funds for repayment
+    let asset_client = token::StellarAssetClient::new(&env, &token_id);
+    asset_client.mint(&originator, &(total_due * 2));
+
+    // First repayment: succeeds and transitions invoice + offer to Repaid
+    let repaid = rep.repay_invoice(&invoice_id, &offer_id, &originator, &total_due);
+    assert_eq!(repaid.status, InvoiceStatus::Repaid);
+    assert_eq!(fin.get_offer(&offer_id).status, OfferStatus::Repaid);
+
+    // Duplicate repayment attempt (retry / keeper overlap): must panic with InvalidTransition (#3)
+    rep.repay_invoice(&invoice_id, &offer_id, &originator, &total_due);
+}
+
+#[test]
+#[should_panic(expected = "Error(Contract, #3)")]
+fn test_repay_invoice_duplicate_partial_settlement_panics() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let funded_at: u64 = 1_000_000;
+    env.ledger().set_timestamp(funded_at);
+
+    let admin = Address::generate(&env);
+    let originator = Address::generate(&env);
+    let lender = Address::generate(&env);
+    let token_id = create_token(&env);
+    let (reg, fin, rep) = setup_contracts(&env, &admin, &token_id);
+
+    let invoice_id = symbol_short!("inv_ptd");
+    let offer_id = symbol_short!("off_ptd");
+    let amount: i128 = 1_000_000_000;
+    let interest_rate: u32 = 500;
+
+    mint_and_approve(&env, &token_id, &fin.address, &lender, amount);
+
+    reg.register_invoice(
+        &invoice_id,
+        &originator,
+        &amount,
+        &symbol_short!("USDC"),
+        &(3_000_000u64),
+    );
+    fin.create_offer(
+        &offer_id,
+        &invoice_id,
+        &lender,
+        &amount,
+        &symbol_short!("USDC"),
+        &interest_rate,
+        &(2_592_000u64),
+        &0u64,
+    );
+    fin.accept_offer(&offer_id, &originator);
+
+    env.ledger().set_timestamp(funded_at + 86_400);
+    let asset_client = token::StellarAssetClient::new(&env, &token_id);
+    asset_client.mint(&originator, &(amount * 2));
+
+    // First partial payment (50%)
+    let partial_1 = amount / 2;
+    let repaid_1 = rep.repay_invoice(&invoice_id, &offer_id, &originator, &partial_1);
+    assert_eq!(repaid_1.status, InvoiceStatus::Financed);
+
+    // Second payment: fully settles the remainder
+    env.ledger().set_timestamp(funded_at + 2 * 86_400);
+    let remaining_after = rep.get_remaining_principal(&offer_id);
+    let accrued_2 = remaining_after * (interest_rate as i128) * 2 / 3_650_000;
+    let total_remaining = remaining_after + accrued_2;
+    let repaid_final = rep.repay_invoice(&invoice_id, &offer_id, &originator, &total_remaining);
+    assert_eq!(repaid_final.status, InvoiceStatus::Repaid);
+    assert_eq!(fin.get_offer(&offer_id).status, OfferStatus::Repaid);
+
+    // Third payment attempt on fully settled invoice must panic with InvalidTransition (#3)
+    rep.repay_invoice(&invoice_id, &offer_id, &originator, &partial_1);
+}
+
+#[test]
 #[should_panic(expected = "repayment amount must be greater than zero")]
 fn test_repay_zero_amount_panics() {
     let env = Env::default();
@@ -784,7 +904,10 @@ fn test_repayment_set_signers_requires_threshold() {
     rep.set_signers(&one(&env, &admin), &two_signers, &2u32);
 
     let result = rep.try_pause(&one(&env, &admin));
-    assert!(result.is_err(), "one of two required signatures must not pause");
+    assert!(
+        result.is_err(),
+        "one of two required signatures must not pause"
+    );
 
     let mut both = soroban_sdk::Vec::new(&env);
     both.push_back(admin.clone());
@@ -1309,9 +1432,9 @@ fn setup_penalty_case<'a>(env: &'a Env) -> PenCase<'a> {
     let rep = super::RepaymentContractClient::new(env, &repayment_id);
 
     mint_and_approve(env, &token_id, &financing_id, &lender, PEN_AMOUNT);
-    fin.set_repayment_contract(&one(&env, &admin), &repayment_id);
-    reg.set_repayment_contract(&one(&env, &admin), &repayment_id);
-    reg.set_financing_contract(&one(&env, &admin), &financing_id);
+    fin.set_repayment_contract(&one(env, &admin), &repayment_id);
+    reg.set_repayment_contract(&one(env, &admin), &repayment_id);
+    reg.set_financing_contract(&one(env, &admin), &financing_id);
 
     reg.register_invoice(
         &symbol_short!("inv_pen"),
@@ -1397,7 +1520,8 @@ fn test_penalty_accrues_in_whole_days() {
     env.mock_all_auths();
     env.ledger().set_timestamp(PEN_DUE_DATE - 2_592_000);
     let c = setup_penalty_case(&env);
-    c.rep.set_penalty(&one(&env, &c.admin), &PEN_BPS, &PEN_CAP_BPS);
+    c.rep
+        .set_penalty(&one(&env, &c.admin), &PEN_BPS, &PEN_CAP_BPS);
 
     at_days_overdue(&env, 1);
     assert_eq!(
@@ -1426,7 +1550,8 @@ fn test_penalty_truncates_partial_day_toward_borrower() {
     env.mock_all_auths();
     env.ledger().set_timestamp(PEN_DUE_DATE - 2_592_000);
     let c = setup_penalty_case(&env);
-    c.rep.set_penalty(&one(&env, &c.admin), &PEN_BPS, &PEN_CAP_BPS);
+    c.rep
+        .set_penalty(&one(&env, &c.admin), &PEN_BPS, &PEN_CAP_BPS);
 
     // One second short of day 5: the day in progress is not charged, so the
     // borrower is billed for 4 days. ADR-0007 decision 3 — rounding runs in
@@ -1451,7 +1576,8 @@ fn test_penalty_not_accrued_before_or_at_due_date() {
     env.mock_all_auths();
     env.ledger().set_timestamp(PEN_DUE_DATE - 2_592_000);
     let c = setup_penalty_case(&env);
-    c.rep.set_penalty(&one(&env, &c.admin), &PEN_BPS, &PEN_CAP_BPS);
+    c.rep
+        .set_penalty(&one(&env, &c.admin), &PEN_BPS, &PEN_CAP_BPS);
 
     env.ledger().set_timestamp(PEN_DUE_DATE - 1);
     assert_eq!(c.rep.calculate_penalty(&symbol_short!("off_pen")), 0);
@@ -1471,7 +1597,8 @@ fn test_penalty_stops_at_hard_cap() {
     env.mock_all_auths();
     env.ledger().set_timestamp(PEN_DUE_DATE - 2_592_000);
     let c = setup_penalty_case(&env);
-    c.rep.set_penalty(&one(&env, &c.admin), &PEN_BPS, &PEN_CAP_BPS);
+    c.rep
+        .set_penalty(&one(&env, &c.admin), &PEN_BPS, &PEN_CAP_BPS);
 
     // Day 299: still below the ceiling, accruing linearly.
     at_days_overdue(&env, 299);
@@ -1498,7 +1625,8 @@ fn test_penalty_base_frozen_across_partial_repayment() {
     env.mock_all_auths();
     env.ledger().set_timestamp(PEN_DUE_DATE - 2_592_000);
     let c = setup_penalty_case(&env);
-    c.rep.set_penalty(&one(&env, &c.admin), &PEN_BPS, &PEN_CAP_BPS);
+    c.rep
+        .set_penalty(&one(&env, &c.admin), &PEN_BPS, &PEN_CAP_BPS);
 
     at_days_overdue(&env, 5);
     let before = c.rep.calculate_penalty(&symbol_short!("off_pen"));
@@ -1541,7 +1669,8 @@ fn test_penalty_must_be_settled_for_full_repayment() {
     env.mock_all_auths();
     env.ledger().set_timestamp(PEN_DUE_DATE - 2_592_000);
     let c = setup_penalty_case(&env);
-    c.rep.set_penalty(&one(&env, &c.admin), &PEN_BPS, &PEN_CAP_BPS);
+    c.rep
+        .set_penalty(&one(&env, &c.admin), &PEN_BPS, &PEN_CAP_BPS);
 
     at_days_overdue(&env, 5);
     let _penalty = 5 * PEN_PER_DAY;
@@ -1592,7 +1721,8 @@ fn test_penalty_overpayment_beyond_accrued_total_panics() {
     env.mock_all_auths();
     env.ledger().set_timestamp(PEN_DUE_DATE - 2_592_000);
     let c = setup_penalty_case(&env);
-    c.rep.set_penalty(&one(&env, &c.admin), &PEN_BPS, &PEN_CAP_BPS);
+    c.rep
+        .set_penalty(&one(&env, &c.admin), &PEN_BPS, &PEN_CAP_BPS);
 
     at_days_overdue(&env, 5);
     // Total owed = principal + pro-rata interest + penalty.
@@ -1613,7 +1743,8 @@ fn test_penalty_accrues_while_invoice_marked_overdue() {
     env.mock_all_auths();
     env.ledger().set_timestamp(PEN_DUE_DATE - 2_592_000);
     let c = setup_penalty_case(&env);
-    c.rep.set_penalty(&one(&env, &c.admin), &PEN_BPS, &PEN_CAP_BPS);
+    c.rep
+        .set_penalty(&one(&env, &c.admin), &PEN_BPS, &PEN_CAP_BPS);
 
     // Accrual is anchored on due_date, not on the status transition, so
     // flipping the invoice to Overdue neither starts nor resets the meter.
@@ -1639,7 +1770,8 @@ fn test_penalty_excluded_from_insurance_payout() {
     env.mock_all_auths();
     env.ledger().set_timestamp(PEN_DUE_DATE - 2_592_000);
     let c = setup_penalty_case(&env);
-    c.rep.set_penalty(&one(&env, &c.admin), &PEN_BPS, &PEN_CAP_BPS);
+    c.rep
+        .set_penalty(&one(&env, &c.admin), &PEN_BPS, &PEN_CAP_BPS);
 
     // A pool deliberately deep enough to cover the full claim, so the
     // assertion below distinguishes "penalty excluded" from "pool exhausted".
@@ -1695,7 +1827,8 @@ fn test_set_penalty_admin_only() {
     let c = setup_penalty_case(&env);
 
     let stranger = Address::generate(&env);
-    c.rep.set_penalty(&one(&env, &stranger), &PEN_BPS, &PEN_CAP_BPS);
+    c.rep
+        .set_penalty(&one(&env, &stranger), &PEN_BPS, &PEN_CAP_BPS);
 }
 
 #[test]
@@ -1706,7 +1839,8 @@ fn test_set_penalty_rejects_excessive_rate() {
     env.ledger().set_timestamp(PEN_DUE_DATE - 2_592_000);
     let c = setup_penalty_case(&env);
 
-    c.rep.set_penalty(&one(&env, &c.admin), &501u32, &PEN_CAP_BPS);
+    c.rep
+        .set_penalty(&one(&env, &c.admin), &501u32, &PEN_CAP_BPS);
 }
 
 #[test]
@@ -1717,7 +1851,8 @@ fn test_set_penalty_rejects_excessive_cap() {
     env.ledger().set_timestamp(PEN_DUE_DATE - 2_592_000);
     let c = setup_penalty_case(&env);
 
-    c.rep.set_penalty(&one(&env, &c.admin), &PEN_BPS, &10_001u32);
+    c.rep
+        .set_penalty(&one(&env, &c.admin), &PEN_BPS, &10_001u32);
 }
 
 #[test]
@@ -1729,5 +1864,6 @@ fn test_set_penalty_blocked_while_paused() {
     let c = setup_penalty_case(&env);
 
     c.rep.pause(&one(&env, &c.admin));
-    c.rep.set_penalty(&one(&env, &c.admin), &PEN_BPS, &PEN_CAP_BPS);
+    c.rep
+        .set_penalty(&one(&env, &c.admin), &PEN_BPS, &PEN_CAP_BPS);
 }
