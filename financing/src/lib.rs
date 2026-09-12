@@ -1162,6 +1162,49 @@ impl FinancingContract {
         result
     }
 
+    /// Returns a paginated page of active financed positions for a lender.
+    ///
+    /// Active positions are offers owned by `lender` with status `Accepted` or `Financed`.
+    ///
+    /// Keyset pagination (by offer id):
+    /// - `cursor`: optional offer ID to start after (exclusive). If `None`, begins from the start.
+    /// - `limit`: maximum number of positions to return (clamped to max 50; 0 returns empty).
+    pub fn get_lender_positions(
+        env: Env,
+        lender: Address,
+        cursor: Option<Symbol>,
+        limit: u32,
+    ) -> Vec<FinancingOffer> {
+        let mut result: Vec<FinancingOffer> = Vec::new(&env);
+        if limit == 0 {
+            return result;
+        }
+        let safe_limit = limit.min(50);
+        let offers = load_offers(&env);
+
+        let mut past_cursor = cursor.is_none();
+        for (id, offer) in offers.iter() {
+            if !past_cursor {
+                if let Some(ref c) = cursor {
+                    if id == *c {
+                        past_cursor = true;
+                    }
+                }
+                continue;
+            }
+
+            if offer.lender == lender
+                && (offer.status == OfferStatus::Accepted || offer.status == OfferStatus::Financed)
+            {
+                result.push_back(offer);
+                if result.len() >= safe_limit {
+                    break;
+                }
+            }
+        }
+        result
+    }
+
     /// Return all financing offers. Admin-only analytics function.
     /// At scale, prefer paginated queries — this returns an unbounded Vec.
     pub fn get_all_offers(env: Env) -> Vec<FinancingOffer> {
