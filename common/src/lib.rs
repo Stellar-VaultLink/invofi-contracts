@@ -320,6 +320,44 @@ pub enum RiskTier {
     C = 2,
 }
 
+/// Coarse reputation tier mapped from the originator's raw score (issue #151).
+/// Used by marketplace UI, loan screening, and insurance pricing.
+#[contracttype]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[repr(u32)]
+pub enum ReputationTier {
+    /// Score 0: New originator or no positive net score.
+    Unrated = 0,
+    /// Score 1..=4: Beginner / building track record.
+    Bronze = 1,
+    /// Score 5..=14: Established borrower with consistent repayments.
+    Silver = 2,
+    /// Score 15..=29: High-volume, highly reliable borrower.
+    Gold = 3,
+    /// Score >= 30: Prime institutional borrower.
+    Platinum = 4,
+}
+
+pub const TIER_BRONZE_MIN_SCORE: i128 = 1;
+pub const TIER_SILVER_MIN_SCORE: i128 = 5;
+pub const TIER_GOLD_MIN_SCORE: i128 = 15;
+pub const TIER_PLATINUM_MIN_SCORE: i128 = 30;
+
+/// Map a raw reputation score to its corresponding tier.
+pub fn score_to_tier(score: i128) -> ReputationTier {
+    if score >= TIER_PLATINUM_MIN_SCORE {
+        ReputationTier::Platinum
+    } else if score >= TIER_GOLD_MIN_SCORE {
+        ReputationTier::Gold
+    } else if score >= TIER_SILVER_MIN_SCORE {
+        ReputationTier::Silver
+    } else if score >= TIER_BRONZE_MIN_SCORE {
+        ReputationTier::Bronze
+    } else {
+        ReputationTier::Unrated
+    }
+}
+
 /// An invoice registered on-chain.
 #[contracttype]
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -1011,6 +1049,9 @@ pub trait ReputationInterface {
 
     /// Read an originator's current reputation score (public, read-only).
     fn get_score(env: Env, originator: Address) -> i128;
+
+    /// Read an originator's coarse reputation tier (public, read-only, issue #151).
+    fn get_score_tier(env: Env, originator: Address) -> u32;
 }
 
 // ─── assert_transition unit tests ────────────────────────────────────────────

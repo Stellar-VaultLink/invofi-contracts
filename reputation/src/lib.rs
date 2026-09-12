@@ -30,6 +30,10 @@ use soroban_sdk::{
 };
 
 use invofi_common::{assert_not_paused, AdminConfig, ContractError};
+pub use invofi_common::{
+    score_to_tier, ReputationTier, TIER_BRONZE_MIN_SCORE, TIER_GOLD_MIN_SCORE,
+    TIER_PLATINUM_MIN_SCORE, TIER_SILVER_MIN_SCORE,
+};
 
 /// Threshold-gated admin check (ADR-0010). See `invofi_common::assert_threshold`.
 fn assert_admin(env: &Env, signers: &Vec<Address>) {
@@ -99,10 +103,8 @@ fn apply_pending_decay(record: &mut ReputationRecord, now: u64) {
         let elapsed = now - record.last_recompute;
         let half_life = DECAY_HALF_LIFE_SECS as f64;
         let scale = libm::pow(0.5, elapsed as f64 / half_life);
-        record.weighted_repayments =
-            (record.weighted_repayments as f64 * scale) as i128;
-        record.weighted_defaults =
-            (record.weighted_defaults as f64 * scale) as i128;
+        record.weighted_repayments = (record.weighted_repayments as f64 * scale) as i128;
+        record.weighted_defaults = (record.weighted_defaults as f64 * scale) as i128;
     }
     record.last_recompute = now;
 }
@@ -366,6 +368,19 @@ impl ReputationContract {
                 last_recompute: 0,
             });
         (record.weighted_repayments - record.weighted_defaults).max(0)
+    }
+
+    /// Returns the originator's coarse reputation tier (issue #151).
+    /// Maps the current score to documented tiers:
+    /// - 0: Unrated (score == 0)
+    /// - 1: Bronze (score 1..=4)
+    /// - 2: Silver (score 5..=14)
+    /// - 3: Gold (score 15..=29)
+    /// - 4: Platinum (score >= 30)
+    /// Public, read-only O(1) query.
+    pub fn get_score_tier(env: Env, originator: Address) -> u32 {
+        let score = Self::get_score(env, originator);
+        score_to_tier(score) as u32
     }
 
     /// Raw outcome counts for transparency and auditability. The counts

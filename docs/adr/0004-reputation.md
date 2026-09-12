@@ -82,6 +82,25 @@ raw counts into a simple, transparent, publicly-readable score.
      observe the correction. `get_score` / `get_record` stay public and
      read-only. Admin auth mirrors `resolve_dispute` in the registry.
 
+8. **Coarse reputation tiers (issue #151):**
+   Consumers (marketplace UI, risk screening, insurance pricing) need
+   standardized, coarse tiers to make decisions without hardcoding
+   thresholds across multiple client apps. The tiers map monotonically from
+   `get_score(originator)`:
+   - **Tier 0 (`ReputationTier::Unrated`, 0)**: `score == 0` (New originator
+     or zero net score).
+   - **Tier 1 (`ReputationTier::Bronze`, 1)**: `1 <= score <= 4` (Building track
+     record, early repayment history).
+   - **Tier 2 (`ReputationTier::Silver`, 2)**: `5 <= score <= 14` (Established
+     borrower with consistent track record).
+   - **Tier 3 (`ReputationTier::Gold`, 3)**: `15 <= score <= 29` (High-volume
+     reliable originator).
+   - **Tier 4 (`ReputationTier::Platinum`, 4)**: `score >= 30` (Prime
+     institutional borrower).
+
+   Exposed via public query `get_score_tier(originator) -> u32` in `reputation`
+   and in `ReputationInterface`.
+
 ## Consequences
 
 - Lenders get a queryable, honest default-risk signal per originator.

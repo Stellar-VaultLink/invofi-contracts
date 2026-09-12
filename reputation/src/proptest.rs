@@ -3,7 +3,10 @@ extern crate std;
 
 use crate::{ReputationContract, OUTCOME_DEFAULTED, OUTCOME_REPAID};
 use proptest::prelude::*;
-use soroban_sdk::{testutils::{Address as _, Ledger as _}, Address, Env};
+use soroban_sdk::{
+    testutils::{Address as _, Ledger as _},
+    Address, Env,
+};
 
 fn setup(env: &Env) -> (crate::ReputationContractClient<'static>, Address, Address) {
     let admin = Address::generate(env);
