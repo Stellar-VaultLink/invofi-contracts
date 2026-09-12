@@ -1,7 +1,7 @@
 #![cfg(test)]
 extern crate std;
 
-use super::{ReputationContract, OUTCOME_DEFAULTED, OUTCOME_REPAID};
+use super::{score_to_tier, ReputationContract, ReputationTier, OUTCOME_DEFAULTED, OUTCOME_REPAID};
 use soroban_sdk::{
     symbol_short,
     testutils::{Address as _, Events as _, Ledger as _},
@@ -40,7 +40,10 @@ fn test_reputation_set_signers_requires_threshold() {
     client.set_signers(&one(&env, &admin), &two_signers, &2u32);
 
     let result = client.try_pause(&one(&env, &admin));
-    assert!(result.is_err(), "one of two required signatures must not pause");
+    assert!(
+        result.is_err(),
+        "one of two required signatures must not pause"
+    );
 
     let mut both = soroban_sdk::Vec::new(&env);
     both.push_back(admin.clone());
@@ -423,7 +426,10 @@ fn test_old_default_decays() {
     assert_eq!(rec.repayments, 2);
     assert_eq!(rec.defaults, 1);
     let score = client.get_score(&originator);
-    assert!(score >= 1, "decayed default should allow score > 0, got {score}");
+    assert!(
+        score >= 1,
+        "decayed default should allow score > 0, got {score}"
+    );
 }
 
 /// After two half-lives, the old default contributes < 25 % of its
@@ -450,7 +456,10 @@ fn test_old_default_decays_further_after_two_half_lives() {
     // After 2 half-lives the default's weighted_defaults ≈ 0.5
     // (2 × 0.25), the fresh repayment adds 1.  Score ≈ 1.
     let score = client.get_score(&originator);
-    assert!(score >= 1, "score should be >= 1 after two half-lives, got {score}");
+    assert!(
+        score >= 1,
+        "score should be >= 1 after two half-lives, got {score}"
+    );
 }
 
 /// Score floor at 0 is respected even with decay — score never goes
@@ -618,4 +627,153 @@ fn test_get_score_reads_cached_value() {
     // Default adds 2 to weighted_defaults, old repayment (1) has decayed
     // to ~0.001.  Score = 0.
     assert!(score >= 0, "score must not be negative: {score}");
+}
+
+// ─── Coarse reputation tiers tests (issue #151) ─────────────────────────────
+
+#[test]
+fn test_score_to_tier_pure_function_boundaries() {
+    assert_eq!(score_to_tier(-5), ReputationTier::Unrated);
+    assert_eq!(score_to_tier(0), ReputationTier::Unrated);
+    assert_eq!(score_to_tier(1), ReputationTier::Bronze);
+    assert_eq!(score_to_tier(4), ReputationTier::Bronze);
+    assert_eq!(score_to_tier(5), ReputationTier::Silver);
+    assert_eq!(score_to_tier(14), ReputationTier::Silver);
+    assert_eq!(score_to_tier(15), ReputationTier::Gold);
+    assert_eq!(score_to_tier(29), ReputationTier::Gold);
+    assert_eq!(score_to_tier(30), ReputationTier::Platinum);
+    assert_eq!(score_to_tier(100), ReputationTier::Platinum);
+}
+
+#[test]
+fn test_get_score_tier_unrated_for_fresh_or_zero_score() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let admin = Address::generate(&env);
+    let recorder = Address::generate(&env);
+    let originator = Address::generate(&env);
+    let client = setup(&env, &admin);
+    client.set_recorder(&one(&env, &admin), &recorder);
+
+    // Fresh originator (no recorded outcomes)
+    assert_eq!(client.get_score(&originator), 0);
+    assert_eq!(
+        client.get_score_tier(&originator),
+        ReputationTier::Unrated as u32
+    );
+
+    // After a default (score stays 0)
+    set_timestamp(&env, 1_000_000);
+    client.record_outcome(&originator, &OUTCOME_DEFAULTED);
+    assert_eq!(client.get_score(&originator), 0);
+    assert_eq!(
+        client.get_score_tier(&originator),
+        ReputationTier::Unrated as u32
+    );
+}
+
+#[test]
+fn test_get_score_tier_across_all_boundaries() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let admin = Address::generate(&env);
+    let recorder = Address::generate(&env);
+    let client = setup(&env, &admin);
+    client.set_recorder(&one(&env, &admin), &recorder);
+
+    set_timestamp(&env, 1_000_000);
+
+    // Originator 1: Bronze boundary (score 1 and score 4)
+    let orig1 = Address::generate(&env);
+    client.record_outcome(&orig1, &OUTCOME_REPAID);
+    assert_eq!(client.get_score(&orig1), 1);
+    assert_eq!(client.get_score_tier(&orig1), ReputationTier::Bronze as u32);
+
+    for _ in 0..3 {
+        client.record_outcome(&orig1, &OUTCOME_REPAID);
+    }
+    assert_eq!(client.get_score(&orig1), 4);
+    assert_eq!(client.get_score_tier(&orig1), ReputationTier::Bronze as u32);
+
+    // Originator 2: Silver boundary (score 5 and score 14)
+    let orig2 = Address::generate(&env);
+    for _ in 0..5 {
+        client.record_outcome(&orig2, &OUTCOME_REPAID);
+    }
+    assert_eq!(client.get_score(&orig2), 5);
+    assert_eq!(client.get_score_tier(&orig2), ReputationTier::Silver as u32);
+
+    for _ in 0..9 {
+        client.record_outcome(&orig2, &OUTCOME_REPAID);
+    }
+    assert_eq!(client.get_score(&orig2), 14);
+    assert_eq!(client.get_score_tier(&orig2), ReputationTier::Silver as u32);
+
+    // Originator 3: Gold boundary (score 15 and score 29)
+    let orig3 = Address::generate(&env);
+    for _ in 0..15 {
+        client.record_outcome(&orig3, &OUTCOME_REPAID);
+    }
+    assert_eq!(client.get_score(&orig3), 15);
+    assert_eq!(client.get_score_tier(&orig3), ReputationTier::Gold as u32);
+
+    for _ in 0..14 {
+        client.record_outcome(&orig3, &OUTCOME_REPAID);
+    }
+    assert_eq!(client.get_score(&orig3), 29);
+    assert_eq!(client.get_score_tier(&orig3), ReputationTier::Gold as u32);
+
+    // Originator 4: Platinum boundary (score 30 and above)
+    let orig4 = Address::generate(&env);
+    for _ in 0..30 {
+        client.record_outcome(&orig4, &OUTCOME_REPAID);
+    }
+    assert_eq!(client.get_score(&orig4), 30);
+    assert_eq!(
+        client.get_score_tier(&orig4),
+        ReputationTier::Platinum as u32
+    );
+
+    client.record_outcome(&orig4, &OUTCOME_REPAID);
+    assert_eq!(client.get_score(&orig4), 31);
+    assert_eq!(
+        client.get_score_tier(&orig4),
+        ReputationTier::Platinum as u32
+    );
+}
+
+#[test]
+fn test_get_score_tier_dispute_resolution_elevates_tier() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let admin = Address::generate(&env);
+    let recorder = Address::generate(&env);
+    let originator = Address::generate(&env);
+    let client = setup(&env, &admin);
+    client.set_recorder(&one(&env, &admin), &recorder);
+
+    set_timestamp(&env, 1_000_000);
+
+    // 5 repayments and 1 default -> net score = 5*1 - 1*2 = 3 (Tier 1: Bronze)
+    for _ in 0..5 {
+        client.record_outcome(&originator, &OUTCOME_REPAID);
+    }
+    client.record_outcome(&originator, &OUTCOME_DEFAULTED);
+    assert_eq!(client.get_score(&originator), 3);
+    assert_eq!(
+        client.get_score_tier(&originator),
+        ReputationTier::Bronze as u32
+    );
+
+    // Admin resolves dispute in originator's favour -> neutralizes 1 default.
+    // Score becomes 5 -> elevates to Tier 2: Silver.
+    let corrected = client.resolve_dispute(&one(&env, &admin), &originator, &true);
+    assert_eq!(corrected, 5);
+    assert_eq!(
+        client.get_score_tier(&originator),
+        ReputationTier::Silver as u32
+    );
 }

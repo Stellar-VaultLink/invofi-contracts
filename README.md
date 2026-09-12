@@ -157,7 +157,18 @@ the frontend's portfolio offers a one-click trustline helper.
 | `record_outcome(originator, outcome)` | Recorder only | `0` = repaid, `1` = defaulted; updates outcome counts and applies pending score decay (issue #139) |
 | `resolve_dispute(admin, originator, originator_favourable)` | Admin | Neutralize one recorded default when a dispute resolves in the originator's favour; applies pending decay and emits `rep_chg` with the corrected score (ADR-0004 §7, issue #134) |
 | `get_score(originator)` | Anyone | Cached decayed score — `weighted_repayments − weighted_defaults`, floored at 0; recomputed on each write (ADR-0004 §3, issue #139) |
+| `get_score_tier(originator)` | Anyone | Coarse reputation tier mapped from decayed score for marketplace screening and insurance pricing (issue #151) |
 | `get_record(originator)` | Anyone | Raw `{repayments, defaults}` counts plus cumulative weighted values — the source of truth |
+
+#### Reputation Tiers (issue #151)
+
+| Tier | Name | Score Range | Description |
+|---|---|---|---|
+| `0` | `Unrated` | `score == 0` | New originator or zero net score |
+| `1` | `Bronze` | `1 <= score <= 4` | Building initial track record |
+| `2` | `Silver` | `5 <= score <= 14` | Established borrower with consistent repayments |
+| `3` | `Gold` | `15 <= score <= 29` | High-volume reliable borrower |
+| `4` | `Platinum` | `score >= 30` | Prime institutional borrower |
 
 ## Protocol Events
 
