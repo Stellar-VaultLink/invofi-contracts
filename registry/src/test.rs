@@ -3979,3 +3979,150 @@ fn test_request_amendment_on_nonexistent_invoice_panics() {
         &symbol_short!("fix"),
     );
 }
+
+/// Shared fixture: a Financed invoice with one accepted offer of 8_000_000
+/// funded principal, plus one pending amendment raising the amount.
+fn financed_invoice_with_pending_amendment(
+    env: &Env,
+) -> (super::RegistryContractClient<'static>, Address, Address, Symbol) {
+    env.mock_all_auths();
+    env.ledger().set_timestamp(1_000_000);
+    let admin = Address::generate(env);
+    let contract_id = env.register(RegistryContract, (admin.clone(),));
+    let client = super::RegistryContractClient::new(env, &contract_id);
+
+    let financing_id = env.register(MockFinancingContract, ());
+    let mock_fin = MockFinancingContractClient::new(env, &financing_id);
+    client.set_financing_contract(&one(env, &admin), &financing_id);
+
+    let originator = Address::generate(env);
+    let lender = Address::generate(env);
+    let invoice_id = symbol_short!("amdinv");
+
+    client.register_invoice(
+        &invoice_id,
+        &originator,
+        &10_000_000i128,
+        &symbol_short!("XLM"),
+        &3_000_000u64,
+    );
+    client.update_invoice_status(&invoice_id, &originator, &InvoiceStatus::Financed);
+
+    let mut offers = soroban_sdk::Vec::new(env);
+    offers.push_back(FinancingOffer {
+        id: symbol_short!("off1"),
+        invoice_id: invoice_id.clone(),
+        lender: lender.clone(),
+        amount: 8_000_000i128,
+        currency: symbol_short!("XLM"),
+        interest_rate: 500,
+        duration: 86400,
+        expires_at: 0,
+        status: OfferStatus::Financed,
+        funded_at: 1_000_000,
+        amount_repaid: 0,
+    });
+    mock_fin.set_offers(&invoice_id, &offers);
+
+    client.request_amendment(
+        &invoice_id,
+        &originator,
+        &AmendmentField::Amount,
+        &15_000_000i128,
+        &0u64,
+        &symbol_short!("inc"),
+    );
+
+    (client, originator, lender, invoice_id)
+}
+
+#[test]
+fn test_amendment_records_whether_lender_approval_is_required() {
+    let env = Env::default();
+    let (client, _originator, _lender, invoice_id) =
+        financed_invoice_with_pending_amendment(&env);
+
+    let financed = client.get_amendments(&invoice_id).get(0).unwrap();
+    assert!(financed.requires_lender_approval);
+
+    let pending_id = symbol_short!("amdpen");
+    let other = Address::generate(&env);
+    client.register_invoice(
+        &pending_id,
+        &other,
+        &10_000_000i128,
+        &symbol_short!("XLM"),
+        &3_000_000u64,
+    );
+    let on_pending = client.request_amendment(
+        &pending_id,
+        &other,
+        &AmendmentField::Amount,
+        &20_000_000i128,
+        &0u64,
+        &symbol_short!("inc"),
+    );
+    assert!(!on_pending.requires_lender_approval);
+}
+
+#[test]
+fn test_pending_amendment_is_invalidated_when_invoice_leaves_financed() {
+    let env = Env::default();
+    let (client, originator, _lender, invoice_id) =
+        financed_invoice_with_pending_amendment(&env);
+
+    assert_eq!(
+        client.get_amendments(&invoice_id).get(0).unwrap().status,
+        AmendmentStatus::Pending
+    );
+
+    client.update_invoice_status(&invoice_id, &originator, &InvoiceStatus::Repaid);
+
+    let amendment = client.get_amendments(&invoice_id).get(0).unwrap();
+    assert_eq!(amendment.status, AmendmentStatus::Rejected);
+    assert_eq!(client.get_invoice(&invoice_id).amount, 10_000_000i128);
+}
+
+#[test]
+fn test_partial_repayment_keeps_pending_amendment_alive() {
+    let env = Env::default();
+    let (client, originator, lender, invoice_id) =
+        financed_invoice_with_pending_amendment(&env);
+
+    // Financed -> Financed (partial repayment) must not invalidate anything.
+    client.set_invoice_repaid_status(&invoice_id, &originator, &false);
+
+    assert_eq!(
+        client.get_amendments(&invoice_id).get(0).unwrap().status,
+        AmendmentStatus::Pending
+    );
+    let approved = client.approve_amendment(&invoice_id, &0, &lender);
+    assert_eq!(approved.status, AmendmentStatus::Approved);
+    assert_eq!(client.get_invoice(&invoice_id).amount, 15_000_000i128);
+}
+
+#[test]
+#[should_panic(expected = "Error(Contract, #3)")] // ContractError::InvalidTransition
+fn test_originator_cannot_approve_financed_amendment_after_invoice_repaid() {
+    let env = Env::default();
+    let (client, originator, _lender, invoice_id) =
+        financed_invoice_with_pending_amendment(&env);
+
+    client.update_invoice_status(&invoice_id, &originator, &InvoiceStatus::Repaid);
+
+    // The amendment was raised under lender control. Leaving Financed must not
+    // hand it back to the originator.
+    client.approve_amendment(&invoice_id, &0, &originator);
+}
+
+#[test]
+#[should_panic(expected = "Error(Contract, #3)")] // ContractError::InvalidTransition
+fn test_originator_cannot_reject_financed_amendment_after_invoice_disputed() {
+    let env = Env::default();
+    let (client, originator, _lender, invoice_id) =
+        financed_invoice_with_pending_amendment(&env);
+
+    client.update_invoice_status(&invoice_id, &originator, &InvoiceStatus::Disputed);
+
+    client.reject_amendment(&invoice_id, &0, &originator);
+}

@@ -82,6 +82,57 @@ fn save_amendments(env: &Env, map: &Map<Symbol, Vec<AmendmentRecord>>) {
         .set(&symbol_short!("amends"), map);
 }
 
+/// Reject every still-pending amendment on an invoice.
+///
+/// A pending amendment is a standing offer to change `amount` or `due_date`.
+/// It only makes sense while the financing it was raised against is live, so
+/// the invoice lifecycle must close it out rather than leave it approvable.
+fn invalidate_pending_amendments(env: &Env, invoice_id: &Symbol) {
+    let mut amendments = load_amendments(env);
+    let list = match amendments.get(invoice_id.clone()) {
+        Some(list) => list,
+        None => return,
+    };
+
+    let mut updated: Vec<AmendmentRecord> = Vec::new(env);
+    let mut invalidated: u32 = 0;
+    for mut amendment in list.iter() {
+        if amendment.status == AmendmentStatus::Pending {
+            amendment.status = AmendmentStatus::Rejected;
+            invalidated += 1;
+        }
+        updated.push_back(amendment);
+    }
+
+    if invalidated > 0 {
+        amendments.set(invoice_id.clone(), updated);
+        save_amendments(env, &amendments);
+        env.events()
+            .publish((symbol_short!("amd_inv"), invoice_id.clone()), invalidated);
+    }
+}
+
+/// Single entry point for invoice status changes inside the registry.
+///
+/// It runs the protocol-wide `assert_transition` guard, then invalidates
+/// pending amendments whenever the invoice leaves `Financed`. Leaving them
+/// pending would let an amendment raised under lender control survive into
+/// `Repaid`, `Overdue`, `Disputed`, or `Defaulted`, where no lender is left to
+/// approve it.
+fn transition_invoice_status(
+    env: &Env,
+    invoice_id: Symbol,
+    from_status: InvoiceStatus,
+    to_status: InvoiceStatus,
+    actor: Address,
+) {
+    assert_transition(env, invoice_id.clone(), from_status, to_status, actor);
+
+    if from_status == InvoiceStatus::Financed && to_status != InvoiceStatus::Financed {
+        invalidate_pending_amendments(env, &invoice_id);
+    }
+}
+
 // ─── Verification Oracle Storage Helpers (issue #181) ────────────────────────
 //
 //   ("verifs", invoice_id) -> Vec<Attestation>   attestations for one invoice
@@ -563,7 +614,7 @@ impl RegistryContract {
             env.panic_with_error(ContractError::Unauthorized);
         }
         let old_status = invoice.status;
-        assert_transition(&env, id.clone(), old_status, new_status, originator.clone());
+        transition_invoice_status(&env, id.clone(), old_status, new_status, originator.clone());
 
         invoice.status = new_status;
         invoices.set(id, invoice.clone());
@@ -614,7 +665,7 @@ impl RegistryContract {
         }
 
         let old_status = invoice.status;
-        assert_transition(
+        transition_invoice_status(
             &env,
             invoice_id.clone(),
             old_status,
@@ -656,7 +707,7 @@ impl RegistryContract {
         };
 
         let old_status = invoice.status;
-        assert_transition(&env, id.clone(), old_status, new_status, repayer.clone());
+        transition_invoice_status(&env, id.clone(), old_status, new_status, repayer.clone());
 
         invoice.status = new_status;
         invoices.set(id, invoice.clone());
@@ -688,7 +739,7 @@ impl RegistryContract {
             .unwrap_or_else(|| env.panic_with_error(ContractError::NotFound));
 
         let old_status = invoice.status;
-        assert_transition(
+        transition_invoice_status(
             &env,
             id.clone(),
             old_status,
@@ -730,7 +781,7 @@ impl RegistryContract {
         };
 
         let old_status = invoice.status;
-        assert_transition(&env, id.clone(), old_status, new_status, repayment.clone());
+        transition_invoice_status(&env, id.clone(), old_status, new_status, repayment.clone());
 
         invoice.status = new_status;
         invoices.set(id, invoice.clone());
@@ -764,7 +815,7 @@ impl RegistryContract {
             .unwrap_or_else(|| env.panic_with_error(ContractError::NotFound));
 
         let old_status = invoice.status;
-        assert_transition(
+        transition_invoice_status(
             &env,
             id.clone(),
             old_status,
@@ -800,7 +851,7 @@ impl RegistryContract {
         let old_status = invoice.status;
         // For overdue, we use a dummy actor since it's permissionless
         let dummy_actor = env.current_contract_address();
-        assert_transition(
+        transition_invoice_status(
             &env,
             id.clone(),
             old_status,
@@ -833,7 +884,7 @@ impl RegistryContract {
         }
 
         let old_status = invoice.status;
-        assert_transition(
+        transition_invoice_status(
             &env,
             invoice_id.clone(),
             old_status,
@@ -873,7 +924,7 @@ impl RegistryContract {
         let actor = signers
             .get(0)
             .unwrap_or_else(|| env.panic_with_error(ContractError::Unauthorized));
-        assert_transition(&env, invoice_id.clone(), old_status, target_status, actor);
+        transition_invoice_status(&env, invoice_id.clone(), old_status, target_status, actor);
 
         invoice.status = target_status;
         invoices.set(invoice_id, invoice.clone());
@@ -1491,6 +1542,7 @@ impl RegistryContract {
             reason,
             timestamp: env.ledger().timestamp(),
             status: AmendmentStatus::Pending,
+            requires_lender_approval: invoice.status == InvoiceStatus::Financed,
         };
 
         if invoice.status == InvoiceStatus::Pending {
@@ -1546,7 +1598,7 @@ impl RegistryContract {
             env.panic_with_error(ContractError::InvalidTransition);
         }
 
-        if invoice.status == InvoiceStatus::Financed {
+        if amendment.requires_lender_approval {
             let (lender, funded_amount) =
                 Self::resolve_lender_for_financed_invoice(&env, &invoice_id);
             if approver != lender {
@@ -1601,15 +1653,6 @@ impl RegistryContract {
             .get(invoice_id.clone())
             .unwrap_or_else(|| env.panic_with_error(ContractError::NotFound));
 
-        if invoice.status == InvoiceStatus::Financed {
-            let (lender, _) = Self::resolve_lender_for_financed_invoice(&env, &invoice_id);
-            if rejector != lender {
-                env.panic_with_error(ContractError::Unauthorized);
-            }
-        } else if rejector != invoice.originator {
-            env.panic_with_error(ContractError::Unauthorized);
-        }
-
         let mut amendments = load_amendments(&env);
         let mut list = amendments
             .get(invoice_id.clone())
@@ -1622,6 +1665,15 @@ impl RegistryContract {
             .unwrap_or_else(|| env.panic_with_error(ContractError::NotFound));
         if amendment.status != AmendmentStatus::Pending {
             env.panic_with_error(ContractError::InvalidTransition);
+        }
+
+        if amendment.requires_lender_approval {
+            let (lender, _) = Self::resolve_lender_for_financed_invoice(&env, &invoice_id);
+            if rejector != lender {
+                env.panic_with_error(ContractError::Unauthorized);
+            }
+        } else if rejector != invoice.originator {
+            env.panic_with_error(ContractError::Unauthorized);
         }
 
         amendment.status = AmendmentStatus::Rejected;

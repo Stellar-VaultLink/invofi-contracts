@@ -387,6 +387,12 @@ pub struct AmendmentRecord {
     pub reason: Symbol,
     pub timestamp: u64,
     pub status: AmendmentStatus,
+    /// Captured when the amendment is requested: `true` when the invoice was
+    /// `Financed` at that moment, so the active lender must approve it. Both
+    /// amendment methods read authorization from this field instead of
+    /// re-deriving it from the invoice's current status, which can change
+    /// while the amendment is still pending.
+    pub requires_lender_approval: bool,
 }
 
 /// A financing offer submitted by a lender against an invoice.
