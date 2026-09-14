@@ -3,8 +3,7 @@ extern crate std;
 
 use super::RegistryContract;
 use invofi_common::{
-    AmendmentField, AmendmentStatus, InvoiceStatus, RiskTier, VerificationStatus,
-    VerificationType,
+    AmendmentField, AmendmentStatus, InvoiceStatus, RiskTier, VerificationStatus, VerificationType,
 };
 use soroban_sdk::{
     symbol_short,
@@ -3521,10 +3520,7 @@ fn test_request_amendment_invalid_amount_panics() {
 }
 
 #[test]
-#[should_panic(expected = "Error(Contract, #3)")] // ContractError::InvalidTransition
-fn test_request_amendment_on_financed_panics() {
-    // Only Pending invoices are amendable in this pass; Financed invoices need
-    // the lender-approval flow (follow-up issue).
+fn test_request_amendment_amount_on_financed_creates_pending_record() {
     let env = Env::default();
     env.mock_all_auths();
     env.ledger().set_timestamp(1_000_000);
@@ -3545,13 +3541,294 @@ fn test_request_amendment_on_financed_panics() {
         &InvoiceStatus::Financed,
     );
 
-    client.request_amendment(
+    let amendment = client.request_amendment(
         &symbol_short!("amd5"),
         &originator,
         &AmendmentField::Amount,
         &20_000_000i128,
         &0u64,
         &symbol_short!("fix"),
+    );
+
+    assert_eq!(amendment.status, AmendmentStatus::Pending);
+    assert_eq!(amendment.old_amount, 10_000_000i128);
+    assert_eq!(amendment.new_amount, 20_000_000i128);
+
+    // Invoice state must remain untouched before approval
+    let inv = client.get_invoice(&symbol_short!("amd5"));
+    assert_eq!(inv.amount, 10_000_000i128);
+}
+
+#[test]
+fn test_request_amendment_due_date_on_financed_creates_pending_record() {
+    let env = Env::default();
+    env.mock_all_auths();
+    env.ledger().set_timestamp(1_000_000);
+    let contract_id = env.register(RegistryContract, (Address::generate(&env),));
+    let client = super::RegistryContractClient::new(&env, &contract_id);
+
+    let originator = Address::generate(&env);
+    client.register_invoice(
+        &symbol_short!("amd5d"),
+        &originator,
+        &10_000_000i128,
+        &symbol_short!("XLM"),
+        &3_000_000u64,
+    );
+    client.update_invoice_status(
+        &symbol_short!("amd5d"),
+        &originator,
+        &InvoiceStatus::Financed,
+    );
+
+    let amendment = client.request_amendment(
+        &symbol_short!("amd5d"),
+        &originator,
+        &AmendmentField::DueDate,
+        &0i128,
+        &4_000_000u64,
+        &symbol_short!("ext"),
+    );
+
+    assert_eq!(amendment.status, AmendmentStatus::Pending);
+    assert_eq!(amendment.old_due_date, 3_000_000u64);
+    assert_eq!(amendment.new_due_date, 4_000_000u64);
+
+    let inv = client.get_invoice(&symbol_short!("amd5d"));
+    assert_eq!(inv.due_date, 3_000_000u64);
+}
+
+#[test]
+fn test_approve_amendment_on_financed_by_lender_succeeds() {
+    let env = Env::default();
+    env.mock_all_auths();
+    env.ledger().set_timestamp(1_000_000);
+    let contract_id = env.register(RegistryContract, (Address::generate(&env),));
+    let client = super::RegistryContractClient::new(&env, &contract_id);
+
+    let originator = Address::generate(&env);
+    let lender = Address::generate(&env);
+
+    client.register_invoice(
+        &symbol_short!("amd7"),
+        &originator,
+        &10_000_000i128,
+        &symbol_short!("XLM"),
+        &3_000_000u64,
+    );
+    client.update_invoice_status(
+        &symbol_short!("amd7"),
+        &originator,
+        &InvoiceStatus::Financed,
+    );
+    client.set_invoice_lender(&symbol_short!("amd7"), &lender);
+
+    client.request_amendment(
+        &symbol_short!("amd7"),
+        &originator,
+        &AmendmentField::Amount,
+        &25_000_000i128,
+        &0u64,
+        &symbol_short!("upd"),
+    );
+
+    let approved = client.approve_amendment(&symbol_short!("amd7"), &0u32, &lender);
+    assert_eq!(approved.status, AmendmentStatus::Approved);
+    assert_eq!(approved.new_amount, 25_000_000i128);
+
+    // Invoice state must now reflect the new amount
+    let inv = client.get_invoice(&symbol_short!("amd7"));
+    assert_eq!(inv.amount, 25_000_000i128);
+}
+
+#[test]
+fn test_approve_due_date_amendment_on_financed_by_lender_succeeds() {
+    let env = Env::default();
+    env.mock_all_auths();
+    env.ledger().set_timestamp(1_000_000);
+    let contract_id = env.register(RegistryContract, (Address::generate(&env),));
+    let client = super::RegistryContractClient::new(&env, &contract_id);
+
+    let originator = Address::generate(&env);
+    let lender = Address::generate(&env);
+
+    client.register_invoice(
+        &symbol_short!("amd7d"),
+        &originator,
+        &10_000_000i128,
+        &symbol_short!("XLM"),
+        &3_000_000u64,
+    );
+    client.update_invoice_status(
+        &symbol_short!("amd7d"),
+        &originator,
+        &InvoiceStatus::Financed,
+    );
+    client.set_invoice_lender(&symbol_short!("amd7d"), &lender);
+
+    client.request_amendment(
+        &symbol_short!("amd7d"),
+        &originator,
+        &AmendmentField::DueDate,
+        &0i128,
+        &5_000_000u64,
+        &symbol_short!("ext"),
+    );
+
+    let approved = client.approve_amendment(&symbol_short!("amd7d"), &0u32, &lender);
+    assert_eq!(approved.status, AmendmentStatus::Approved);
+    assert_eq!(approved.new_due_date, 5_000_000u64);
+
+    let inv = client.get_invoice(&symbol_short!("amd7d"));
+    assert_eq!(inv.due_date, 5_000_000u64);
+}
+
+#[test]
+fn test_reject_amendment_on_financed_by_lender_succeeds() {
+    let env = Env::default();
+    env.mock_all_auths();
+    env.ledger().set_timestamp(1_000_000);
+    let contract_id = env.register(RegistryContract, (Address::generate(&env),));
+    let client = super::RegistryContractClient::new(&env, &contract_id);
+
+    let originator = Address::generate(&env);
+    let lender = Address::generate(&env);
+
+    client.register_invoice(
+        &symbol_short!("amd8"),
+        &originator,
+        &10_000_000i128,
+        &symbol_short!("XLM"),
+        &3_000_000u64,
+    );
+    client.update_invoice_status(
+        &symbol_short!("amd8"),
+        &originator,
+        &InvoiceStatus::Financed,
+    );
+    client.set_invoice_lender(&symbol_short!("amd8"), &lender);
+
+    client.request_amendment(
+        &symbol_short!("amd8"),
+        &originator,
+        &AmendmentField::Amount,
+        &25_000_000i128,
+        &0u64,
+        &symbol_short!("upd"),
+    );
+
+    let rejected = client.reject_amendment(&symbol_short!("amd8"), &0u32, &lender);
+    assert_eq!(rejected.status, AmendmentStatus::Rejected);
+
+    // Invoice state must remain unchanged
+    let inv = client.get_invoice(&symbol_short!("amd8"));
+    assert_eq!(inv.amount, 10_000_000i128);
+}
+
+#[test]
+#[should_panic(expected = "Error(Contract, #1)")] // ContractError::Unauthorized
+fn test_approve_amendment_on_financed_by_unauthorized_panics() {
+    let env = Env::default();
+    env.mock_all_auths();
+    env.ledger().set_timestamp(1_000_000);
+    let contract_id = env.register(RegistryContract, (Address::generate(&env),));
+    let client = super::RegistryContractClient::new(&env, &contract_id);
+
+    let originator = Address::generate(&env);
+    let lender = Address::generate(&env);
+
+    client.register_invoice(
+        &symbol_short!("amd9"),
+        &originator,
+        &10_000_000i128,
+        &symbol_short!("XLM"),
+        &3_000_000u64,
+    );
+    client.update_invoice_status(
+        &symbol_short!("amd9"),
+        &originator,
+        &InvoiceStatus::Financed,
+    );
+    client.set_invoice_lender(&symbol_short!("amd9"), &lender);
+
+    client.request_amendment(
+        &symbol_short!("amd9"),
+        &originator,
+        &AmendmentField::Amount,
+        &25_000_000i128,
+        &0u64,
+        &symbol_short!("upd"),
+    );
+
+    // Originator cannot approve amendment on a Financed invoice (only lender can)
+    client.approve_amendment(&symbol_short!("amd9"), &0u32, &originator);
+}
+
+#[test]
+#[should_panic(expected = "Error(Contract, #1)")] // ContractError::Unauthorized
+fn test_reject_amendment_on_financed_by_unauthorized_panics() {
+    let env = Env::default();
+    env.mock_all_auths();
+    env.ledger().set_timestamp(1_000_000);
+    let contract_id = env.register(RegistryContract, (Address::generate(&env),));
+    let client = super::RegistryContractClient::new(&env, &contract_id);
+
+    let originator = Address::generate(&env);
+    let lender = Address::generate(&env);
+    let stranger = Address::generate(&env);
+
+    client.register_invoice(
+        &symbol_short!("amd10"),
+        &originator,
+        &10_000_000i128,
+        &symbol_short!("XLM"),
+        &3_000_000u64,
+    );
+    client.update_invoice_status(
+        &symbol_short!("amd10"),
+        &originator,
+        &InvoiceStatus::Financed,
+    );
+    client.set_invoice_lender(&symbol_short!("amd10"), &lender);
+
+    client.request_amendment(
+        &symbol_short!("amd10"),
+        &originator,
+        &AmendmentField::Amount,
+        &25_000_000i128,
+        &0u64,
+        &symbol_short!("upd"),
+    );
+
+    client.reject_amendment(&symbol_short!("amd10"), &0u32, &stranger);
+}
+
+#[test]
+#[should_panic(expected = "Error(Contract, #4)")] // ContractError::Paused
+fn test_request_amendment_while_paused_panics() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let admin = Address::generate(&env);
+    let contract_id = env.register(RegistryContract, (admin.clone(),));
+    let client = super::RegistryContractClient::new(&env, &contract_id);
+
+    let originator = Address::generate(&env);
+    client.register_invoice(
+        &symbol_short!("amd11"),
+        &originator,
+        &10_000_000i128,
+        &symbol_short!("XLM"),
+        &3_000_000u64,
+    );
+
+    client.pause(&one(&env, &admin));
+    client.request_amendment(
+        &symbol_short!("amd11"),
+        &originator,
+        &AmendmentField::Amount,
+        &20_000_000i128,
+        &0u64,
+        &symbol_short!("upd"),
     );
 }
 
@@ -3577,11 +3854,7 @@ fn test_request_amendment_on_repaid_panics() {
         &originator,
         &InvoiceStatus::Financed,
     );
-    client.update_invoice_status(
-        &symbol_short!("amd6"),
-        &originator,
-        &InvoiceStatus::Repaid,
-    );
+    client.update_invoice_status(&symbol_short!("amd6"), &originator, &InvoiceStatus::Repaid);
 
     client.request_amendment(
         &symbol_short!("amd6"),
