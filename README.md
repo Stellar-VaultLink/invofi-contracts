@@ -380,13 +380,6 @@ Thanks to everyone who has contributed to InvoFi — the list below is generated
 		</tr>
 		<tr>
             <td align="center">
-                <a href="https://github.com/Sendi0011">
-                    <img src="https://avatars.githubusercontent.com/u/175633768?v=4" width="100;" alt="Sendi0011"/>
-                    <br />
-                    <sub><b>Sendi John</b></sub>
-                </a>
-            </td>
-            <td align="center">
                 <a href="https://github.com/Awointa">
                     <img src="https://avatars.githubusercontent.com/u/82676631?v=4" width="100;" alt="Awointa"/>
                     <br />
@@ -394,10 +387,10 @@ Thanks to everyone who has contributed to InvoFi — the list below is generated
                 </a>
             </td>
             <td align="center">
-                <a href="https://github.com/hexlaapp">
-                    <img src="https://avatars.githubusercontent.com/u/287440938?v=4" width="100;" alt="hexlaapp"/>
+                <a href="https://github.com/Sendi0011">
+                    <img src="https://avatars.githubusercontent.com/u/175633768?v=4" width="100;" alt="Sendi0011"/>
                     <br />
-                    <sub><b>hexlaapp</b></sub>
+                    <sub><b>Sendi John</b></sub>
                 </a>
             </td>
             <td align="center">
@@ -405,6 +398,13 @@ Thanks to everyone who has contributed to InvoFi — the list below is generated
                     <img src="https://avatars.githubusercontent.com/u/86744981?v=4" width="100;" alt="Emmanuellsensai"/>
                     <br />
                     <sub><b>Usang Emmanuel </b></sub>
+                </a>
+            </td>
+            <td align="center">
+                <a href="https://github.com/hexlaapp">
+                    <img src="https://avatars.githubusercontent.com/u/287440938?v=4" width="100;" alt="hexlaapp"/>
+                    <br />
+                    <sub><b>hexlaapp</b></sub>
                 </a>
             </td>
             <td align="center">
@@ -468,6 +468,13 @@ Thanks to everyone who has contributed to InvoFi — the list below is generated
 		</tr>
 		<tr>
             <td align="center">
+                <a href="https://github.com/ranjeet150">
+                    <img src="https://avatars.githubusercontent.com/u/53716863?v=4" width="100;" alt="ranjeet150"/>
+                    <br />
+                    <sub><b>Vikram Rao</b></sub>
+                </a>
+            </td>
+            <td align="center">
                 <a href="https://github.com/Chigybillionz">
                     <img src="https://avatars.githubusercontent.com/u/184784116?v=4" width="100;" alt="Chigybillionz"/>
                     <br />
@@ -502,6 +509,8 @@ Thanks to everyone who has contributed to InvoFi — the list below is generated
                     <sub><b>Dev solex</b></sub>
                 </a>
             </td>
+		</tr>
+		<tr>
             <td align="center">
                 <a href="https://github.com/Just-Bamford">
                     <img src="https://avatars.githubusercontent.com/u/233368823?v=4" width="100;" alt="Just-Bamford"/>
@@ -509,8 +518,6 @@ Thanks to everyone who has contributed to InvoFi — the list below is generated
                     <sub><b>Bamford</b></sub>
                 </a>
             </td>
-		</tr>
-		<tr>
             <td align="center">
                 <a href="https://github.com/Ajibose">
                     <img src="https://avatars.githubusercontent.com/u/99620327?v=4" width="100;" alt="Ajibose"/>
