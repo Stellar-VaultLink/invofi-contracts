@@ -351,6 +351,9 @@ impl RepaymentContract {
     /// Mark part or all of an invoice as repaid. Only the originator.
     /// Cross-contract: reads + updates invoice status in registry, reads
     /// + updates offer state in financing.
+    ///
+    /// Reverts with `ContractError::InvalidTransition` if the invoice or offer
+    /// has already been fully repaid (idempotency guard, issue #148).
     pub fn repay_invoice(
         env: Env,
         invoice_id: Symbol,
@@ -374,6 +377,11 @@ impl RepaymentContract {
         if invoice.originator != repayer {
             env.panic_with_error(ContractError::Unauthorized);
         }
+        // Idempotency & double-repay guard (issue #148):
+        // Revert immediately if invoice is already fully repaid or not financed.
+        if invoice.status == InvoiceStatus::Repaid {
+            env.panic_with_error(ContractError::InvalidTransition);
+        }
         if invoice.status != InvoiceStatus::Financed {
             env.panic_with_error(ContractError::InvalidTransition);
         }
@@ -391,6 +399,11 @@ impl RepaymentContract {
         if offer.invoice_id != invoice_id {
             env.panic_with_error(ContractError::InvalidInput);
         }
+        // Idempotency & double-repay guard (issue #148):
+        // Revert immediately if financing offer is already marked repaid.
+        if offer.status == OfferStatus::Repaid {
+            env.panic_with_error(ContractError::InvalidTransition);
+        }
         if offer.status != OfferStatus::Accepted && offer.status != OfferStatus::Financed {
             env.panic_with_error(ContractError::InvalidTransition);
         }
@@ -404,6 +417,12 @@ impl RepaymentContract {
         let payments = load_payments(&env, &invoice_id);
         let principal_repaid_so_far = total_principal_repaid(&payments);
         let remaining_principal = (offer.amount - principal_repaid_so_far).max(0);
+
+        // Idempotency obligation guard (issue #148):
+        // Revert if the loan principal has already been fully satisfied.
+        if remaining_principal <= 0 {
+            env.panic_with_error(ContractError::InvalidTransition);
+        }
 
         // Calculate pro-rata accrued interest on the remaining principal.
         // interest = remaining * rate_bps * days_elapsed / 3_650_000
