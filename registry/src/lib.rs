@@ -288,6 +288,15 @@ fn post_upgrade(_env: &Env) {}
 
 // ─── Contract ────────────────────────────────────────────────────────────────
 
+#[soroban_sdk::contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct InvoiceRegistrationArgs {
+    pub id: Symbol,
+    pub amount: i128,
+    pub currency: Symbol,
+    pub due_date: u64,
+}
+
 #[contract]
 pub struct RegistryContract;
 
@@ -495,6 +504,57 @@ impl RegistryContract {
     // ── Invoice CRUD ─────────────────────────────────────────────────────────
 
     /// Register a new invoice. Only the originator can call this.
+    /// Register multiple invoices in a single transaction to save on fees.
+    pub fn batch_register_invoices(
+        env: Env,
+        originator: Address,
+        invoices_args: Vec<InvoiceRegistrationArgs>,
+    ) -> Vec<Invoice> {
+        assert_not_paused(&env);
+        originator.require_auth();
+        assert_not_blacklisted(&env, &originator);
+
+        let mut invoices = load_invoices(&env);
+        let mut s = load_stats(&env);
+        let mut registered: Vec<Invoice> = Vec::new(&env);
+        let now = env.ledger().timestamp();
+
+        for arg in invoices_args.iter() {
+            if arg.amount < MIN_INVOICE_AMOUNT {
+                env.panic_with_error(ContractError::InvalidInput);
+            }
+            if arg.due_date <= now {
+                env.panic_with_error(ContractError::InvalidInput);
+            }
+            if invoices.contains_key(arg.id.clone()) {
+                env.panic_with_error(ContractError::AlreadyExists);
+            }
+
+            let invoice = Invoice {
+                id: arg.id.clone(),
+                originator: originator.clone(),
+                amount: arg.amount,
+                currency: arg.currency.clone(),
+                due_date: arg.due_date,
+                status: InvoiceStatus::Pending,
+            };
+            
+            invoices.set(arg.id.clone(), invoice.clone());
+            s.total_invoices += 1;
+            registered.push_back(invoice.clone());
+
+            env.events().publish(
+                (symbol_short!("inv_reg"), invoice.id.clone()),
+                (originator.clone(), arg.amount, arg.due_date),
+            );
+        }
+
+        save_invoices(&env, &invoices);
+        save_stats(&env, &s);
+        
+        registered
+    }
+
     pub fn register_invoice(
         env: Env,
         id: Symbol,

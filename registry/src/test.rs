@@ -24,6 +24,56 @@ fn one(env: &Env, signer: &Address) -> soroban_sdk::Vec<Address> {
 // ─── Invoice CRUD tests ──────────────────────────────────────────────────────
 
 #[test]
+fn test_batch_register_invoices() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let contract_id = env.register(RegistryContract, (Address::generate(&env),));
+    let client = super::RegistryContractClient::new(&env, &contract_id);
+
+    let originator = Address::generate(&env);
+    let invoice_id1 = symbol_short!("inv001");
+    let invoice_id2 = symbol_short!("inv002");
+    let amount: i128 = 1_000_000_000;
+    let currency = symbol_short!("USDC");
+    let due_date: u64 = 1_735_689_600;
+
+    let arg1 = super::InvoiceRegistrationArgs {
+        id: invoice_id1.clone(),
+        amount: amount,
+        currency: currency.clone(),
+        due_date: due_date,
+    };
+    let arg2 = super::InvoiceRegistrationArgs {
+        id: invoice_id2.clone(),
+        amount: amount * 2,
+        currency: currency.clone(),
+        due_date: due_date + 1000,
+    };
+    let mut args = soroban_sdk::Vec::new(&env);
+    args.push_back(arg1);
+    args.push_back(arg2);
+
+    let registered = client.batch_register_invoices(&originator, &args);
+
+    assert_eq!(registered.len(), 2);
+    let reg1 = registered.get(0).unwrap();
+    assert_eq!(reg1.id, invoice_id1);
+    assert_eq!(reg1.originator, originator);
+    assert_eq!(reg1.amount, amount);
+    assert_eq!(reg1.currency, currency);
+    assert_eq!(reg1.status, InvoiceStatus::Pending);
+
+    let reg2 = registered.get(1).unwrap();
+    assert_eq!(reg2.id, invoice_id2);
+    assert_eq!(reg2.amount, amount * 2);
+
+    let fetched1 = client.get_invoice(&invoice_id1);
+    assert_eq!(fetched1, reg1);
+    let fetched2 = client.get_invoice(&invoice_id2);
+    assert_eq!(fetched2, reg2);
+}
+
+#[test]
 fn test_register_and_get_invoice() {
     let env = Env::default();
     env.mock_all_auths();
