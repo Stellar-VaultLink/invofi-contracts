@@ -408,12 +408,21 @@ Thanks to everyone who has contributed to InvoFi — the list below is generated
                 </a>
             </td>
             <td align="center">
+                <a href="https://github.com/ranjeet150">
+                    <img src="https://avatars.githubusercontent.com/u/53716863?v=4" width="100;" alt="ranjeet150"/>
+                    <br />
+                    <sub><b>Vikram Rao</b></sub>
+                </a>
+            </td>
+            <td align="center">
                 <a href="https://github.com/xeladev4">
                     <img src="https://avatars.githubusercontent.com/u/171882586?v=4" width="100;" alt="xeladev4"/>
                     <br />
                     <sub><b>xeladev4</b></sub>
                 </a>
             </td>
+		</tr>
+		<tr>
             <td align="center">
                 <a href="https://github.com/payfoxX">
                     <img src="https://avatars.githubusercontent.com/u/171681873?v=4" width="100;" alt="payfoxX"/>
@@ -421,8 +430,6 @@ Thanks to everyone who has contributed to InvoFi — the list below is generated
                     <sub><b>Abdulsalam Muhammed</b></sub>
                 </a>
             </td>
-		</tr>
-		<tr>
             <td align="center">
                 <a href="https://github.com/mansur-codes">
                     <img src="https://avatars.githubusercontent.com/u/114710463?v=4" width="100;" alt="mansur-codes"/>
@@ -458,20 +465,13 @@ Thanks to everyone who has contributed to InvoFi — the list below is generated
                     <sub><b>WAGMI</b></sub>
                 </a>
             </td>
+		</tr>
+		<tr>
             <td align="center">
                 <a href="https://github.com/RawNuke">
                     <img src="https://avatars.githubusercontent.com/u/67506722?v=4" width="100;" alt="RawNuke"/>
                     <br />
                     <sub><b>Raw_Nuke</b></sub>
-                </a>
-            </td>
-		</tr>
-		<tr>
-            <td align="center">
-                <a href="https://github.com/ranjeet150">
-                    <img src="https://avatars.githubusercontent.com/u/53716863?v=4" width="100;" alt="ranjeet150"/>
-                    <br />
-                    <sub><b>Vikram Rao</b></sub>
                 </a>
             </td>
             <td align="center">
@@ -503,14 +503,21 @@ Thanks to everyone who has contributed to InvoFi — the list below is generated
                 </a>
             </td>
             <td align="center">
+                <a href="https://github.com/bilhokista">
+                    <img src="https://avatars.githubusercontent.com/u/59991975?v=4" width="100;" alt="bilhokista"/>
+                    <br />
+                    <sub><b>bilhokista</b></sub>
+                </a>
+            </td>
+		</tr>
+		<tr>
+            <td align="center">
                 <a href="https://github.com/DevSolex">
                     <img src="https://avatars.githubusercontent.com/u/220715997?v=4" width="100;" alt="DevSolex"/>
                     <br />
                     <sub><b>Dev solex</b></sub>
                 </a>
             </td>
-		</tr>
-		<tr>
             <td align="center">
                 <a href="https://github.com/Just-Bamford">
                     <img src="https://avatars.githubusercontent.com/u/233368823?v=4" width="100;" alt="Just-Bamford"/>
