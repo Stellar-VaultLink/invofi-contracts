@@ -132,17 +132,21 @@ jobs:
           stellar contract invoke --id "$FINANCING_ID" --source invofi-deployer --network ${{ inputs.network }} -- register_currency --signers "$SIGNERS" --currency XLM --token_addr "$XLM_TOKEN"
           stellar contract invoke --id "$FINANCING_ID" --source invofi-deployer --network ${{ inputs.network }} -- register_currency --signers "$SIGNERS" --currency USDC --token_addr "$USDC_TOKEN"
 
-          # Position token: POS is deterministic per issuer, so compute its ID and
-          # only deploy if missing (a re-run with the same deployer reuses the
-          # already-deployed SAC instead of failing with "contract already exists").
-          POS_ID=$(stellar contract id asset --asset "POS:$ADMIN_PUBLIC" --network ${{ inputs.network }})
+          # Position token: the asset code is VERSIONED (POSv3, POSv4, ... on
+          # future redeployments) so a fresh SAC is provisioned every time.
+          # Rationale: a SAC's admin can be transferred away (to the financing
+          # contract) but never recovered — an earlier generation's financing
+          # contract still holds POS/POSI admin, which made the unversioned
+          # "POS" name permanently unusable for redeploys. Versioning keeps
+          # each deployment's mint authority self-contained.
+          POS_CODE="POSv2"
+          POS_ID=$(stellar contract id asset --asset "$POS_CODE:$ADMIN_PUBLIC" --network ${{ inputs.network }})
           if ! stellar contract info interface --id "$POS_ID" --network ${{ inputs.network }} >/dev/null 2>&1; then
-            stellar contract asset deploy --asset "POS:$ADMIN_PUBLIC" --source invofi-deployer --network ${{ inputs.network }}
+            stellar contract asset deploy --asset "$POS_CODE:$ADMIN_PUBLIC" --source invofi-deployer --network ${{ inputs.network }}
           fi
-          # Hand POS admin to the financing contract. On a re-run this is a no-op
-          # only when the deployer still owns the SAC; if a previous run handed it
-          # to an older financing contract, the step fails loudly with a clear
-          # message rather than silently minting from the wrong admin.
+          # Hand the SAC admin to the financing contract. On a re-run with the
+          # same POS_CODE this is idempotent (the financing contract re-issues
+          # set_admin to itself); a NEW POS_CODE provisions a fresh SAC.
           stellar contract invoke --id "$POS_ID" --source invofi-deployer --network ${{ inputs.network }} -- set_admin --new_admin "$FINANCING_ID"
           stellar contract invoke --id "$FINANCING_ID" --source invofi-deployer --network ${{ inputs.network }} -- set_position_token --signers "$SIGNERS" --token "$POS_ID"
 
