@@ -12,13 +12,15 @@
 //! `score = successful_repayments * 1 - defaults * 2`, floored at 0.
 //!
 //! Score decay (issue #139): outcomes older than `DECAY_HALF_LIFE_SECS`
-//! contribute less via exponential decay. The cumulative weighted values
-//! (`weighted_repayments`, `weighted_defaults`) are recomputed on each
-//! `record_outcome` or `resolve_dispute` call: pending decay is applied
-//! first (scaling existing values by `2^(-elapsed / half_life)`), then
-//! the new outcome is added at full weight. `get_score` reads the cached
-//! recomputed value in O(1). A `ReputationChanged` event (`rep_chg`) is
-//! emitted whenever the recomputation changes the stored score.
+//! contribute less via integer step-decay — cumulative weighted values
+//! (`weighted_repayments`, `weighted_defaults`) halve for each full
+//! half-life elapsed, recomputed on each `record_outcome` or
+//! `resolve_dispute` call (pending decay first, then the new outcome at
+//! full weight). Soroban's VM has no floating point, so the decay is a
+//! documented integer approximation of the exponential ideal (ADR-0004
+//! §7). `get_score` reads the cached recomputed value in O(1). A
+//! `ReputationChanged` event (`rep_chg`) is emitted whenever the
+//! recomputation changes the stored score.
 //!
 //! Disputes (issue #134): a default that is later overturned by a dispute
 //! resolving in the originator's favour is neutralized via the admin-only
@@ -90,19 +92,24 @@ fn save_records(env: &Env, map: &Map<Address, ReputationRecord>) {
 }
 
 /// Apply pending exponential decay to a record's cumulative weighted
-/// values, based on elapsed time since `last_recompute`. Scales both
-/// `weighted_repayments` and `weighted_defaults` by
-/// `2^(-elapsed / DECAY_HALF_LIFE_SECS)`, then updates `last_recompute`
-/// to `now`.
+/// values, based on elapsed time since `last_recompute`: the values halve
+/// for every full `DECAY_HALF_LIFE_SECS` elapsed, then `last_recompute`
+/// is advanced to `now`.
+///
+/// This is a deliberate integer approximation of `2^(-elapsed/half_life)`:
+/// Soroban's wasm VM **has no floating point** — the original `f64` +
+/// `libm::pow` implementation compiled but was rejected at deploy time
+/// ("floating-point support is disabled"), so decay now steps down by
+/// half per full half-life (exact at half-life boundaries, at most one
+/// half-life of rounding in between — documented in ADR-0004 §7).
 fn apply_pending_decay(record: &mut ReputationRecord, now: u64) {
     if now > record.last_recompute && record.last_recompute > 0 {
-        let elapsed = now - record.last_recompute;
-        let half_life = DECAY_HALF_LIFE_SECS as f64;
-        let scale = libm::pow(0.5, elapsed as f64 / half_life);
-        record.weighted_repayments =
-            (record.weighted_repayments as f64 * scale) as i128;
-        record.weighted_defaults =
-            (record.weighted_defaults as f64 * scale) as i128;
+        let mut elapsed = now - record.last_recompute;
+        while elapsed >= DECAY_HALF_LIFE_SECS {
+            record.weighted_repayments /= 2;
+            record.weighted_defaults /= 2;
+            elapsed -= DECAY_HALF_LIFE_SECS;
+        }
     }
     record.last_recompute = now;
 }
