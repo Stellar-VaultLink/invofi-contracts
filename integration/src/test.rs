@@ -370,7 +370,14 @@ fn test_financing_repayment_partial_keeps_financed() {
 
     let offer_after = p.fin.get_offer(&offer_id);
     assert_eq!(offer_after.status, OfferStatus::Financed);
-    assert_eq!(offer_after.amount_repaid, partial);
+    // amount_repaid tracks PRINCIPAL only (issue #233 finding 2): the
+    // payment's interest slice is lender yield and must not count toward
+    // the repaid-tracker used by insurance-exposure and installment math.
+    // One day elapsed: accrual is computed on the full principal —
+    // accrued = amount * 500 * 1 / 3_650_000 = 136_986 — and the interest
+    // slice of this payment is min(partial, accrued) = 136_986.
+    let accrued = amount * 500i128 / 3_650_000;
+    assert_eq!(offer_after.amount_repaid, partial - accrued.min(partial));
 }
 
 /// Negative test: Repaying a Pending (unfinanced) invoice must fail.
