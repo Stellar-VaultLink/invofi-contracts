@@ -147,7 +147,8 @@ jobs:
         id: deploy
         run: |
           NETWORK=mainnet
-          ADMIN_PUBLIC=$(stellar keys address invofi-deployer --network "$NETWORK")
+          # `keys address` takes no --network flag in stellar-cli ≥ 23.
+          ADMIN_PUBLIC=$(stellar keys address invofi-deployer)
           echo "admin_public=$ADMIN_PUBLIC" >> "$GITHUB_OUTPUT"
 
           XLM_TOKEN=$(stellar contract id asset --asset native --network "$NETWORK")

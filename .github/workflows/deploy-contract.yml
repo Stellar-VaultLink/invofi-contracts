@@ -59,7 +59,9 @@ jobs:
       - name: Deploy contracts with constructor-bound admin
         id: deploy
         run: |
-          ADMIN_PUBLIC=$(stellar keys address invofi-deployer --network ${{ inputs.network }})
+          # `keys address` takes no --network flag in stellar-cli ≥ 23
+          # (identities are network-agnostic); --network here hard-fails the step.
+          ADMIN_PUBLIC=$(stellar keys address invofi-deployer)
           echo "admin_public=$ADMIN_PUBLIC" >> "$GITHUB_OUTPUT"
 
           # Constructors (issue #75): admin + wiring are bound atomically inside
