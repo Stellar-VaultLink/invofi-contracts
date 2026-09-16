@@ -489,7 +489,12 @@ impl RepaymentContract {
         let fully_repaid = new_remaining <= 0;
 
         // Update offer.amount_repaid for backward compatibility with financing contract.
-        offer.amount_repaid += amount;
+        // Principal-only (issue #233 finding 2): the lender receives
+        // amount - fee, so the repaid-tracker that feeds insurance exposure
+        // (total_due - amount_repaid) and installment-due math must not count
+        // protocol fees as repaid principal — otherwise the pool under-pays
+        // the lender's true outstanding claim on default.
+        offer.amount_repaid += principal_portion;
         let new_status = if fully_repaid {
             OfferStatus::Repaid
         } else {

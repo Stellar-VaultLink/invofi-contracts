@@ -143,9 +143,14 @@ proptest! {
         assert_eq!(token_client.balance(&lender), initial_lender_bal + lender_amount_1);
         assert_eq!(token_client.balance(&originator), initial_orig_bal - partial_repay_amount);
 
-        // Verify state invariants
+        // Verify state invariants. amount_repaid tracks PRINCIPAL only
+        // (issue #233 finding 2): strip this payment's accrued interest —
+        // the full pro-rata accrual is charged on the first payment here.
         let offer = fin.get_offer(&offer_id);
-        assert_eq!(offer.amount_repaid, partial_repay_amount);
+        assert_eq!(
+            offer.amount_repaid,
+            partial_repay_amount - accrued_interest.min(partial_repay_amount)
+        );
 
         let invoice = reg.get_invoice(&invoice_id);
         if full_remaining > 0 {

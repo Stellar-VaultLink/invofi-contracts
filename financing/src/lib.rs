@@ -1044,6 +1044,13 @@ impl FinancingContract {
         if invoice.status != InvoiceStatus::Pending {
             env.panic_with_error(ContractError::InvalidTransition);
         }
+        // Reject stale offers whose deadline has passed (issue #233 finding 1):
+        // the auto-accept path (counter_offer/amend_offer) must enforce the
+        // same expiry rule as accept_offer — an offer the lender considers
+        // dead must not settle via a back door.
+        if offer.expires_at != 0 && env.ledger().timestamp() >= offer.expires_at {
+            env.panic_with_error(ContractError::OfferExpired);
+        }
         assert_not_blacklisted(env, &offer.lender);
         assert_not_blacklisted(env, &invoice.originator);
 
