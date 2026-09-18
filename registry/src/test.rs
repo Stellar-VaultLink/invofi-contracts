@@ -610,7 +610,9 @@ fn test_get_originator_page() {
     let due_date: u64 = 1_735_689_600;
     let currency = symbol_short!("USDC");
 
-    for i in 0u32..30 {
+    // Register out of order: pages must still come back sorted.
+    for k in 0u32..30 {
+        let i = 29 - k;
         let id = soroban_sdk::Symbol::new(&env, &std::format!("og{:02}", i));
         client.register_invoice(&id, &originator, &amount, &currency, &due_date);
     }
@@ -637,10 +639,10 @@ fn test_get_originator_page() {
         assert_eq!(page.get(i % 10).unwrap(), expect);
     }
 
-    // Withdrawal keeps history: index stable across status change.
+    // Withdrawal keeps history: page contents and order unchanged.
     client.cancel_invoice(&soroban_sdk::Symbol::new(&env, "og00"), &originator);
     let p0b = client.get_originator_page(&originator, &0_u32, &10_u32);
-    assert_eq!(p0b.len(), 10);
+    assert_eq!(p0b, p0);
 }
 
 #[test]

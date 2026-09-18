@@ -82,14 +82,56 @@ fn save_originator_index(env: &Env, index: &Map<Address, Vec<Symbol>>) {
         .set(&symbol_short!("by_origin"), index);
 }
 
+/// Insert keeping ascending id order (issue #111 requires sorted ids).
+fn insert_sorted_id(ids: &mut Vec<Symbol>, id: &Symbol) {
+    let mut pos = ids.len();
+    for (i, existing) in ids.iter().enumerate() {
+        if existing >= *id {
+            // ponytail: enumerate index fits u32, invoice count bounded
+            pos = i as u32;
+            break;
+        }
+    }
+    if pos == ids.len() {
+        ids.push_back(id.clone());
+    } else {
+        ids.insert(pos, id.clone());
+    }
+}
+
 /// Append an invoice id to its originator's index (issue #111).
 /// Append-only: withdrawals and status changes never remove entries,
-// ponytail: no removal path by design, history preserved, index mirrors register order
+// ponytail: no removal path by design, history preserved, index kept sorted
 fn index_invoice_originator(env: &Env, originator: &Address, id: &Symbol) {
     let mut index = load_originator_index(env);
     let mut ids = index.get(originator.clone()).unwrap_or(Vec::new(env));
-    ids.push_back(id.clone());
+    insert_sorted_id(&mut ids, id);
     index.set(originator.clone(), ids);
+    save_originator_index(env, &index);
+}
+
+/// One-time backfill for deployments that pre-date the by_origin index.
+/// Rebuilds it from the invoices map so historical invoices stay listed.
+fn backfill_originator_index(env: &Env) {
+    if env
+        .storage()
+        .persistent()
+        .has(&symbol_short!("by_origin"))
+    {
+        return;
+    }
+    let invoices = load_invoices(env);
+    if invoices.is_empty() {
+        return;
+    }
+    let mut index: Map<Address, Vec<Symbol>> = Map::new(env);
+    for (id, inv) in invoices.iter() {
+        let mut ids = index
+            .get(inv.originator.clone())
+            .unwrap_or(Vec::new(env));
+        insert_sorted_id(&mut ids, &id);
+        index.set(inv.originator.clone(), ids);
+    }
     save_originator_index(env, &index);
 }
 
@@ -317,10 +359,13 @@ fn assert_admin(env: &Env, signers: &Vec<Address>) {
     invofi_common::assert_threshold(env, &cfg, signers);
 }
 
-// This release has no schema migration. Future Wasm versions can evolve these
+// This release backfills the originator invoice index (issue #111) for
+// deployments that pre-date it. Future Wasm versions can evolve these
 // hooks while preserving the lifecycle entrypoint ABI.
 fn pre_upgrade(_env: &Env) {}
-fn post_upgrade(_env: &Env) {}
+fn post_upgrade(env: &Env) {
+    backfill_originator_index(env);
+}
 
 // ─── Contract ────────────────────────────────────────────────────────────────
 
@@ -1032,7 +1077,11 @@ impl RegistryContract {
         let mut i = start;
         while i < len && result.len() < page_size {
             // ponytail: u32 casts safe, i < len <= u32::MAX entries
-            result.push_back(ids.get(i as u32).unwrap());
+            if let Some(id) = ids.get(i as u32) {
+                result.push_back(id);
+            } else {
+                break;
+            }
             i += 1;
         }
         result
