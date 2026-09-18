@@ -69,6 +69,30 @@ fn save_blacklist(env: &Env, list: &Vec<Address>) {
         .set(&symbol_short!("blklist"), list);
 }
 
+fn load_originator_index(env: &Env) -> Map<Address, Vec<Symbol>> {
+    env.storage()
+        .persistent()
+        .get(&symbol_short!("by_origin"))
+        .unwrap_or(Map::new(env))
+}
+
+fn save_originator_index(env: &Env, index: &Map<Address, Vec<Symbol>>) {
+    env.storage()
+        .persistent()
+        .set(&symbol_short!("by_origin"), index);
+}
+
+/// Append an invoice id to its originator's index (issue #111).
+/// Append-only: withdrawals and status changes never remove entries,
+// ponytail: no removal path by design, history preserved, index mirrors register order
+fn index_invoice_originator(env: &Env, originator: &Address, id: &Symbol) {
+    let mut index = load_originator_index(env);
+    let mut ids = index.get(originator.clone()).unwrap_or(Vec::new(env));
+    ids.push_back(id.clone());
+    index.set(originator.clone(), ids);
+    save_originator_index(env, &index);
+}
+
 fn load_amendments(env: &Env) -> Map<Symbol, Vec<AmendmentRecord>> {
     env.storage()
         .persistent()
@@ -550,6 +574,7 @@ impl RegistryContract {
             };
             
             invoices.set(arg.id.clone(), invoice.clone());
+            index_invoice_originator(&env, &originator, &arg.id);
             s.total_invoices += 1;
             registered.push_back(invoice.clone());
 
@@ -597,6 +622,7 @@ impl RegistryContract {
             status: InvoiceStatus::Pending,
         };
         invoices.set(id, invoice.clone());
+        index_invoice_originator(&env, &invoice.originator, &invoice.id);
         save_invoices(&env, &invoices);
 
         let mut s = load_stats(&env);
@@ -978,6 +1004,36 @@ impl RegistryContract {
             if inv.originator == originator {
                 result.push_back(inv);
             }
+        }
+        result
+    }
+
+    /// Paginated invoice ids for one originator (issue #111).
+    /// Bounded page read over the append-only originator index, so the UI
+    /// never pulls the whole store. Returns ids only; fetch details via
+    /// `get_invoice` / `batch_get_invoices`.
+    pub fn get_originator_page(
+        env: Env,
+        originator: Address,
+        page: u32,
+        page_size: u32,
+    ) -> Vec<Symbol> {
+        if page_size == 0 {
+            env.panic_with_error(ContractError::InvalidInput);
+        }
+        let index = load_originator_index(&env);
+        let ids = index.get(originator).unwrap_or(Vec::new(&env));
+        let start = (page as u64) * (page_size as u64);
+        let len = ids.len() as u64;
+        let mut result: Vec<Symbol> = Vec::new(&env);
+        if start >= len {
+            return result;
+        }
+        let mut i = start;
+        while i < len && result.len() < page_size {
+            // ponytail: u32 casts safe, i < len <= u32::MAX entries
+            result.push_back(ids.get(i as u32).unwrap());
+            i += 1;
         }
         result
     }
