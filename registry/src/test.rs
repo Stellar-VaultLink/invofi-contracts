@@ -598,6 +598,54 @@ fn test_get_invoices_paginated() {
 }
 
 #[test]
+fn test_get_originator_page() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let contract_id = env.register(RegistryContract, (Address::generate(&env),));
+    let client = super::RegistryContractClient::new(&env, &contract_id);
+
+    let originator = Address::generate(&env);
+    let other = Address::generate(&env);
+    let amount: i128 = 1_000_000_000;
+    let due_date: u64 = 1_735_689_600;
+    let currency = symbol_short!("USDC");
+
+    // Register out of order: pages must still come back sorted.
+    for k in 0u32..30 {
+        let i = 29 - k;
+        let id = soroban_sdk::Symbol::new(&env, &std::format!("og{:02}", i));
+        client.register_invoice(&id, &originator, &amount, &currency, &due_date);
+    }
+    let other_id = soroban_sdk::Symbol::new(&env, "other01");
+    client.register_invoice(&other_id, &other, &amount, &currency, &due_date);
+
+    let p0 = client.get_originator_page(&originator, &0_u32, &10_u32);
+    let p1 = client.get_originator_page(&originator, &1_u32, &10_u32);
+    let p2 = client.get_originator_page(&originator, &2_u32, &10_u32);
+    let p3 = client.get_originator_page(&originator, &3_u32, &10_u32);
+    assert_eq!(p0.len(), 10);
+    assert_eq!(p1.len(), 10);
+    assert_eq!(p2.len(), 10);
+    assert_eq!(p3.len(), 0);
+
+    // No overlaps, no gaps, registration order preserved.
+    for i in 0u32..30 {
+        let expect = soroban_sdk::Symbol::new(&env, &std::format!("og{:02}", i));
+        let page = match i {
+            0..=9 => &p0,
+            10..=19 => &p1,
+            _ => &p2,
+        };
+        assert_eq!(page.get(i % 10).unwrap(), expect);
+    }
+
+    // Withdrawal keeps history: page contents and order unchanged.
+    client.cancel_invoice(&soroban_sdk::Symbol::new(&env, "og00"), &originator);
+    let p0b = client.get_originator_page(&originator, &0_u32, &10_u32);
+    assert_eq!(p0b, p0);
+}
+
+#[test]
 fn test_batch_get_invoices_skips_missing() {
     let env = Env::default();
     env.mock_all_auths();
