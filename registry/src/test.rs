@@ -3981,3 +3981,493 @@ fn test_request_amendment_on_nonexistent_invoice_panics() {
         &symbol_short!("fix"),
     );
 }
+
+// ─── Invoice Tokenization Tests (issue #178) ─────────────────────────────────
+
+#[test]
+fn test_token_minted_on_register_invoice() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let contract_id = env.register(RegistryContract, (Address::generate(&env),));
+    let client = super::RegistryContractClient::new(&env, &contract_id);
+
+    let originator = Address::generate(&env);
+    let invoice_id = symbol_short!("inv101");
+    let amount = 20_000_000i128;
+    let currency = symbol_short!("XLM");
+    let due_date = env.ledger().timestamp() + 86400 * 30;
+
+    let invoice = client.register_invoice(&invoice_id, &originator, &amount, &currency, &due_date);
+    assert_eq!(invoice.id, invoice_id);
+
+    let token_id = client.get_token_id(&invoice_id);
+    assert_eq!(client.get_token_by_invoice(&invoice_id), token_id);
+
+    // Verify token ownership
+    assert_eq!(client.owner_of(&token_id), originator);
+    assert_eq!(client.get_token_owner(&token_id), originator);
+    assert!(!client.is_token_burned(&token_id));
+    assert_eq!(client.get_approved(&token_id), None);
+
+    // Verify token metadata
+    let meta = client.get_token_metadata(&token_id);
+    assert_eq!(meta.token_id, token_id);
+    assert_eq!(meta.invoice_id, invoice_id);
+    assert_eq!(meta.originator, originator);
+    assert_eq!(meta.owner, originator);
+    assert_eq!(meta.amount, amount);
+    assert_eq!(meta.currency, currency);
+    assert_eq!(meta.due_date, due_date);
+    assert_eq!(meta.status, InvoiceStatus::Pending);
+
+    // Verify invoice reverse lookup by token ID
+    let looked_up = client.get_invoice_by_token(&token_id);
+    assert_eq!(looked_up.id, invoice_id);
+    assert_eq!(looked_up.amount, amount);
+}
+
+#[test]
+fn test_tokens_minted_on_batch_register_invoices() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let contract_id = env.register(RegistryContract, (Address::generate(&env),));
+    let client = super::RegistryContractClient::new(&env, &contract_id);
+
+    let originator = Address::generate(&env);
+    let mut args = soroban_sdk::Vec::new(&env);
+    let due_date = env.ledger().timestamp() + 86400 * 30;
+
+    args.push_back(super::InvoiceRegistrationArgs {
+        id: symbol_short!("b1"),
+        amount: 15_000_000i128,
+        currency: symbol_short!("XLM"),
+        due_date,
+    });
+    args.push_back(super::InvoiceRegistrationArgs {
+        id: symbol_short!("b2"),
+        amount: 25_000_000i128,
+        currency: symbol_short!("USDC"),
+        due_date,
+    });
+
+    let registered = client.batch_register_invoices(&originator, &args);
+    assert_eq!(registered.len(), 2);
+
+    let tok1 = client.get_token_id(&symbol_short!("b1"));
+    let tok2 = client.get_token_id(&symbol_short!("b2"));
+    assert_ne!(tok1, tok2);
+
+    assert_eq!(client.owner_of(&tok1), originator);
+    assert_eq!(client.owner_of(&tok2), originator);
+}
+
+#[test]
+fn test_token_transfer_by_owner() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let contract_id = env.register(RegistryContract, (Address::generate(&env),));
+    let client = super::RegistryContractClient::new(&env, &contract_id);
+
+    let alice = Address::generate(&env);
+    let bob = Address::generate(&env);
+    let invoice_id = symbol_short!("inv102");
+    let amount = 20_000_000i128;
+    let currency = symbol_short!("XLM");
+    let due_date = env.ledger().timestamp() + 86400 * 30;
+
+    client.register_invoice(&invoice_id, &alice, &amount, &currency, &due_date);
+    let token_id = client.get_token_id(&invoice_id);
+
+    // Alice transfers token to Bob
+    client.transfer(&alice, &bob, &token_id);
+
+    assert_eq!(client.owner_of(&token_id), bob);
+    assert_eq!(client.get_token_owner(&token_id), bob);
+
+    // Invoice originator / owner is updated to Bob
+    let inv = client.get_invoice(&invoice_id);
+    assert_eq!(inv.originator, bob);
+
+    // Bob can now manage the invoice (e.g. update amount)
+    let updated = client.update_invoice_amount(&invoice_id, &bob, &30_000_000i128);
+    assert_eq!(updated.amount, 30_000_000i128);
+
+    // Token metadata reflects new owner and amount
+    let meta = client.get_token_metadata(&token_id);
+    assert_eq!(meta.owner, bob);
+    assert_eq!(meta.amount, 30_000_000i128);
+}
+
+#[test]
+fn test_token_approval_and_transfer_by_approved_delegate() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let contract_id = env.register(RegistryContract, (Address::generate(&env),));
+    let client = super::RegistryContractClient::new(&env, &contract_id);
+
+    let alice = Address::generate(&env);
+    let bob = Address::generate(&env);
+    let charlie = Address::generate(&env);
+    let invoice_id = symbol_short!("inv103");
+    let amount = 20_000_000i128;
+    let currency = symbol_short!("XLM");
+    let due_date = env.ledger().timestamp() + 86400 * 30;
+
+    client.register_invoice(&invoice_id, &alice, &amount, &currency, &due_date);
+    let token_id = client.get_token_id(&invoice_id);
+
+    // Alice approves Bob
+    client.approve(&bob, &token_id);
+    assert_eq!(client.get_approved(&token_id), Some(bob.clone()));
+
+    // Bob transfers to Charlie via transfer_from
+    client.transfer_from(&bob, &alice, &charlie, &token_id);
+
+    assert_eq!(client.owner_of(&token_id), charlie);
+    // Approval is reset to None
+    assert_eq!(client.get_approved(&token_id), None);
+}
+
+#[test]
+fn test_token_approval_and_transfer_delegate_calling_transfer() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let contract_id = env.register(RegistryContract, (Address::generate(&env),));
+    let client = super::RegistryContractClient::new(&env, &contract_id);
+
+    let alice = Address::generate(&env);
+    let bob = Address::generate(&env);
+    let charlie = Address::generate(&env);
+    let invoice_id = symbol_short!("inv104");
+    let amount = 20_000_000i128;
+    let currency = symbol_short!("XLM");
+    let due_date = env.ledger().timestamp() + 86400 * 30;
+
+    client.register_invoice(&invoice_id, &alice, &amount, &currency, &due_date);
+    let token_id = client.get_token_id(&invoice_id);
+
+    // Alice approves Bob
+    client.approve(&bob, &token_id);
+    assert_eq!(client.get_approved(&token_id), Some(bob.clone()));
+
+    // Bob calls transfer directly with bob as from
+    client.transfer(&bob, &charlie, &token_id);
+
+    assert_eq!(client.owner_of(&token_id), charlie);
+    assert_eq!(client.get_approved(&token_id), None);
+}
+
+#[test]
+fn test_set_token_approval_and_revocation() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let contract_id = env.register(RegistryContract, (Address::generate(&env),));
+    let client = super::RegistryContractClient::new(&env, &contract_id);
+
+    let alice = Address::generate(&env);
+    let bob = Address::generate(&env);
+    let invoice_id = symbol_short!("inv105");
+    let amount = 20_000_000i128;
+    let currency = symbol_short!("XLM");
+    let due_date = env.ledger().timestamp() + 86400 * 30;
+
+    client.register_invoice(&invoice_id, &alice, &amount, &currency, &due_date);
+    let token_id = client.get_token_id(&invoice_id);
+
+    // Explicit approval
+    client.set_token_approval(&alice, &Some(bob.clone()), &token_id);
+    assert_eq!(client.get_approved(&token_id), Some(bob));
+
+    // Explicit revocation
+    client.set_token_approval(&alice, &None, &token_id);
+    assert_eq!(client.get_approved(&token_id), None);
+}
+
+#[test]
+#[should_panic(expected = "Error(Contract, #1)")] // ContractError::Unauthorized
+fn test_token_transfer_unauthorized_panics() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let contract_id = env.register(RegistryContract, (Address::generate(&env),));
+    let client = super::RegistryContractClient::new(&env, &contract_id);
+
+    let alice = Address::generate(&env);
+    let eve = Address::generate(&env);
+    let bob = Address::generate(&env);
+    let invoice_id = symbol_short!("inv106");
+    let amount = 20_000_000i128;
+    let currency = symbol_short!("XLM");
+    let due_date = env.ledger().timestamp() + 86400 * 30;
+
+    client.register_invoice(&invoice_id, &alice, &amount, &currency, &due_date);
+    let token_id = client.get_token_id(&invoice_id);
+
+    // Eve tries to transfer_from without approval
+    client.transfer_from(&eve, &alice, &bob, &token_id);
+}
+
+#[test]
+#[should_panic(expected = "Error(Contract, #1)")] // ContractError::Unauthorized
+fn test_set_token_approval_unauthorized_panics() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let contract_id = env.register(RegistryContract, (Address::generate(&env),));
+    let client = super::RegistryContractClient::new(&env, &contract_id);
+
+    let alice = Address::generate(&env);
+    let eve = Address::generate(&env);
+    let bob = Address::generate(&env);
+    let invoice_id = symbol_short!("inv107");
+    let amount = 20_000_000i128;
+    let currency = symbol_short!("XLM");
+    let due_date = env.ledger().timestamp() + 86400 * 30;
+
+    client.register_invoice(&invoice_id, &alice, &amount, &currency, &due_date);
+    let token_id = client.get_token_id(&invoice_id);
+
+    // Eve tries to set approval for Alice's token
+    client.set_token_approval(&eve, &Some(bob), &token_id);
+}
+
+#[test]
+#[should_panic(expected = "Error(Contract, #6)")] // ContractError::InvalidInput
+fn test_token_transfer_same_address_panics() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let contract_id = env.register(RegistryContract, (Address::generate(&env),));
+    let client = super::RegistryContractClient::new(&env, &contract_id);
+
+    let alice = Address::generate(&env);
+    let invoice_id = symbol_short!("inv108");
+    let amount = 20_000_000i128;
+    let currency = symbol_short!("XLM");
+    let due_date = env.ledger().timestamp() + 86400 * 30;
+
+    client.register_invoice(&invoice_id, &alice, &amount, &currency, &due_date);
+    let token_id = client.get_token_id(&invoice_id);
+
+    // Transfer to self is rejected
+    client.transfer(&alice, &alice, &token_id);
+}
+
+#[test]
+#[should_panic(expected = "Error(Contract, #8)")] // ContractError::Blacklisted
+fn test_token_transfer_to_blacklisted_panics() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let admin = Address::generate(&env);
+    let contract_id = env.register(RegistryContract, (admin.clone(),));
+    let client = super::RegistryContractClient::new(&env, &contract_id);
+
+    let alice = Address::generate(&env);
+    let bob = Address::generate(&env);
+    let invoice_id = symbol_short!("inv109");
+    let amount = 20_000_000i128;
+    let currency = symbol_short!("XLM");
+    let due_date = env.ledger().timestamp() + 86400 * 30;
+
+    client.register_invoice(&invoice_id, &alice, &amount, &currency, &due_date);
+    let token_id = client.get_token_id(&invoice_id);
+
+    // Blacklist Bob
+    client.blacklist_address(&one(&env, &admin), &bob);
+
+    // Alice tries to transfer to blacklisted Bob
+    client.transfer(&alice, &bob, &token_id);
+}
+
+#[test]
+fn test_token_burned_on_cancel_invoice() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let contract_id = env.register(RegistryContract, (Address::generate(&env),));
+    let client = super::RegistryContractClient::new(&env, &contract_id);
+
+    let alice = Address::generate(&env);
+    let invoice_id = symbol_short!("inv110");
+    let amount = 20_000_000i128;
+    let currency = symbol_short!("XLM");
+    let due_date = env.ledger().timestamp() + 86400 * 30;
+
+    client.register_invoice(&invoice_id, &alice, &amount, &currency, &due_date);
+    let token_id = client.get_token_id(&invoice_id);
+    assert!(!client.is_token_burned(&token_id));
+
+    // Cancel invoice
+    client.cancel_invoice(&invoice_id, &alice);
+
+    // Token must be burned
+    assert!(client.is_token_burned(&token_id));
+}
+
+#[test]
+#[should_panic(expected = "Error(Contract, #2)")] // ContractError::NotFound
+fn test_owner_of_burned_token_panics() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let contract_id = env.register(RegistryContract, (Address::generate(&env),));
+    let client = super::RegistryContractClient::new(&env, &contract_id);
+
+    let alice = Address::generate(&env);
+    let invoice_id = symbol_short!("inv111");
+    let amount = 20_000_000i128;
+    let currency = symbol_short!("XLM");
+    let due_date = env.ledger().timestamp() + 86400 * 30;
+
+    client.register_invoice(&invoice_id, &alice, &amount, &currency, &due_date);
+    let token_id = client.get_token_id(&invoice_id);
+
+    client.cancel_invoice(&invoice_id, &alice);
+    assert!(client.is_token_burned(&token_id));
+
+    client.owner_of(&token_id);
+}
+
+#[test]
+#[should_panic(expected = "Error(Contract, #3)")] // ContractError::InvalidTransition
+fn test_transfer_burned_token_panics() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let contract_id = env.register(RegistryContract, (Address::generate(&env),));
+    let client = super::RegistryContractClient::new(&env, &contract_id);
+
+    let alice = Address::generate(&env);
+    let bob = Address::generate(&env);
+    let invoice_id = symbol_short!("inv112");
+    let amount = 20_000_000i128;
+    let currency = symbol_short!("XLM");
+    let due_date = env.ledger().timestamp() + 86400 * 30;
+
+    client.register_invoice(&invoice_id, &alice, &amount, &currency, &due_date);
+    let token_id = client.get_token_id(&invoice_id);
+
+    client.cancel_invoice(&invoice_id, &alice);
+    assert!(client.is_token_burned(&token_id));
+
+    client.transfer(&alice, &bob, &token_id);
+}
+
+#[test]
+fn test_token_burned_on_repayment_and_partial_not_burned() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let admin = Address::generate(&env);
+    let contract_id = env.register(RegistryContract, (admin.clone(),));
+    let client = super::RegistryContractClient::new(&env, &contract_id);
+
+    let originator = Address::generate(&env);
+    let repayer = Address::generate(&env);
+    let financing = Address::generate(&env);
+    let invoice_id = symbol_short!("inv113");
+    let amount = 20_000_000i128;
+    let currency = symbol_short!("XLM");
+    let due_date = env.ledger().timestamp() + 86400 * 30;
+
+    client.register_invoice(&invoice_id, &originator, &amount, &currency, &due_date);
+    let token_id = client.get_token_id(&invoice_id);
+
+    client.set_financing_contract(&one(&env, &admin), &financing);
+    client.financing_marks_invoice_financed(&invoice_id);
+
+    // Partial repayment does not burn token
+    client.set_invoice_repaid_status(&invoice_id, &repayer, &false);
+    assert!(!client.is_token_burned(&token_id));
+
+    // Full repayment burns the token
+    client.set_invoice_repaid_status(&invoice_id, &repayer, &true);
+    assert!(client.is_token_burned(&token_id));
+}
+
+#[test]
+fn test_token_burned_on_repayment_contract_marks_repaid() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let admin = Address::generate(&env);
+    let contract_id = env.register(RegistryContract, (admin.clone(),));
+    let client = super::RegistryContractClient::new(&env, &contract_id);
+
+    let originator = Address::generate(&env);
+    let financing = Address::generate(&env);
+    let repayment = Address::generate(&env);
+    let invoice_id = symbol_short!("inv114");
+    let amount = 20_000_000i128;
+    let currency = symbol_short!("XLM");
+    let due_date = env.ledger().timestamp() + 86400 * 30;
+
+    client.register_invoice(&invoice_id, &originator, &amount, &currency, &due_date);
+    let token_id = client.get_token_id(&invoice_id);
+
+    client.set_financing_contract(&one(&env, &admin), &financing);
+    client.set_repayment_contract(&one(&env, &admin), &repayment);
+    client.financing_marks_invoice_financed(&invoice_id);
+
+    // Partial repayment via repayment contract -> not burned
+    client.repayment_marks_invoice_repaid(&invoice_id, &false);
+    assert!(!client.is_token_burned(&token_id));
+
+    // Full repayment via repayment contract -> burned
+    client.repayment_marks_invoice_repaid(&invoice_id, &true);
+    assert!(client.is_token_burned(&token_id));
+}
+
+#[test]
+fn test_token_burned_on_repayment_marks_defaulted() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let admin = Address::generate(&env);
+    let contract_id = env.register(RegistryContract, (admin.clone(),));
+    let client = super::RegistryContractClient::new(&env, &contract_id);
+
+    let originator = Address::generate(&env);
+    let financing = Address::generate(&env);
+    let repayment = Address::generate(&env);
+    let invoice_id = symbol_short!("inv115");
+    let amount = 20_000_000i128;
+    let currency = symbol_short!("XLM");
+    let due_date = env.ledger().timestamp() + 100;
+
+    client.register_invoice(&invoice_id, &originator, &amount, &currency, &due_date);
+    let token_id = client.get_token_id(&invoice_id);
+
+    client.set_financing_contract(&one(&env, &admin), &financing);
+    client.set_repayment_contract(&one(&env, &admin), &repayment);
+    client.financing_marks_invoice_financed(&invoice_id);
+
+    // Advance time past due_date and mark overdue
+    env.ledger().set_timestamp(due_date + 1);
+    client.mark_invoice_overdue(&invoice_id);
+
+    // Mark defaulted -> burns token
+    client.repayment_marks_defaulted(&invoice_id);
+    assert!(client.is_token_burned(&token_id));
+}
+
+#[test]
+fn test_token_burned_on_dispute_resolved_terminal() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let admin = Address::generate(&env);
+    let contract_id = env.register(RegistryContract, (admin.clone(),));
+    let client = super::RegistryContractClient::new(&env, &contract_id);
+
+    let originator = Address::generate(&env);
+    let financing = Address::generate(&env);
+    let invoice_id = symbol_short!("inv116");
+    let amount = 20_000_000i128;
+    let currency = symbol_short!("XLM");
+    let due_date = env.ledger().timestamp() + 86400 * 30;
+
+    client.register_invoice(&invoice_id, &originator, &amount, &currency, &due_date);
+    let token_id = client.get_token_id(&invoice_id);
+
+    client.set_financing_contract(&one(&env, &admin), &financing);
+    client.financing_marks_invoice_financed(&invoice_id);
+
+    // Raise dispute
+    client.raise_dispute(&invoice_id, &originator);
+    assert!(!client.is_token_burned(&token_id));
+
+    // Admin resolves dispute to Cancelled -> burns token
+    client.resolve_dispute(&one(&env, &admin), &invoice_id, &InvoiceStatus::Cancelled);
+    assert!(client.is_token_burned(&token_id));
+}

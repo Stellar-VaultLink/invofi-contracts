@@ -8,6 +8,17 @@ and are enforced by commitlint in CI.
 ## [Unreleased]
 
 ### Added
+- **Invoice tokenization with ERC-721-like non-fungible tokens (issue #178)** —
+  invoices registered in the `registry` contract now mint a unique non-fungible
+  token (`token_id = SHA-256(invoice_id)`) representing invoice ownership.
+  Supports direct owner transfers (`transfer(from, to, token_id)`), operator/spender
+  approvals (`approve(approver, token_id)` and `set_token_approval(owner, approved, token_id)`),
+  and delegate transfers (`transfer_from(spender, from, to, token_id)`). Transferring an
+  invoice token updates invoice ownership (`invoice.originator`) and re-indexes under the
+  new owner, enabling full protocol composability. Invoices reaching terminal status
+  (`Repaid`, `Defaulted`, `Cancelled`) trigger token burning, preventing further transfers
+  or approvals. Emits events `token_minted`, `token_transferred`, `token_approved`, and
+  `token_burned`.
 - **Reputation score decay (issue #139)** — outcomes older than the configured half-life (`DECAY_HALF_LIFE_SECS`, default 90 days) now contribute less via exponential decay. Cumulative weighted values (`weighted_repayments`, `weighted_defaults`) are recomputed on each `record_outcome` or `resolve_dispute` call: pending decay is applied first (scaling by `2^(-elapsed / half_life)`), then the new outcome is added at full weight. `get_score` reads the cached value in O(1). A `ReputationChanged` event (`rep_chg`) is emitted whenever recomputation changes the stored score. Key properties: fresh defaults hit immediately (no gaming window), old defaults decay over time, score floor at 0 is preserved, dispute resolution applies pending decay. 11 new tests: fresh default immediate impact, old default decay at one and two half-lives, score floor after decay, `rep_chg` emission from `record_outcome`, no decay without time advancing, per-originator decay independence, dispute with pending decay, cached read semantics, and two proptests (non-negative after time advancement, fresh default full weight after decay). Updated `ReputationRecord` storage with cumulative weighted fields and `last_recompute` timestamp. ADR-0004 §3 and §6 updated.
 - **Interest-rate cap audit & proptest (issue #122)** — verified `MAX_INTEREST_BPS`
   (10 000 bps = 100%) is enforced on all three term-setting entrypoints:
