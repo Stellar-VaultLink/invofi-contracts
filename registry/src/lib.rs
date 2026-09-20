@@ -1,17 +1,153 @@
 #![no_std]
 
 use soroban_sdk::{
-    contract, contractimpl, symbol_short, token, Address, BytesN, Env, Map, String, Symbol, Vec,
+    contract, contractimpl, symbol_short, token, xdr::ToXdr, Address, BytesN, Env, Map, String,
+    Symbol, Vec,
 };
 
 use invofi_common::{
     assert_not_paused, assert_transition, get_transition_history, AdminConfig, AmendmentField,
     AmendmentRecord, AmendmentStatus, Attestation, ContractError, FinancingClient, Invoice,
-    InvoiceStatus, OfferStatus, ProtocolStats, RiskTier, TransitionRecord, VerificationStatus,
-    VerificationType, DEFAULT_ATTESTATION_VALIDITY_SECS, MAX_ATTESTATIONS_PER_INVOICE,
-    MAX_ATTESTATION_VALIDITY_SECS, MAX_VERIFICATION_FEE_BPS, MAX_VERIFIERS,
-    MIN_ATTESTATION_VALIDITY_SECS, MIN_INVOICE_AMOUNT, VERIFICATION_TYPES,
+    InvoiceStatus, InvoiceTokenMetadata, OfferStatus, ProtocolStats, RiskTier, TransitionRecord,
+    VerificationStatus, VerificationType, DEFAULT_ATTESTATION_VALIDITY_SECS,
+    MAX_ATTESTATIONS_PER_INVOICE, MAX_ATTESTATION_VALIDITY_SECS, MAX_VERIFICATION_FEE_BPS,
+    MAX_VERIFIERS, MIN_ATTESTATION_VALIDITY_SECS, MIN_INVOICE_AMOUNT, VERIFICATION_TYPES,
 };
+
+// ─── Tokenization Storage Helpers (issue #178) ────────────────────────────────
+
+fn compute_token_id(env: &Env, invoice_id: &Symbol) -> BytesN<32> {
+    let bytes = invoice_id.to_xdr(env);
+    env.crypto().sha256(&bytes).into()
+}
+
+fn load_token_owner(env: &Env, token_id: &BytesN<32>) -> Option<Address> {
+    env.storage()
+        .persistent()
+        .get(&(symbol_short!("tok_own"), token_id.clone()))
+}
+
+fn save_token_owner(env: &Env, token_id: &BytesN<32>, owner: &Address) {
+    env.storage()
+        .persistent()
+        .set(&(symbol_short!("tok_own"), token_id.clone()), owner);
+}
+
+fn remove_token_owner(env: &Env, token_id: &BytesN<32>) {
+    env.storage()
+        .persistent()
+        .remove(&(symbol_short!("tok_own"), token_id.clone()));
+}
+
+fn load_token_approval(env: &Env, token_id: &BytesN<32>) -> Option<Address> {
+    env.storage()
+        .persistent()
+        .get(&(symbol_short!("tok_app"), token_id.clone()))
+}
+
+fn save_token_approval(env: &Env, token_id: &BytesN<32>, approved: Option<Address>) {
+    let key = (symbol_short!("tok_app"), token_id.clone());
+    if let Some(addr) = approved {
+        env.storage().persistent().set(&key, &addr);
+    } else {
+        env.storage().persistent().remove(&key);
+    }
+}
+
+fn load_token_invoice_id(env: &Env, token_id: &BytesN<32>) -> Option<Symbol> {
+    env.storage()
+        .persistent()
+        .get(&(symbol_short!("tok_inv"), token_id.clone()))
+}
+
+fn save_token_invoice_id(env: &Env, token_id: &BytesN<32>, invoice_id: &Symbol) {
+    env.storage()
+        .persistent()
+        .set(&(symbol_short!("tok_inv"), token_id.clone()), invoice_id);
+    env.storage()
+        .persistent()
+        .set(&(symbol_short!("inv_tok"), invoice_id.clone()), token_id);
+}
+
+fn is_token_burned_internal(env: &Env, token_id: &BytesN<32>) -> bool {
+    env.storage()
+        .persistent()
+        .get(&(symbol_short!("tok_brn"), token_id.clone()))
+        .unwrap_or(false)
+}
+
+fn mark_token_burned_internal(env: &Env, token_id: &BytesN<32>) {
+    env.storage()
+        .persistent()
+        .set(&(symbol_short!("tok_brn"), token_id.clone()), &true);
+}
+
+fn mint_invoice_token(env: &Env, invoice: &Invoice) -> BytesN<32> {
+    let token_id = compute_token_id(env, &invoice.id);
+    save_token_owner(env, &token_id, &invoice.originator);
+    save_token_invoice_id(env, &token_id, &invoice.id);
+    env.events().publish(
+        (Symbol::new(env, "token_minted"), token_id.clone()),
+        (invoice.id.clone(), invoice.originator.clone(), invoice.amount),
+    );
+    token_id
+}
+
+fn burn_invoice_token_if_exists(env: &Env, invoice_id: &Symbol, terminal_status: InvoiceStatus) {
+    let token_id = compute_token_id(env, invoice_id);
+    if is_token_burned_internal(env, &token_id) {
+        return;
+    }
+    if let Some(owner) = load_token_owner(env, &token_id) {
+        save_token_approval(env, &token_id, None);
+        remove_token_owner(env, &token_id);
+        mark_token_burned_internal(env, &token_id);
+        env.events().publish(
+            (Symbol::new(env, "token_burned"), token_id.clone()),
+            (invoice_id.clone(), owner, terminal_status),
+        );
+    }
+}
+
+fn execute_token_transfer(env: &Env, from: &Address, to: &Address, token_id: &BytesN<32>) {
+    assert_not_paused(env);
+    assert_not_blacklisted(env, from);
+    assert_not_blacklisted(env, to);
+
+    if from == to {
+        env.panic_with_error(ContractError::InvalidInput);
+    }
+
+    if is_token_burned_internal(env, token_id) {
+        env.panic_with_error(ContractError::InvalidTransition);
+    }
+
+    let current_owner = load_token_owner(env, token_id)
+        .unwrap_or_else(|| env.panic_with_error(ContractError::NotFound));
+
+    if current_owner != *from {
+        env.panic_with_error(ContractError::Unauthorized);
+    }
+
+    let invoice_id = load_token_invoice_id(env, token_id)
+        .unwrap_or_else(|| env.panic_with_error(ContractError::NotFound));
+
+    let mut invoices = load_invoices(env);
+    if let Some(mut invoice) = invoices.get(invoice_id.clone()) {
+        invoice.originator = to.clone();
+        invoices.set(invoice_id.clone(), invoice);
+        save_invoices(env, &invoices);
+        index_invoice_originator(env, to, &invoice_id);
+    }
+
+    save_token_owner(env, token_id, to);
+    save_token_approval(env, token_id, None);
+
+    env.events().publish(
+        (Symbol::new(env, "token_transferred"), token_id.clone()),
+        (from.clone(), to.clone()),
+    );
+}
 
 // ─── Storage Helpers ─────────────────────────────────────────────────────────
 
@@ -620,6 +756,7 @@ impl RegistryContract {
             
             invoices.set(arg.id.clone(), invoice.clone());
             index_invoice_originator(&env, &originator, &arg.id);
+            mint_invoice_token(&env, &invoice);
             s.total_invoices += 1;
             registered.push_back(invoice.clone());
 
@@ -668,6 +805,7 @@ impl RegistryContract {
         };
         invoices.set(id, invoice.clone());
         index_invoice_originator(&env, &invoice.originator, &invoice.id);
+        mint_invoice_token(&env, &invoice);
         save_invoices(&env, &invoices);
 
         let mut s = load_stats(&env);
@@ -710,8 +848,14 @@ impl RegistryContract {
         assert_transition(&env, id.clone(), old_status, new_status, originator.clone());
 
         invoice.status = new_status;
-        invoices.set(id, invoice.clone());
+        invoices.set(id.clone(), invoice.clone());
         save_invoices(&env, &invoices);
+        if new_status == InvoiceStatus::Cancelled
+            || new_status == InvoiceStatus::Repaid
+            || new_status == InvoiceStatus::Defaulted
+        {
+            burn_invoice_token_if_exists(&env, &id, new_status);
+        }
         invoice
     }
 
@@ -767,8 +911,9 @@ impl RegistryContract {
         );
 
         invoice.status = InvoiceStatus::Cancelled;
-        invoices.set(invoice_id, invoice.clone());
+        invoices.set(invoice_id.clone(), invoice.clone());
         save_invoices(&env, &invoices);
+        burn_invoice_token_if_exists(&env, &invoice_id, InvoiceStatus::Cancelled);
         env.events().publish(
             (symbol_short!("inv_cxl"), invoice.originator.clone()),
             invoice.originator.clone(),
@@ -803,8 +948,11 @@ impl RegistryContract {
         assert_transition(&env, id.clone(), old_status, new_status, repayer.clone());
 
         invoice.status = new_status;
-        invoices.set(id, invoice.clone());
+        invoices.set(id.clone(), invoice.clone());
         save_invoices(&env, &invoices);
+        if fully_repaid {
+            burn_invoice_token_if_exists(&env, &id, InvoiceStatus::Repaid);
+        }
         env.events().publish(
             (symbol_short!("inv_sts"), invoice.id.clone()),
             invoice.status,
@@ -877,8 +1025,11 @@ impl RegistryContract {
         assert_transition(&env, id.clone(), old_status, new_status, repayment.clone());
 
         invoice.status = new_status;
-        invoices.set(id, invoice.clone());
+        invoices.set(id.clone(), invoice.clone());
         save_invoices(&env, &invoices);
+        if fully_repaid {
+            burn_invoice_token_if_exists(&env, &id, InvoiceStatus::Repaid);
+        }
         env.events().publish(
             (symbol_short!("inv_sts"), invoice.id.clone()),
             invoice.status,
@@ -917,8 +1068,9 @@ impl RegistryContract {
         );
 
         invoice.status = InvoiceStatus::Defaulted;
-        invoices.set(id, invoice.clone());
+        invoices.set(id.clone(), invoice.clone());
         save_invoices(&env, &invoices);
+        burn_invoice_token_if_exists(&env, &id, InvoiceStatus::Defaulted);
         env.events().publish(
             (symbol_short!("inv_def"), invoice.id.clone()),
             invoice.originator.clone(),
@@ -1020,8 +1172,14 @@ impl RegistryContract {
         assert_transition(&env, invoice_id.clone(), old_status, target_status, actor);
 
         invoice.status = target_status;
-        invoices.set(invoice_id, invoice.clone());
+        invoices.set(invoice_id.clone(), invoice.clone());
         save_invoices(&env, &invoices);
+        if target_status == InvoiceStatus::Cancelled
+            || target_status == InvoiceStatus::Repaid
+            || target_status == InvoiceStatus::Defaulted
+        {
+            burn_invoice_token_if_exists(&env, &invoice_id, target_status);
+        }
         env.events().publish(
             (symbol_short!("inv_rsl"), invoice.id.clone()),
             invoice.status,
@@ -1920,6 +2078,173 @@ impl RegistryContract {
     /// Query the full transition history for an invoice.
     pub fn get_transition_history(env: Env, invoice_id: Symbol) -> Vec<TransitionRecord> {
         get_transition_history(&env, invoice_id)
+    }
+
+    // ─── Invoice Tokenization (issue #178) ───────────────────────────────────
+
+    /// Computes the deterministic token ID for an invoice: `SHA-256(invoice_id)`.
+    pub fn get_token_id(env: Env, invoice_id: Symbol) -> BytesN<32> {
+        compute_token_id(&env, &invoice_id)
+    }
+
+    /// Alias for `get_token_id`.
+    pub fn get_token_by_invoice(env: Env, invoice_id: Symbol) -> BytesN<32> {
+        compute_token_id(&env, &invoice_id)
+    }
+
+    /// Returns the current owner of the token. Panics with `NotFound` if
+    /// the token does not exist or has been burned.
+    pub fn owner_of(env: Env, token_id: BytesN<32>) -> Address {
+        if is_token_burned_internal(&env, &token_id) {
+            env.panic_with_error(ContractError::NotFound);
+        }
+        load_token_owner(&env, &token_id)
+            .unwrap_or_else(|| env.panic_with_error(ContractError::NotFound))
+    }
+
+    /// Alias for `owner_of`.
+    pub fn get_token_owner(env: Env, token_id: BytesN<32>) -> Address {
+        Self::owner_of(env, token_id)
+    }
+
+    /// Returns the address approved to transfer `token_id`, if any.
+    pub fn get_approved(env: Env, token_id: BytesN<32>) -> Option<Address> {
+        if is_token_burned_internal(&env, &token_id) {
+            return None;
+        }
+        load_token_approval(&env, &token_id)
+    }
+
+    /// Returns rich metadata for the invoice token (id, invoice details, status, amount, owner).
+    pub fn get_token_metadata(env: Env, token_id: BytesN<32>) -> InvoiceTokenMetadata {
+        if is_token_burned_internal(&env, &token_id) {
+            env.panic_with_error(ContractError::NotFound);
+        }
+        let owner = load_token_owner(&env, &token_id)
+            .unwrap_or_else(|| env.panic_with_error(ContractError::NotFound));
+        let invoice_id = load_token_invoice_id(&env, &token_id)
+            .unwrap_or_else(|| env.panic_with_error(ContractError::NotFound));
+        let invoice = load_invoices(&env)
+            .get(invoice_id.clone())
+            .unwrap_or_else(|| env.panic_with_error(ContractError::NotFound));
+
+        InvoiceTokenMetadata {
+            token_id,
+            invoice_id,
+            originator: invoice.originator.clone(),
+            owner,
+            amount: invoice.amount,
+            currency: invoice.currency,
+            due_date: invoice.due_date,
+            status: invoice.status,
+        }
+    }
+
+    /// Lookup an invoice by its unique token ID.
+    pub fn get_invoice_by_token(env: Env, token_id: BytesN<32>) -> Invoice {
+        let invoice_id = load_token_invoice_id(&env, &token_id)
+            .unwrap_or_else(|| env.panic_with_error(ContractError::NotFound));
+        load_invoices(&env)
+            .get(invoice_id)
+            .unwrap_or_else(|| env.panic_with_error(ContractError::NotFound))
+    }
+
+    /// Returns true if the token has been burned on invoice terminal status.
+    pub fn is_token_burned(env: Env, token_id: BytesN<32>) -> bool {
+        is_token_burned_internal(&env, &token_id)
+    }
+
+    /// Approves `approver` to transfer `token_id`. Only the current token owner
+    /// can approve. Emits `token_approved`.
+    pub fn approve(env: Env, approver: Address, token_id: BytesN<32>) {
+        assert_not_paused(&env);
+        if is_token_burned_internal(&env, &token_id) {
+            env.panic_with_error(ContractError::InvalidTransition);
+        }
+        let owner = load_token_owner(&env, &token_id)
+            .unwrap_or_else(|| env.panic_with_error(ContractError::NotFound));
+        owner.require_auth();
+        assert_not_blacklisted(&env, &approver);
+
+        save_token_approval(&env, &token_id, Some(approver.clone()));
+        env.events().publish(
+            (Symbol::new(&env, "token_approved"), token_id),
+            (owner, approver),
+        );
+    }
+
+    /// Explicitly set or revoke approval for `token_id`. Only current owner.
+    pub fn set_token_approval(
+        env: Env,
+        owner: Address,
+        approved: Option<Address>,
+        token_id: BytesN<32>,
+    ) {
+        assert_not_paused(&env);
+        owner.require_auth();
+        if is_token_burned_internal(&env, &token_id) {
+            env.panic_with_error(ContractError::InvalidTransition);
+        }
+        let current_owner = load_token_owner(&env, &token_id)
+            .unwrap_or_else(|| env.panic_with_error(ContractError::NotFound));
+        if current_owner != owner {
+            env.panic_with_error(ContractError::Unauthorized);
+        }
+        if let Some(ref addr) = approved {
+            assert_not_blacklisted(&env, addr);
+        }
+        save_token_approval(&env, &token_id, approved.clone());
+        env.events().publish(
+            (Symbol::new(&env, "token_approved"), token_id),
+            (owner, approved),
+        );
+    }
+
+    /// Transfer invoice token from `from` to `to`.
+    /// Can be called by the token owner (authorized via `from.require_auth()`)
+    /// or by an approved delegate (where `from` is the approved address).
+    pub fn transfer(env: Env, from: Address, to: Address, token_id: BytesN<32>) {
+        assert_not_paused(&env);
+        if is_token_burned_internal(&env, &token_id) {
+            env.panic_with_error(ContractError::InvalidTransition);
+        }
+        let current_owner = load_token_owner(&env, &token_id)
+            .unwrap_or_else(|| env.panic_with_error(ContractError::NotFound));
+        let approved = load_token_approval(&env, &token_id);
+
+        if approved.as_ref() == Some(&from) {
+            from.require_auth();
+            execute_token_transfer(&env, &current_owner, &to, &token_id);
+        } else {
+            from.require_auth();
+            execute_token_transfer(&env, &from, &to, &token_id);
+        }
+    }
+
+    /// Transfer invoice token using spender approval (SEP-41 / ERC-721 transferFrom style).
+    /// Requires `spender.require_auth()`. `spender` must be the current owner or approved address.
+    pub fn transfer_from(
+        env: Env,
+        spender: Address,
+        from: Address,
+        to: Address,
+        token_id: BytesN<32>,
+    ) {
+        assert_not_paused(&env);
+        spender.require_auth();
+        if is_token_burned_internal(&env, &token_id) {
+            env.panic_with_error(ContractError::InvalidTransition);
+        }
+        let current_owner = load_token_owner(&env, &token_id)
+            .unwrap_or_else(|| env.panic_with_error(ContractError::NotFound));
+        if current_owner != from {
+            env.panic_with_error(ContractError::Unauthorized);
+        }
+        let approved = load_token_approval(&env, &token_id);
+        if approved.as_ref() != Some(&spender) && current_owner != spender {
+            env.panic_with_error(ContractError::Unauthorized);
+        }
+        execute_token_transfer(&env, &from, &to, &token_id);
     }
 }
 

@@ -332,6 +332,20 @@ pub struct Invoice {
     pub status: InvoiceStatus,
 }
 
+/// Metadata for an ERC-721-like non-fungible invoice token (issue #178).
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct InvoiceTokenMetadata {
+    pub token_id: BytesN<32>,
+    pub invoice_id: Symbol,
+    pub originator: Address,
+    pub owner: Address,
+    pub amount: i128,
+    pub currency: Symbol,
+    pub due_date: u64,
+    pub status: InvoiceStatus,
+}
+
 /// Lifecycle status of an invoice.
 #[contracttype]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
