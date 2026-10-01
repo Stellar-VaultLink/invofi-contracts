@@ -6,11 +6,13 @@
 //! function.
 
 #![no_std]
+#![warn(missing_docs)]
 
-use soroban_sdk::{
-    contractclient, contracterror, contracttype, symbol_short, Address, BytesN, Env, Map, String,
-    Symbol, Vec,
-};
+use soroban_sdk::{symbol_short, Address, BytesN, Env, Map, String, Symbol, Vec};
+
+/// Domain types, errors, state records, and cross-contract interfaces.
+pub mod types;
+pub use types::*;
 
 // ─── Constants ───────────────────────────────────────────────────────────────
 
@@ -51,6 +53,7 @@ pub const MAX_NEGOTIATION_WINDOW_SECS: u64 = 2_592_000;
 /// `NegotiationRecord` to a single persistent `Vec`, so the cap is what keeps
 /// that entry's size — and the cost of reading it — bounded.
 pub const MAX_NEGOTIATION_ROUNDS: u32 = 20;
+
 /// Default validity period for a verification attestation. 90 days, in
 /// seconds. Admin-configurable per deployment via `set_attestation_validity`.
 pub const DEFAULT_ATTESTATION_VALIDITY_SECS: u64 = 7_776_000;
@@ -88,87 +91,7 @@ pub const VERIFICATION_TYPES: [VerificationType; 3] = [
     VerificationType::TaxCompliance,
 ];
 
-// ─── Shared Error Enum ────────────────────────────────────────────────────────
-
-/// Structured error type shared across all InvoFi contracts.
-///
-/// Using `#[contracterror]` causes the Soroban host to encode these as a
-/// typed `Error` value in the XDR result, not as an opaque string panic.
-/// Clients (SDK, frontend, indexer) can match on the `u32` discriminant
-/// without parsing panic messages — which breaks across contract versions.
-///
-/// Discriminants are **stable** and must never be re-numbered once deployed.
-/// Add new variants at the end with a new, higher number.
-///
-/// Using `env.panic_with_error(&ContractError::X)` keeps all public
-/// function signatures identical (`T`, not `Result<T, ContractError>`), so
-/// no SDK binding changes are needed.
-#[contracterror]
-#[derive(Copy, Clone, Debug, Eq, PartialEq, PartialOrd, Ord)]
-#[repr(u32)]
-pub enum ContractError {
-    /// Caller is not authorized to perform this action (wrong admin,
-    /// wrong originator, wrong lender, etc.).
-    Unauthorized = 1,
-
-    /// Requested resource (invoice, offer, rate, etc.) does not exist.
-    NotFound = 2,
-
-    /// The operation is not permitted given the resource's current status
-    /// (e.g., accepting an already-Financed offer, cancelling a non-Pending
-    /// invoice, reclaiming before the grace period).
-    InvalidTransition = 3,
-
-    /// The contract is paused; all state-mutating operations are halted
-    /// until an admin calls `unpause`.
-    Paused = 4,
-
-    /// The caller's balance is insufficient for the requested operation
-    /// (e.g., unstaking more than staked, repaying more than is owed).
-    InsufficientBalance = 5,
-
-    /// A parameter value falls outside the allowed range or violates a
-    /// protocol constraint (e.g., `fee_bps > 500`, `amount <= 0`,
-    /// past-due `due_date`).
-    InvalidInput = 6,
-
-    /// An entity with the provided ID already exists (invoice, offer).
-    AlreadyExists = 7,
-
-    /// The caller's address is on the blacklist.
-    Blacklisted = 8,
-
-    /// A version is not in strict `MAJOR.MINOR.PATCH` form.
-    InvalidVersion = 9,
-
-    /// An executable update is awaiting post-upgrade finalization.
-    UpgradePending = 10,
-
-    /// No executable update is awaiting post-upgrade finalization.
-    UpgradeNotPending = 11,
-
-    /// No retained previous executable is available for rollback.
-    RollbackUnavailable = 12,
-
-    /// The offer has passed its expiration deadline and can no longer be accepted.
-    OfferExpired = 13,
-}
-
-/// Numeric components of a strict `MAJOR.MINOR.PATCH` version.
-#[contracttype]
-#[derive(Clone, Copy, Debug, Eq, PartialEq, PartialOrd, Ord)]
-pub struct SemanticVersion {
-    pub major: u32,
-    pub minor: u32,
-    pub patch: u32,
-}
-
-#[contracttype]
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct PendingUpgrade {
-    pub version: String,
-    pub wasm_hash: BytesN<32>,
-}
+// ─── Contract Versioning ──────────────────────────────────────────────────────
 
 const VERSION_KEY: Symbol = symbol_short!("__version");
 const PREVIOUS_VERSION_KEY: Symbol = symbol_short!("__prevver");
@@ -308,359 +231,6 @@ pub fn commit_rollback(env: &Env, version: &String) {
     env.storage().instance().remove(&PREVIOUS_WASM_KEY);
 }
 
-// ─── Types ───────────────────────────────────────────────────────────────────
-
-/// Risk tier for yield-rate lookups. A = low risk, C = high risk.
-#[contracttype]
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-#[repr(u32)]
-pub enum RiskTier {
-    A = 0,
-    B = 1,
-    C = 2,
-}
-
-/// An invoice registered on-chain.
-#[contracttype]
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct Invoice {
-    pub id: Symbol,
-    pub originator: Address,
-    pub amount: i128,
-    pub currency: Symbol,
-    pub due_date: u64,
-    pub status: InvoiceStatus,
-}
-
-/// Metadata for an ERC-721-like non-fungible invoice token (issue #178).
-#[contracttype]
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct InvoiceTokenMetadata {
-    pub token_id: BytesN<32>,
-    pub invoice_id: Symbol,
-    pub originator: Address,
-    pub owner: Address,
-    pub amount: i128,
-    pub currency: Symbol,
-    pub due_date: u64,
-    pub status: InvoiceStatus,
-}
-
-/// Lifecycle status of an invoice.
-#[contracttype]
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-#[repr(u32)]
-pub enum InvoiceStatus {
-    Pending = 0,
-    Financed = 1,
-    Repaid = 2,
-    Overdue = 3,
-    Cancelled = 4,
-    Disputed = 5,
-    Defaulted = 6,
-}
-
-/// A record of a single invoice state transition.
-#[contracttype]
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct TransitionRecord {
-    pub from_status: InvoiceStatus,
-    pub to_status: InvoiceStatus,
-    pub actor: Address,
-    pub timestamp: u64,
-}
-
-/// The field being amended on an invoice.
-#[contracttype]
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-#[repr(u32)]
-pub enum AmendmentField {
-    Amount = 0,
-    DueDate = 1,
-}
-
-/// Status of an amendment request.
-#[contracttype]
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-#[repr(u32)]
-pub enum AmendmentStatus {
-    Pending = 0,
-    Approved = 1,
-    Rejected = 2,
-}
-
-/// An on-chain audit record for an invoice amendment.
-#[contracttype]
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct AmendmentRecord {
-    pub field: AmendmentField,
-    pub old_amount: i128,
-    pub new_amount: i128,
-    pub old_due_date: u64,
-    pub new_due_date: u64,
-    pub reason: Symbol,
-    pub timestamp: u64,
-    pub status: AmendmentStatus,
-}
-
-/// A financing offer submitted by a lender against an invoice.
-#[contracttype]
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct FinancingOffer {
-    pub id: Symbol,
-    pub invoice_id: Symbol,
-    pub lender: Address,
-    pub amount: i128,
-    pub currency: Symbol,
-    /// Interest rate in basis points (e.g. 500 = 5.00%)
-    pub interest_rate: u32,
-    /// Financing duration in seconds
-    pub duration: u64,
-    /// Optional Unix timestamp after which the offer can no longer be accepted.
-    /// `0` means the offer never expires (backward compatible).
-    pub expires_at: u64,
-    pub status: OfferStatus,
-    /// Unix timestamp when the offer was accepted; 0 if not yet accepted
-    pub funded_at: u64,
-    /// Running total of repayments made against the financing obligation
-    pub amount_repaid: i128,
-}
-
-/// Lifecycle status of a financing offer.
-#[contracttype]
-#[derive(Clone, Debug, Eq, PartialEq)]
-#[repr(u32)]
-pub enum OfferStatus {
-    Pending = 0,
-    Accepted = 1,
-    Rejected = 2,
-    Financed = 3,
-    Repaid = 4,
-    Defaulted = 5,
-}
-
-/// Aggregate protocol statistics.
-#[contracttype]
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct ProtocolStats {
-    pub total_invoices: u32,
-    pub total_offers: u32,
-    pub total_financed: i128,
-    pub total_repaid: i128,
-    pub total_fee_revenue: i128,
-}
-
-/// Per-lender activity statistics.
-#[contracttype]
-#[derive(Clone, Debug, Default)]
-pub struct LenderStats {
-    pub total_offered: i128,
-    pub total_accepted: i128,
-    pub offers_pending: u32,
-    pub offers_repaid: u32,
-}
-
-/// Installment frequency for a fixed repayment schedule.
-///
-/// `Daily` = 86 400 s between installments, `Weekly` = 604 800 s,
-/// `Monthly` = 2 592 000 s (30-day approximation).
-#[contracttype]
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-#[repr(u32)]
-pub enum ScheduleFrequency {
-    Daily = 0,
-    Weekly = 1,
-    Monthly = 2,
-}
-
-impl ScheduleFrequency {
-    /// Returns the period in seconds that corresponds to this frequency.
-    pub fn period_secs(self) -> u64 {
-        match self {
-            ScheduleFrequency::Daily => 86_400,
-            ScheduleFrequency::Weekly => 604_800,
-            ScheduleFrequency::Monthly => 2_592_000,
-        }
-    }
-}
-
-/// An advisory fixed-installment repayment schedule attached to a financing offer.
-///
-/// Each installment covers an equal slice of principal plus interest on the
-/// remaining principal (flat-rate model):
-///
-///   installment_principal = offer.amount / count
-///   installment_yield     = installment_principal * offer.interest_rate / 10_000
-///   installment_amount    = installment_principal + installment_yield
-///
-/// The schedule is **advisory with enforcement**: ad-hoc partial repayments
-/// remain permitted via `repay_invoice` and will never corrupt schedule state
-/// — `amount_repaid` on the offer is always the source of truth for how much
-/// has actually been cleared.
-#[contracttype]
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct RepaymentSchedule {
-    pub offer_id: Symbol,
-    /// Number of equal installments.
-    pub count: u32,
-    /// Seconds between installments.
-    pub frequency: ScheduleFrequency,
-    /// Amount due per installment (principal slice + yield on that slice).
-    pub installment_amount: i128,
-    /// Unix timestamp of the first installment due date.
-    pub first_due: u64,
-}
-
-/// A single payment record stored on-chain as part of the payment history
-/// for an invoice. Each partial or full repayment creates one record.
-#[contracttype]
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct PaymentRecord {
-    /// Sequential payment identifier (1-based).
-    pub payment_id: u32,
-    /// Total payment amount (principal + interest combined).
-    pub amount: i128,
-    /// Portion of the payment applied to accrued interest.
-    pub interest_paid: i128,
-    /// Portion of the payment applied to outstanding principal.
-    pub principal_paid: i128,
-    /// Unix timestamp of the payment.
-    pub timestamp: u64,
-    /// Address that made the payment.
-    pub payer: Address,
-}
-
-/// Which side of a financing negotiation proposed a set of terms.
-#[contracttype]
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-#[repr(u32)]
-pub enum NegotiationParty {
-    /// The lender who created the offer, via `amend_offer`.
-    Lender = 0,
-    /// The invoice originator, via `counter_offer`.
-    Originator = 1,
-}
-
-/// One round of an offer negotiation: the terms one party put on the table,
-/// and when. The full `Vec<NegotiationRecord>` for an offer is the on-chain
-/// negotiation history.
-///
-/// `(amount, interest_rate, duration)` is the **canonical term tuple**.
-/// Agreement is exact equality of that tuple — there is no rounding or
-/// tolerance, so "these are the same terms" is never a judgement call.
-#[contracttype]
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct NegotiationRecord {
-    /// Which side proposed these terms.
-    pub party: NegotiationParty,
-    /// Proposed principal.
-    pub amount: i128,
-    /// Proposed interest rate in basis points.
-    pub interest_rate: u32,
-    /// Proposed financing duration in seconds.
-    pub duration: u64,
-    /// Ledger timestamp at which the round was recorded.
-    pub timestamp: u64,
-}
-
-/// Lifecycle status of an offer negotiation.
-///
-/// `Expired` is **derived on read** from the window deadline: Soroban has no
-/// scheduler, so nothing flips a negotiation to expired on its own. `Closed`
-/// and `Accepted` are persisted, because both are the result of an actual
-/// call.
-#[contracttype]
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-#[repr(u32)]
-pub enum NegotiationStatus {
-    /// No negotiation has been opened on this offer.
-    None = 0,
-    /// Open: within the window, still accepting rounds.
-    Open = 1,
-    /// The window elapsed without agreement. Terminal.
-    Expired = 2,
-    /// A party ended the negotiation early. Terminal.
-    Closed = 3,
-    /// The two sides converged on identical terms and the offer executed.
-    /// Terminal.
-    Accepted = 4,
-}
-
-/// The class of off-chain fact an attestation speaks to.
-#[contracttype]
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-#[repr(u32)]
-pub enum VerificationType {
-    /// The hash of the invoice document itself matches what the originator
-    /// registered off-chain.
-    DocumentHash = 0,
-    /// The originator is a registered business in good standing.
-    BusinessRegistration = 1,
-    /// The originator is current on its tax obligations.
-    TaxCompliance = 2,
-}
-
-/// Verification state of an invoice, or of one verification type on it.
-///
-/// `Expired` is **derived on read** from `valid_until`: Soroban has no
-/// scheduler, so nothing flips an attestation to expired on its own.
-#[contracttype]
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-#[repr(u32)]
-pub enum VerificationStatus {
-    /// No attestation yet, or not enough of them to clear the threshold.
-    Pending = 0,
-    /// Enough distinct verifiers attested affirmatively, none of them
-    /// expired, and no verifier rejected.
-    Verified = 1,
-    /// A verifier attested negatively. A live rejection outranks any number
-    /// of approvals.
-    Rejected = 2,
-    /// Every attestation that existed has passed its `valid_until`.
-    Expired = 3,
-}
-
-/// A verifier's signed statement about one off-chain fact, stored on-chain.
-///
-/// The contract cannot check that `hash` corresponds to a real invoice
-/// document, or that a business registration is genuine. What it does is
-/// authenticate that a *trusted verifier* said so and keep the statement
-/// tamper-evident and timestamped — see ADR-0009 for that trust boundary.
-#[contracttype]
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct Attestation {
-    /// The verifier who submitted it.
-    pub verifier: Address,
-    /// Which off-chain fact it speaks to.
-    pub v_type: VerificationType,
-    /// Hash of the off-chain evidence (document, registration record, filing).
-    pub hash: BytesN<32>,
-    /// Ledger timestamp at which it was submitted.
-    pub timestamp: u64,
-    /// Ledger timestamp after which it no longer counts.
-    pub valid_until: u64,
-    /// `Verified` or `Rejected` as submitted; flipped to `Expired` once
-    /// `expire_verifications` observes the lapse. Reads derive expiry from
-    /// `valid_until` regardless, so this field lagging never makes a read
-    /// wrong.
-    pub status: VerificationStatus,
-}
-
-/// An event record stored in the on-chain event index.
-///
-/// Lightweight summary that mirrors a Soroban event log entry, enabling
-/// efficient querying by event type, time range, and actor address.
-#[contracttype]
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct EventRecord {
-    pub event_id: u64,
-    pub event_type: Symbol,
-    pub timestamp: u64,
-    pub actor: Address,
-    pub contract_id: Address,
-    pub data_key: Symbol,
-}
-
 // ─── Currency Registry ───────────────────────────────────────────────────────
 
 /// Load the currency registry (an empty map if none has been configured).
@@ -716,35 +286,6 @@ pub fn resolve_token(env: &Env, currency: &Symbol) -> Address {
 /// write/state-changing entrypoint must call this guard before mutating
 /// persistent storage or transferring funds. The explicit exceptions are the
 /// pause/unpause setters themselves and read-only getter/query functions.
-///
-/// - Registry:
-///   - state-changing: register_invoice, update_invoice_status, update_invoice_amount,
-///     cancel_invoice, set_invoice_repaid_status, financing_marks_invoice_financed,
-///     repayment_marks_invoice_repaid, repayment_marks_defaulted, mark_invoice_overdue,
-///     raise_dispute, resolve_dispute, blacklist_address, unblacklist_address,
-///     transfer_admin, set_financing_contract, set_repayment_contract, set_rate,
-///     set_fee.
-///   - exceptions: pause, unpause, contract_is_paused, getters.
-/// - Financing:
-///   - state-changing: create_offer, withdraw_offer, accept_offer, reject_offer,
-///     amend_offer, counter_offer, close_negotiation, set_negotiation_window,
-///     update_offer_status, update_offer_amount_repaid, update_lender_stats_repaid,
-///     update_stats_repaid, register_currency, set_position_token, set_repayment_contract,
-///     transfer_admin.
-///   - exceptions: pause, unpause, contract_is_paused, getters.
-/// - Repayment:
-///   - state-changing: repay_invoice, mark_overdue, reclaim_invoice, set_insurance,
-///     set_reputation, set_penalty, transfer_admin.
-///   - exceptions: pause, unpause, contract_is_paused, getters.
-/// - Insurance:
-///   - state-changing: stake, pay_out, set_staking_token, set_payout_caller,
-///     transfer_admin.
-///   - exceptions: pause, unpause, contract_is_paused, getters, and `unstake`
-///     (an emergency withdrawal path that stays available while paused —
-///     see issue #67 and ADR-0008).
-/// - Reputation:
-///   - state-changing: record_outcome, resolve_dispute, set_recorder.
-///   - exceptions: pause, unpause, contract_is_paused, getters.
 pub fn assert_not_paused(env: &Env) {
     let paused: bool = env
         .storage()
@@ -756,34 +297,7 @@ pub fn assert_not_paused(env: &Env) {
     }
 }
 
-// ─── Invoice State Machine ────────────────────────────────────────────────────
-
 // ─── Multisig Admin Governance (ADR-0010) ─────────────────────────────────────
-//
-// Every `assert_admin`-style check across the five contracts used to compare
-// the caller against one stored `Address`. This section replaces that with an
-// M-of-N threshold over a configurable set of signer addresses, following the
-// same "same-block, no timelock" philosophy as the pause mechanism
-// (ADR-0001): a call that already carries `threshold` valid signer
-// authorizations executes immediately, in the same transaction, with no
-// on-chain proposal queue to track.
-//
-// `AdminConfig { signers: [admin], threshold: 1 }` — one signer, threshold
-// one — is single-admin bootstrap mode, and is what every constructor sets up
-// by default. Under it, a threshold-gated call takes a one-element
-// `Vec<Address>` and behaves exactly like the legacy single-admin check: the
-// sole signer's authorization is both necessary and sufficient. Moving to a
-// true M-of-N is a post-deploy admin action (`set_signers`, threshold-gated
-// like everything else here), never a redeploy.
-
-/// M-of-N admin governance config: `threshold` distinct, authorized addresses
-/// out of `signers` are required to authorize any admin-gated call.
-#[contracttype]
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct AdminConfig {
-    pub signers: Vec<Address>,
-    pub threshold: u32,
-}
 
 /// One-time setup: writes single-admin bootstrap config (`[admin]`,
 /// threshold 1). Called from each contract's constructor in place of the old
@@ -851,12 +365,6 @@ pub fn validate_signers(env: &Env, signers: &Vec<Address>, threshold: u32) {
 /// distinct member of `cfg.signers` and to authorize this invocation
 /// (`require_auth`), and requires at least `cfg.threshold` of them. Panics
 /// with `Unauthorized` otherwise.
-///
-/// Soroban lets a single transaction carry a separate signed authorization
-/// entry per address, so `provided` being fully authorized means every one
-/// of those signers actually co-signed *this* call, in this same
-/// transaction — there is no separate on-chain approval step to replay or to
-/// front-run.
 pub fn assert_threshold(env: &Env, cfg: &AdminConfig, provided: &Vec<Address>) {
     let mut counted: Vec<Address> = Vec::new(env);
     for who in provided.iter() {
@@ -864,8 +372,6 @@ pub fn assert_threshold(env: &Env, cfg: &AdminConfig, provided: &Vec<Address>) {
             env.panic_with_error(ContractError::Unauthorized);
         }
         if counted.iter().any(|c| c == who) {
-            // Duplicate entry — would otherwise let one signature count
-            // twice toward the threshold.
             env.panic_with_error(ContractError::Unauthorized);
         }
         who.require_auth();
@@ -875,468 +381,6 @@ pub fn assert_threshold(env: &Env, cfg: &AdminConfig, provided: &Vec<Address>) {
         env.panic_with_error(ContractError::Unauthorized);
     }
 }
-
-// ─── Cross-Contract Interface ────────────────────────────────────────────────
-// Financing calls these methods on the Registry contract.
-
-/// Client trait for the Registry contract, used by Financing for
-/// cross-contract calls. The `#[contractclient]` macro generates a
-/// type-safe client from this trait.
-#[contractclient(name = "RegistryClient")]
-pub trait RegistryInterface {
-    /// Read an invoice by ID.
-    fn get_invoice(env: Env, id: Symbol) -> Invoice;
-
-    /// Update the status of a Pending invoice (originator-only escape hatch).
-    fn update_invoice_status(
-        env: Env,
-        id: Symbol,
-        originator: Address,
-        new_status: InvoiceStatus,
-    ) -> Invoice;
-
-    /// Mark a Financed invoice as Overdue. Callable by anyone after due_date.
-    fn mark_invoice_overdue(env: Env, id: Symbol) -> Invoice;
-
-    /// System transition: Pending -> Financed, called by the financing
-    /// contract on offer acceptance. Authorized via implicit contract-invoker
-    /// auth on the registered financing address.
-    fn financing_marks_invoice_financed(env: Env, id: Symbol) -> Invoice;
-
-    /// System transition: Financed -> Financed (partial) / Repaid (full),
-    /// called by the repayment contract. Authorized via implicit
-    /// contract-invoker auth on the registered repayment address.
-    fn repayment_marks_invoice_repaid(env: Env, id: Symbol, fully_repaid: bool) -> Invoice;
-
-    /// System transition: Overdue -> Defaulted, called by the repayment
-    /// contract when a lender reclaims (declares a default). Authorized via
-    /// implicit contract-invoker auth on the registered repayment address.
-    fn repayment_marks_defaulted(env: Env, id: Symbol) -> Invoice;
-
-    /// Transition a Financed invoice to Repaid or back to Financed (partial).
-    /// Requires the repayer's auth. Only works on Financed invoices.
-    fn set_invoice_repaid_status(
-        env: Env,
-        id: Symbol,
-        repayer: Address,
-        fully_repaid: bool,
-    ) -> Invoice;
-
-    /// Check if an address is blacklisted.
-    fn is_blacklisted(env: Env, address: Address) -> bool;
-
-    /// Read the admin address.
-    fn get_admin(env: Env) -> Address;
-
-    /// Read the protocol-fee recipient address.
-    fn get_fee_recipient(env: Env) -> Address;
-}
-
-// ─── Financing Cross-Contract Interface ──────────────────────────────────────
-// Repayment calls these methods on the Financing contract.
-
-/// Client trait for the Financing contract, used by Repayment for
-/// cross-contract calls. The `#[contractclient]` macro generates a
-/// type-safe client from this trait.
-#[contractclient(name = "FinancingClient")]
-pub trait FinancingInterface {
-    /// Read a financing offer by ID.
-    fn get_offer(env: Env, id: Symbol) -> FinancingOffer;
-
-    /// Read all offers associated with an invoice.
-    fn get_offers_by_invoice(env: Env, invoice_id: Symbol) -> Vec<FinancingOffer>;
-
-    /// Update the status of an offer. Called by Repayment after accept/reject/
-    /// repay/reclaim to keep offer state in sync.
-    fn update_offer_status(env: Env, id: Symbol, new_status: OfferStatus);
-
-    /// Update the running amount_repaid on an offer.
-    fn update_offer_amount_repaid(env: Env, id: Symbol, amount_repaid: i128);
-
-    /// Update lender stats after a repayment. `fully_repaid` increments
-    /// `offers_repaid`.
-    fn update_lender_stats_repaid(env: Env, lender: Address, fully_repaid: bool);
-
-    /// Update protocol-level stats after a repayment. Adds to
-    /// `total_repaid` and `total_fee_revenue`.
-    fn update_stats_repaid(env: Env, amount: i128, fee_amount: i128);
-
-    /// Read the admin address.
-    fn get_admin(env: Env) -> Address;
-
-    /// Read the protocol fee in basis points.
-    fn get_fee_bps(env: Env) -> u32;
-
-    /// Create a fixed installment repayment schedule for an offer.
-    /// `first_due` is the Unix timestamp of the first installment.
-    fn schedule_repayment(
-        env: Env,
-        offer_id: Symbol,
-        frequency: ScheduleFrequency,
-        count: u32,
-        first_due: u64,
-    ) -> RepaymentSchedule;
-
-    /// Read the repayment schedule attached to an offer, if any.
-    fn get_schedule(env: Env, offer_id: Symbol) -> Option<RepaymentSchedule>;
-
-    /// Return the installment number (1-based) that is currently due (its
-    /// due timestamp ≤ now) and has not yet been covered by `amount_repaid`.
-    /// Returns 0 when all installments are paid or no schedule exists.
-    fn get_installment_due(env: Env, offer_id: Symbol) -> u32;
-}
-
-// ─── Insurance Cross-Contract Interface ──────────────────────────────────────
-// Repayment calls this method on the Insurance contract when an invoice
-// defaults. The insurance contract stores the trusted payout caller (the
-// repayment contract) and requires its auth via implicit contract-invoker
-// auth, so pay_out can never be invoked by an arbitrary address.
-
-/// Client trait for the Insurance contract, used by Repayment for
-/// cross-contract payout calls. `#[contractclient]` generates a type-safe
-/// client from this trait.
-#[contractclient(name = "InsuranceClient")]
-pub trait InsuranceInterface {
-    /// Pay `amount` to `beneficiary` from the insurance pool, capped at the
-    /// pool's available balance. Only callable by the configured payout
-    /// caller (the repayment contract). Verifies on-chain that `invoice_id`
-    /// is in `Defaulted` status before moving any funds. Returns the amount
-    /// actually paid.
-    fn pay_out(env: Env, invoice_id: Symbol, beneficiary: Address, amount: i128) -> i128;
-
-    /// Claim a partial payout from the insurance pool for a specific offer.
-    /// The claim amount is bounded by the reserved amount for this offer and
-    /// the pool's available balance. Returns (paid, remaining_reserved).
-    fn claim_payout(env: Env, offer_id: Symbol, lender: Address, amount: i128) -> (i128, i128);
-}
-
-// ─── Reputation Cross-Contract Interface ─────────────────────────────────────
-// Repayment records an originator's outcome on the Reputation contract after
-// every fully-repaid invoice (success) and every default. The reputation
-// contract stores the trusted recorder (the repayment contract) and requires
-// its auth via implicit contract-invoker auth.
-
-/// Client trait for the Reputation contract, used by Repayment for
-/// cross-contract outcome recording. `#[contractclient]` generates a
-/// type-safe client from this trait.
-#[contractclient(name = "ReputationClient")]
-pub trait ReputationInterface {
-    /// Record an outcome for an originator. Only callable by the configured
-    /// recorder (the repayment contract). `outcome` is 0 = successful full
-    /// repayment, 1 = default.
-    fn record_outcome(env: Env, originator: Address, outcome: u32);
-
-    /// Read an originator's current reputation score (public, read-only).
-    fn get_score(env: Env, originator: Address) -> i128;
-}
-
-// ─── assert_transition unit tests ────────────────────────────────────────────
-
-#[cfg(test)]
-mod transition_tests {
-    extern crate std;
-
-    use super::{validate_transition, InvoiceStatus};
-    use soroban_sdk::Env;
-
-    // ── Legal transitions ────────────────────────────────────────────────────
-    //
-    // Each row: (from, to) — must succeed without panic.
-    //
-    // Adding a new status to the state machine later means adding rows here;
-    // all illegal combinations are covered by the matrix below.
-
-    macro_rules! legal {
-        ($name:ident, $from:expr, $to:expr) => {
-            #[test]
-            fn $name() {
-                let env = Env::default();
-                validate_transition(&env, $from, $to); // must not panic
-            }
-        };
-    }
-
-    // Pending exits
-    legal!(
-        pending_to_financed,
-        InvoiceStatus::Pending,
-        InvoiceStatus::Financed
-    );
-    legal!(
-        pending_to_cancelled,
-        InvoiceStatus::Pending,
-        InvoiceStatus::Cancelled
-    );
-
-    // Financed exits
-    legal!(
-        financed_to_financed,
-        InvoiceStatus::Financed,
-        InvoiceStatus::Financed
-    ); // partial repayment
-    legal!(
-        financed_to_repaid,
-        InvoiceStatus::Financed,
-        InvoiceStatus::Repaid
-    );
-    legal!(
-        financed_to_overdue,
-        InvoiceStatus::Financed,
-        InvoiceStatus::Overdue
-    );
-    legal!(
-        financed_to_disputed,
-        InvoiceStatus::Financed,
-        InvoiceStatus::Disputed
-    );
-
-    // Overdue exits
-    legal!(
-        overdue_to_defaulted,
-        InvoiceStatus::Overdue,
-        InvoiceStatus::Defaulted
-    );
-
-    // Disputed exits (resolve_dispute)
-    legal!(
-        disputed_to_pending,
-        InvoiceStatus::Disputed,
-        InvoiceStatus::Pending
-    );
-    legal!(
-        disputed_to_financed,
-        InvoiceStatus::Disputed,
-        InvoiceStatus::Financed
-    );
-    legal!(
-        disputed_to_repaid,
-        InvoiceStatus::Disputed,
-        InvoiceStatus::Repaid
-    );
-    legal!(
-        disputed_to_cancelled,
-        InvoiceStatus::Disputed,
-        InvoiceStatus::Cancelled
-    );
-    legal!(
-        disputed_to_defaulted,
-        InvoiceStatus::Disputed,
-        InvoiceStatus::Defaulted
-    );
-
-    // ── Illegal transitions ───────────────────────────────────────────────────
-    //
-    // Every (from, to) pair NOT in the legal set must panic with InvalidTransition
-    // (ContractError discriminant 3 → "Error(Contract, #3)").
-
-    macro_rules! illegal {
-        ($name:ident, $from:expr, $to:expr) => {
-            #[test]
-            #[should_panic(expected = "Error(Contract, #3)")]
-            fn $name() {
-                let env = Env::default();
-                validate_transition(&env, $from, $to);
-            }
-        };
-    }
-
-    // Pending — illegal targets
-    illegal!(
-        pending_to_pending,
-        InvoiceStatus::Pending,
-        InvoiceStatus::Pending
-    );
-    illegal!(
-        pending_to_repaid,
-        InvoiceStatus::Pending,
-        InvoiceStatus::Repaid
-    ); // the motivating example
-    illegal!(
-        pending_to_overdue,
-        InvoiceStatus::Pending,
-        InvoiceStatus::Overdue
-    );
-    illegal!(
-        pending_to_disputed,
-        InvoiceStatus::Pending,
-        InvoiceStatus::Disputed
-    );
-    illegal!(
-        pending_to_defaulted,
-        InvoiceStatus::Pending,
-        InvoiceStatus::Defaulted
-    );
-
-    // Financed — illegal targets
-    illegal!(
-        financed_to_pending,
-        InvoiceStatus::Financed,
-        InvoiceStatus::Pending
-    );
-    illegal!(
-        financed_to_cancelled,
-        InvoiceStatus::Financed,
-        InvoiceStatus::Cancelled
-    );
-    illegal!(
-        financed_to_defaulted,
-        InvoiceStatus::Financed,
-        InvoiceStatus::Defaulted
-    );
-
-    // Overdue — illegal targets
-    illegal!(
-        overdue_to_pending,
-        InvoiceStatus::Overdue,
-        InvoiceStatus::Pending
-    );
-    illegal!(
-        overdue_to_financed,
-        InvoiceStatus::Overdue,
-        InvoiceStatus::Financed
-    );
-    illegal!(
-        overdue_to_repaid,
-        InvoiceStatus::Overdue,
-        InvoiceStatus::Repaid
-    );
-    illegal!(
-        overdue_to_overdue,
-        InvoiceStatus::Overdue,
-        InvoiceStatus::Overdue
-    );
-    illegal!(
-        overdue_to_cancelled,
-        InvoiceStatus::Overdue,
-        InvoiceStatus::Cancelled
-    );
-    illegal!(
-        overdue_to_disputed,
-        InvoiceStatus::Overdue,
-        InvoiceStatus::Disputed
-    );
-
-    // Disputed — illegal targets (anything not in the five allowed)
-    illegal!(
-        disputed_to_overdue,
-        InvoiceStatus::Disputed,
-        InvoiceStatus::Overdue
-    );
-    illegal!(
-        disputed_to_disputed,
-        InvoiceStatus::Disputed,
-        InvoiceStatus::Disputed
-    );
-
-    // Terminal states — nothing may leave them
-    illegal!(
-        repaid_to_pending,
-        InvoiceStatus::Repaid,
-        InvoiceStatus::Pending
-    );
-    illegal!(
-        repaid_to_financed,
-        InvoiceStatus::Repaid,
-        InvoiceStatus::Financed
-    );
-    illegal!(
-        repaid_to_repaid,
-        InvoiceStatus::Repaid,
-        InvoiceStatus::Repaid
-    );
-    illegal!(
-        repaid_to_overdue,
-        InvoiceStatus::Repaid,
-        InvoiceStatus::Overdue
-    );
-    illegal!(
-        repaid_to_cancelled,
-        InvoiceStatus::Repaid,
-        InvoiceStatus::Cancelled
-    );
-    illegal!(
-        repaid_to_disputed,
-        InvoiceStatus::Repaid,
-        InvoiceStatus::Disputed
-    );
-    illegal!(
-        repaid_to_defaulted,
-        InvoiceStatus::Repaid,
-        InvoiceStatus::Defaulted
-    );
-
-    illegal!(
-        cancelled_to_pending,
-        InvoiceStatus::Cancelled,
-        InvoiceStatus::Pending
-    );
-    illegal!(
-        cancelled_to_financed,
-        InvoiceStatus::Cancelled,
-        InvoiceStatus::Financed
-    );
-    illegal!(
-        cancelled_to_repaid,
-        InvoiceStatus::Cancelled,
-        InvoiceStatus::Repaid
-    );
-    illegal!(
-        cancelled_to_overdue,
-        InvoiceStatus::Cancelled,
-        InvoiceStatus::Overdue
-    );
-    illegal!(
-        cancelled_to_cancelled,
-        InvoiceStatus::Cancelled,
-        InvoiceStatus::Cancelled
-    );
-    illegal!(
-        cancelled_to_disputed,
-        InvoiceStatus::Cancelled,
-        InvoiceStatus::Disputed
-    );
-    illegal!(
-        cancelled_to_defaulted,
-        InvoiceStatus::Cancelled,
-        InvoiceStatus::Defaulted
-    );
-
-    illegal!(
-        defaulted_to_pending,
-        InvoiceStatus::Defaulted,
-        InvoiceStatus::Pending
-    );
-    illegal!(
-        defaulted_to_financed,
-        InvoiceStatus::Defaulted,
-        InvoiceStatus::Financed
-    );
-    illegal!(
-        defaulted_to_repaid,
-        InvoiceStatus::Defaulted,
-        InvoiceStatus::Repaid
-    );
-    illegal!(
-        defaulted_to_overdue,
-        InvoiceStatus::Defaulted,
-        InvoiceStatus::Overdue
-    );
-    illegal!(
-        defaulted_to_cancelled,
-        InvoiceStatus::Defaulted,
-        InvoiceStatus::Cancelled
-    );
-    illegal!(
-        defaulted_to_disputed,
-        InvoiceStatus::Defaulted,
-        InvoiceStatus::Disputed
-    );
-    illegal!(
-        defaulted_to_defaulted,
-        InvoiceStatus::Defaulted,
-        InvoiceStatus::Defaulted
-    );
-} // end mod transition_tests
 
 // ─── State Machine State Validation and Enforcement ──────────────────────────
 
@@ -1357,53 +401,32 @@ pub fn assert_transition(
     to_status: InvoiceStatus,
     actor: Address,
 ) {
-    // Validate that this transition is in the allowed table
     validate_transition(env, from_status, to_status);
 
-    // Emit structured transition event
     env.events().publish(
         (symbol_short!("inv_trx"), invoice_id.clone()),
         (from_status, to_status, actor.clone()),
     );
 
-    // Record transition in bounded history (max 20 entries)
     record_transition(env, invoice_id, from_status, to_status, actor);
 }
 
 /// Validates that a transition from `from_status` to `to_status` is allowed.
-///
-/// Valid transitions:
-/// - Pending -> Cancelled (originator cancellation)
-/// - Pending -> Financed (offer acceptance)
-/// - Financed -> Repaid (full repayment)
-/// - Financed -> Financed (partial repayment, no-op state-wise)
-/// - Financed -> Overdue (time-based, after due_date)
-/// - Financed -> Disputed (originator dispute)
-/// - Overdue -> Defaulted (lender reclaim after grace period)
-/// - Disputed -> Pending (admin resolution to Pending)
-/// - Disputed -> Financed (admin resolution to Financed)
-/// - Disputed -> Repaid (admin resolution to Repaid)
-/// - Disputed -> Cancelled (admin resolution to Cancelled)
-/// - Disputed -> Defaulted (admin resolution to Defaulted)
 pub(crate) fn validate_transition(env: &Env, from_status: InvoiceStatus, to_status: InvoiceStatus) {
     let valid = matches!(
         (from_status, to_status),
-        // Pending exits
         (InvoiceStatus::Pending, InvoiceStatus::Cancelled)
-        | (InvoiceStatus::Pending, InvoiceStatus::Financed)
-        // Financed exits
-        | (InvoiceStatus::Financed, InvoiceStatus::Repaid)
-        | (InvoiceStatus::Financed, InvoiceStatus::Financed)
-        | (InvoiceStatus::Financed, InvoiceStatus::Overdue)
-        | (InvoiceStatus::Financed, InvoiceStatus::Disputed)
-        // Overdue exits
-        | (InvoiceStatus::Overdue, InvoiceStatus::Defaulted)
-        // Disputed exits (admin-controlled)
-        | (InvoiceStatus::Disputed, InvoiceStatus::Pending)
-        | (InvoiceStatus::Disputed, InvoiceStatus::Financed)
-        | (InvoiceStatus::Disputed, InvoiceStatus::Repaid)
-        | (InvoiceStatus::Disputed, InvoiceStatus::Cancelled)
-        | (InvoiceStatus::Disputed, InvoiceStatus::Defaulted)
+            | (InvoiceStatus::Pending, InvoiceStatus::Financed)
+            | (InvoiceStatus::Financed, InvoiceStatus::Repaid)
+            | (InvoiceStatus::Financed, InvoiceStatus::Financed)
+            | (InvoiceStatus::Financed, InvoiceStatus::Overdue)
+            | (InvoiceStatus::Financed, InvoiceStatus::Disputed)
+            | (InvoiceStatus::Overdue, InvoiceStatus::Defaulted)
+            | (InvoiceStatus::Disputed, InvoiceStatus::Pending)
+            | (InvoiceStatus::Disputed, InvoiceStatus::Financed)
+            | (InvoiceStatus::Disputed, InvoiceStatus::Repaid)
+            | (InvoiceStatus::Disputed, InvoiceStatus::Cancelled)
+            | (InvoiceStatus::Disputed, InvoiceStatus::Defaulted)
     );
 
     if !valid {
@@ -1435,7 +458,6 @@ fn record_transition(
 
     history.push_back(record);
 
-    // Evict oldest entry if we exceed max 20
     if history.len() > 20 {
         history.pop_front();
     }
@@ -1451,6 +473,96 @@ pub fn get_transition_history(env: &Env, invoice_id: Symbol) -> Vec<TransitionRe
         .persistent()
         .get(&(symbol_short!("trn_log"), invoice_id))
         .unwrap_or_else(|| Vec::new(env))
+}
+
+// ─── Tests ───────────────────────────────────────────────────────────────────
+
+#[cfg(test)]
+mod transition_tests {
+    extern crate std;
+
+    use super::{validate_transition, InvoiceStatus};
+    use soroban_sdk::Env;
+
+    macro_rules! legal {
+        ($name:ident, $from:expr, $to:expr) => {
+            #[test]
+            fn $name() {
+                let env = Env::default();
+                validate_transition(&env, $from, $to);
+            }
+        };
+    }
+
+    macro_rules! illegal {
+        ($name:ident, $from:expr, $to:expr) => {
+            #[test]
+            fn $name() {
+                let env = Env::default();
+                let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    validate_transition(&env, $from, $to);
+                }));
+                assert!(result.is_err(), "expected transition to panic");
+            }
+        };
+    }
+
+    legal!(pending_to_cancelled, InvoiceStatus::Pending, InvoiceStatus::Cancelled);
+    legal!(pending_to_financed, InvoiceStatus::Pending, InvoiceStatus::Financed);
+    legal!(financed_to_repaid, InvoiceStatus::Financed, InvoiceStatus::Repaid);
+    legal!(financed_to_financed, InvoiceStatus::Financed, InvoiceStatus::Financed);
+    legal!(financed_to_overdue, InvoiceStatus::Financed, InvoiceStatus::Overdue);
+    legal!(financed_to_disputed, InvoiceStatus::Financed, InvoiceStatus::Disputed);
+    legal!(overdue_to_defaulted, InvoiceStatus::Overdue, InvoiceStatus::Defaulted);
+    legal!(disputed_to_pending, InvoiceStatus::Disputed, InvoiceStatus::Pending);
+    legal!(disputed_to_financed, InvoiceStatus::Disputed, InvoiceStatus::Financed);
+    legal!(disputed_to_repaid, InvoiceStatus::Disputed, InvoiceStatus::Repaid);
+    legal!(disputed_to_cancelled, InvoiceStatus::Disputed, InvoiceStatus::Cancelled);
+    legal!(disputed_to_defaulted, InvoiceStatus::Disputed, InvoiceStatus::Defaulted);
+
+    illegal!(pending_to_pending, InvoiceStatus::Pending, InvoiceStatus::Pending);
+    illegal!(pending_to_repaid, InvoiceStatus::Pending, InvoiceStatus::Repaid);
+    illegal!(pending_to_overdue, InvoiceStatus::Pending, InvoiceStatus::Overdue);
+    illegal!(pending_to_disputed, InvoiceStatus::Pending, InvoiceStatus::Disputed);
+    illegal!(pending_to_defaulted, InvoiceStatus::Pending, InvoiceStatus::Defaulted);
+
+    illegal!(financed_to_pending, InvoiceStatus::Financed, InvoiceStatus::Pending);
+    illegal!(financed_to_cancelled, InvoiceStatus::Financed, InvoiceStatus::Cancelled);
+    illegal!(financed_to_defaulted, InvoiceStatus::Financed, InvoiceStatus::Defaulted);
+
+    illegal!(repaid_to_pending, InvoiceStatus::Repaid, InvoiceStatus::Pending);
+    illegal!(repaid_to_financed, InvoiceStatus::Repaid, InvoiceStatus::Financed);
+    illegal!(repaid_to_repaid, InvoiceStatus::Repaid, InvoiceStatus::Repaid);
+    illegal!(repaid_to_overdue, InvoiceStatus::Repaid, InvoiceStatus::Overdue);
+    illegal!(repaid_to_cancelled, InvoiceStatus::Repaid, InvoiceStatus::Cancelled);
+    illegal!(repaid_to_disputed, InvoiceStatus::Repaid, InvoiceStatus::Disputed);
+    illegal!(repaid_to_defaulted, InvoiceStatus::Repaid, InvoiceStatus::Defaulted);
+
+    illegal!(overdue_to_pending, InvoiceStatus::Overdue, InvoiceStatus::Pending);
+    illegal!(overdue_to_financed, InvoiceStatus::Overdue, InvoiceStatus::Financed);
+    illegal!(overdue_to_repaid, InvoiceStatus::Overdue, InvoiceStatus::Repaid);
+    illegal!(overdue_to_overdue, InvoiceStatus::Overdue, InvoiceStatus::Overdue);
+    illegal!(overdue_to_cancelled, InvoiceStatus::Overdue, InvoiceStatus::Cancelled);
+    illegal!(overdue_to_disputed, InvoiceStatus::Overdue, InvoiceStatus::Disputed);
+
+    illegal!(cancelled_to_pending, InvoiceStatus::Cancelled, InvoiceStatus::Pending);
+    illegal!(cancelled_to_financed, InvoiceStatus::Cancelled, InvoiceStatus::Financed);
+    illegal!(cancelled_to_repaid, InvoiceStatus::Cancelled, InvoiceStatus::Repaid);
+    illegal!(cancelled_to_overdue, InvoiceStatus::Cancelled, InvoiceStatus::Overdue);
+    illegal!(cancelled_to_cancelled, InvoiceStatus::Cancelled, InvoiceStatus::Cancelled);
+    illegal!(cancelled_to_disputed, InvoiceStatus::Cancelled, InvoiceStatus::Disputed);
+    illegal!(cancelled_to_defaulted, InvoiceStatus::Cancelled, InvoiceStatus::Defaulted);
+
+    illegal!(disputed_to_disputed, InvoiceStatus::Disputed, InvoiceStatus::Disputed);
+    illegal!(disputed_to_overdue, InvoiceStatus::Disputed, InvoiceStatus::Overdue);
+
+    illegal!(defaulted_to_pending, InvoiceStatus::Defaulted, InvoiceStatus::Pending);
+    illegal!(defaulted_to_financed, InvoiceStatus::Defaulted, InvoiceStatus::Financed);
+    illegal!(defaulted_to_repaid, InvoiceStatus::Defaulted, InvoiceStatus::Repaid);
+    illegal!(defaulted_to_overdue, InvoiceStatus::Defaulted, InvoiceStatus::Overdue);
+    illegal!(defaulted_to_cancelled, InvoiceStatus::Defaulted, InvoiceStatus::Cancelled);
+    illegal!(defaulted_to_disputed, InvoiceStatus::Defaulted, InvoiceStatus::Disputed);
+    illegal!(defaulted_to_defaulted, InvoiceStatus::Defaulted, InvoiceStatus::Defaulted);
 }
 
 #[cfg(test)]
