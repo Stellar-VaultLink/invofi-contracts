@@ -997,7 +997,7 @@ fn test_get_offers_paginated() {
             &rate,
             &86_400u64,
             &0u64,
-    );
+        );
     }
 
     let page1 = fin.get_offers_paginated(&0_u32, &2_u32);
@@ -1188,7 +1188,11 @@ fn test_financing_bootstrap_admin_config_defaults() {
     let admin = Address::generate(&env);
     let financing_id = env.register(
         FinancingContract,
-        (admin.clone(), Address::generate(&env), Address::generate(&env)),
+        (
+            admin.clone(),
+            Address::generate(&env),
+            Address::generate(&env),
+        ),
     );
     let fin = super::FinancingContractClient::new(&env, &financing_id);
 
@@ -1205,7 +1209,11 @@ fn test_financing_set_signers_requires_threshold() {
     let admin = Address::generate(&env);
     let financing_id = env.register(
         FinancingContract,
-        (admin.clone(), Address::generate(&env), Address::generate(&env)),
+        (
+            admin.clone(),
+            Address::generate(&env),
+            Address::generate(&env),
+        ),
     );
     let fin = super::FinancingContractClient::new(&env, &financing_id);
 
@@ -1296,7 +1304,7 @@ fn test_pause_blocks_all_financing_state_changes() {
             &500u32,
             &86_400u64,
             &0u64,
-    );
+        );
     });
     assert_paused(|| {
         fin.withdraw_offer(&symbol_short!("offx2"), &lender);
@@ -1314,7 +1322,11 @@ fn test_pause_blocks_all_financing_state_changes() {
         fin.transfer_admin(&one(&env, &admin), &new_admin);
     });
     assert_paused(|| {
-        fin.register_currency(&one(&env, &admin), &symbol_short!("EUR"), &Address::generate(&env));
+        fin.register_currency(
+            &one(&env, &admin),
+            &symbol_short!("EUR"),
+            &Address::generate(&env),
+        );
     });
     assert_paused(|| {
         fin.set_position_token(&one(&env, &admin), &pos_token);
@@ -3129,5 +3141,8 @@ fn test_counter_offer_interest_rate_at_cap_records_in_history() {
     // The rate is recorded in negotiation history
     let history = fin.get_negotiation(&offer_id);
     assert_eq!(history.len(), 1);
-    assert_eq!(history.get(0).unwrap().interest_rate, invofi_common::MAX_INTEREST_BPS);
+    assert_eq!(
+        history.get(0).unwrap().interest_rate,
+        invofi_common::MAX_INTEREST_BPS
+    );
 }

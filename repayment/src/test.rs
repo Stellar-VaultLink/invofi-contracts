@@ -170,7 +170,10 @@ fn test_repay_invoice_partial_then_full() {
     // amount_repaid tracks PRINCIPAL only (issue #233 finding 2): the
     // interest slice of this payment is lender yield and must not inflate
     // the repaid-tracker used by insurance-exposure and installment math.
-    assert_eq!(offer.amount_repaid, partial_amount - expected_interest_1.min(partial_amount));
+    assert_eq!(
+        offer.amount_repaid,
+        partial_amount - expected_interest_1.min(partial_amount)
+    );
 
     // Verify lender received funds
     let token_client = token::TokenClient::new(&env, &token_id);

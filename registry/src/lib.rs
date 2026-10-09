@@ -88,7 +88,11 @@ fn mint_invoice_token(env: &Env, invoice: &Invoice) -> BytesN<32> {
     save_token_invoice_id(env, &token_id, &invoice.id);
     env.events().publish(
         (Symbol::new(env, "token_minted"), token_id.clone()),
-        (invoice.id.clone(), invoice.originator.clone(), invoice.amount),
+        (
+            invoice.id.clone(),
+            invoice.originator.clone(),
+            invoice.amount,
+        ),
     );
     token_id
 }
@@ -249,11 +253,7 @@ fn index_invoice_originator(env: &Env, originator: &Address, id: &Symbol) {
 /// One-time backfill for deployments that pre-date the by_origin index.
 /// Rebuilds it from the invoices map so historical invoices stay listed.
 fn backfill_originator_index(env: &Env) {
-    if env
-        .storage()
-        .persistent()
-        .has(&symbol_short!("by_origin"))
-    {
+    if env.storage().persistent().has(&symbol_short!("by_origin")) {
         return;
     }
     let invoices = load_invoices(env);
@@ -262,9 +262,7 @@ fn backfill_originator_index(env: &Env) {
     }
     let mut index: Map<Address, Vec<Symbol>> = Map::new(env);
     for (id, inv) in invoices.iter() {
-        let mut ids = index
-            .get(inv.originator.clone())
-            .unwrap_or(Vec::new(env));
+        let mut ids = index.get(inv.originator.clone()).unwrap_or(Vec::new(env));
         insert_sorted_id(&mut ids, &id);
         index.set(inv.originator.clone(), ids);
     }
@@ -753,7 +751,7 @@ impl RegistryContract {
                 due_date: arg.due_date,
                 status: InvoiceStatus::Pending,
             };
-            
+
             invoices.set(arg.id.clone(), invoice.clone());
             index_invoice_originator(&env, &originator, &arg.id);
             mint_invoice_token(&env, &invoice);
@@ -768,7 +766,7 @@ impl RegistryContract {
 
         save_invoices(&env, &invoices);
         save_stats(&env, &s);
-        
+
         registered
     }
 

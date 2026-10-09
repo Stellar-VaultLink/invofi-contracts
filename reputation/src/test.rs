@@ -40,7 +40,10 @@ fn test_reputation_set_signers_requires_threshold() {
     client.set_signers(&one(&env, &admin), &two_signers, &2u32);
 
     let result = client.try_pause(&one(&env, &admin));
-    assert!(result.is_err(), "one of two required signatures must not pause");
+    assert!(
+        result.is_err(),
+        "one of two required signatures must not pause"
+    );
 
     let mut both = soroban_sdk::Vec::new(&env);
     both.push_back(admin.clone());
@@ -423,7 +426,10 @@ fn test_old_default_decays() {
     assert_eq!(rec.repayments, 2);
     assert_eq!(rec.defaults, 1);
     let score = client.get_score(&originator);
-    assert!(score >= 1, "decayed default should allow score > 0, got {score}");
+    assert!(
+        score >= 1,
+        "decayed default should allow score > 0, got {score}"
+    );
 }
 
 /// After two half-lives, the old default contributes < 25 % of its
@@ -450,7 +456,10 @@ fn test_old_default_decays_further_after_two_half_lives() {
     // After 2 half-lives the default's weighted_defaults ≈ 0.5
     // (2 × 0.25), the fresh repayment adds 1.  Score ≈ 1.
     let score = client.get_score(&originator);
-    assert!(score >= 1, "score should be >= 1 after two half-lives, got {score}");
+    assert!(
+        score >= 1,
+        "score should be >= 1 after two half-lives, got {score}"
+    );
 }
 
 /// Score floor at 0 is respected even with decay — score never goes
