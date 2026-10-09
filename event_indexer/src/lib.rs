@@ -26,9 +26,7 @@ fn load_next_id(env: &Env) -> u64 {
 }
 
 fn save_next_id(env: &Env, id: u64) {
-    env.storage()
-        .instance()
-        .set(&symbol_short!("nextid"), &id);
+    env.storage().instance().set(&symbol_short!("nextid"), &id);
 }
 
 /// Total count of events in the index (may differ from next_id after pruning).
@@ -474,8 +472,10 @@ impl EventIndexerContract {
         let count = load_event_count(&env);
         save_event_count(&env, count - pruned_count);
 
-        env.events()
-            .publish((symbol_short!("evt_prn"),), (pruned_count, before_timestamp));
+        env.events().publish(
+            (symbol_short!("evt_prn"),),
+            (pruned_count, before_timestamp),
+        );
 
         pruned_count
     }

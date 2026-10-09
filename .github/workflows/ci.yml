@@ -115,3 +115,17 @@ jobs:
         with:
           fetch-depth: 0
       - uses: wagoid/commitlint-github-action@v6
+
+  fmt:
+    name: Contracts / Rust fmt
+    runs-on: ubuntu-latest
+    # Gates formatting on every PR: `cargo fmt --check` exits non-zero with a
+    # diff when any file in the workspace deviates from rustfmt style. No
+    # dependency build is needed, so no rust-cache is wired up.
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
+      - name: Check formatting
+        run: cargo fmt --check
