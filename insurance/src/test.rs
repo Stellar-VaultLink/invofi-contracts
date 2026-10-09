@@ -1,9 +1,11 @@
-
 #![cfg(test)]
 extern crate std;
 
 use super::{InsuranceContract, InsuranceTier};
-use soroban_sdk::{symbol_short, testutils::{Address as _, Ledger}, token, Address, Env};
+use soroban_sdk::{
+    testutils::{Address as _, Ledger},
+    token, Address, Env,
+};
 
 /// Wrap a single signer in the one-element `Vec<Address>` the threshold-gated
 /// admin API expects (ADR-0010). Single-admin/bootstrap deployments pass
@@ -202,7 +204,10 @@ fn test_insurance_set_signers_requires_threshold() {
     client.set_signers(&one(&env, &admin), &two_signers, &2u32);
 
     let result = client.try_pause(&one(&env, &admin));
-    assert!(result.is_err(), "one of two required signatures must not pause");
+    assert!(
+        result.is_err(),
+        "one of two required signatures must not pause"
+    );
 
     let mut both = soroban_sdk::Vec::new(&env);
     both.push_back(admin.clone());
@@ -243,14 +248,21 @@ fn test_pause_blocks_state_changes_except_unstake() {
     client.pause(&one(&env, &admin));
     fn assert_paused<F: FnOnce()>(f: F) {
         let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(f));
-        assert!(result.is_err(), "state-changing function should panic while paused");
+        assert!(
+            result.is_err(),
+            "state-changing function should panic while paused"
+        );
     }
 
     assert_paused(|| {
         client.stake(&staker, &1_000i128);
     });
     assert_paused(|| {
-        client.pay_out(&soroban_sdk::symbol_short!("inv_x"), &beneficiary, &1_000i128);
+        client.pay_out(
+            &soroban_sdk::symbol_short!("inv_x"),
+            &beneficiary,
+            &1_000i128,
+        );
     });
     assert_paused(|| {
         client.transfer_admin(&one(&env, &admin), &new_admin);
@@ -338,7 +350,10 @@ fn setup_with_defaulted_invoice<'a>(
     admin: &Address,
     payout_caller: &Address,
     client: &super::InsuranceContractClient<'a>,
-) -> (invofi_registry::RegistryContractClient<'a>, soroban_sdk::Symbol) {
+) -> (
+    invofi_registry::RegistryContractClient<'a>,
+    soroban_sdk::Symbol,
+) {
     use soroban_sdk::symbol_short;
     // Deploy a registry, wire it to the insurance contract.
     let registry_id = env.register(RegistryContract, (admin.clone(),));
@@ -392,8 +407,7 @@ fn test_payout_after_default_covers_claim() {
     // Configure payout caller and registry with a Defaulted invoice.
     client.set_payout_caller(&one(&env, &admin), &payout_caller);
     assert_eq!(client.get_payout_caller(), Some(payout_caller.clone()));
-    let (_reg, invoice_id) =
-        setup_with_defaulted_invoice(&env, &admin, &payout_caller, &client);
+    let (_reg, invoice_id) = setup_with_defaulted_invoice(&env, &admin, &payout_caller, &client);
 
     // Default triggers a 400k payout claim — fully covered by the pool.
     let paid = client.pay_out(&invoice_id, &beneficiary, &400_000);
@@ -421,8 +435,7 @@ fn test_payout_pool_depleted_pays_whats_left() {
     mint_and_approve(&env, &token_id, &insurance_id, &staker, 100_000);
     client.stake(&staker, &100_000);
     client.set_payout_caller(&one(&env, &admin), &payout_caller);
-    let (_reg, invoice_id) =
-        setup_with_defaulted_invoice(&env, &admin, &payout_caller, &client);
+    let (_reg, invoice_id) = setup_with_defaulted_invoice(&env, &admin, &payout_caller, &client);
 
     // Claim (1M) far exceeds the pool (100k) — lender gets everything left.
     // payout is capped at available reserves; it never exceeds pool_total.
@@ -458,8 +471,7 @@ fn test_payout_pro_rata_multiple_stakers_exact() {
     client.stake(&staker_a, &1_000_000);
     client.stake(&staker_b, &3_000_000);
     client.set_payout_caller(&one(&env, &admin), &payout_caller);
-    let (_reg, invoice_id) =
-        setup_with_defaulted_invoice(&env, &admin, &payout_caller, &client);
+    let (_reg, invoice_id) = setup_with_defaulted_invoice(&env, &admin, &payout_caller, &client);
 
     // 2M payout -> each staker loses exactly their pro-rata share.
     let paid = client.pay_out(&invoice_id, &beneficiary, &2_000_000);

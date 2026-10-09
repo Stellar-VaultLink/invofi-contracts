@@ -258,18 +258,45 @@ fn test_get_events_by_type_filters_correctly() {
     env.ledger().set_timestamp(1000);
 
     let actor = Address::generate(&env);
-    record(&client, &recorder, &symbol_short!("inv_reg"), &actor, &symbol_short!("inv1"));
-    record(&client, &recorder, &symbol_short!("off_new"), &actor, &symbol_short!("off1"));
-    record(&client, &recorder, &symbol_short!("inv_reg"), &actor, &symbol_short!("inv2"));
+    record(
+        &client,
+        &recorder,
+        &symbol_short!("inv_reg"),
+        &actor,
+        &symbol_short!("inv1"),
+    );
+    record(
+        &client,
+        &recorder,
+        &symbol_short!("off_new"),
+        &actor,
+        &symbol_short!("off1"),
+    );
+    record(
+        &client,
+        &recorder,
+        &symbol_short!("inv_reg"),
+        &actor,
+        &symbol_short!("inv2"),
+    );
 
     let inv_events = client.get_events_by_type(&symbol_short!("inv_reg"), &0, &10);
     assert_eq!(inv_events.len(), 2);
-    assert_eq!(inv_events.get(0).unwrap().event_type, symbol_short!("inv_reg"));
-    assert_eq!(inv_events.get(1).unwrap().event_type, symbol_short!("inv_reg"));
+    assert_eq!(
+        inv_events.get(0).unwrap().event_type,
+        symbol_short!("inv_reg")
+    );
+    assert_eq!(
+        inv_events.get(1).unwrap().event_type,
+        symbol_short!("inv_reg")
+    );
 
     let off_events = client.get_events_by_type(&symbol_short!("off_new"), &0, &10);
     assert_eq!(off_events.len(), 1);
-    assert_eq!(off_events.get(0).unwrap().event_type, symbol_short!("off_new"));
+    assert_eq!(
+        off_events.get(0).unwrap().event_type,
+        symbol_short!("off_new")
+    );
 }
 
 #[test]
@@ -299,13 +326,40 @@ fn test_get_events_by_type_count() {
     env.ledger().set_timestamp(1000);
 
     let actor = Address::generate(&env);
-    record(&client, &recorder, &symbol_short!("inv_reg"), &actor, &symbol_short!("inv1"));
-    record(&client, &recorder, &symbol_short!("off_new"), &actor, &symbol_short!("off1"));
-    record(&client, &recorder, &symbol_short!("inv_reg"), &actor, &symbol_short!("inv2"));
+    record(
+        &client,
+        &recorder,
+        &symbol_short!("inv_reg"),
+        &actor,
+        &symbol_short!("inv1"),
+    );
+    record(
+        &client,
+        &recorder,
+        &symbol_short!("off_new"),
+        &actor,
+        &symbol_short!("off1"),
+    );
+    record(
+        &client,
+        &recorder,
+        &symbol_short!("inv_reg"),
+        &actor,
+        &symbol_short!("inv2"),
+    );
 
-    assert_eq!(client.get_events_by_type_count(&symbol_short!("inv_reg")), 2);
-    assert_eq!(client.get_events_by_type_count(&symbol_short!("off_new")), 1);
-    assert_eq!(client.get_events_by_type_count(&symbol_short!("inv_rep")), 0);
+    assert_eq!(
+        client.get_events_by_type_count(&symbol_short!("inv_reg")),
+        2
+    );
+    assert_eq!(
+        client.get_events_by_type_count(&symbol_short!("off_new")),
+        1
+    );
+    assert_eq!(
+        client.get_events_by_type_count(&symbol_short!("inv_rep")),
+        0
+    );
 }
 
 // ─── Query by time range tests ──────────────────────────────────────────────
@@ -324,13 +378,31 @@ fn test_get_events_by_time_filters_correctly() {
     let actor = Address::generate(&env);
 
     env.ledger().set_timestamp(100);
-    record(&client, &recorder, &symbol_short!("inv_reg"), &actor, &symbol_short!("inv1"));
+    record(
+        &client,
+        &recorder,
+        &symbol_short!("inv_reg"),
+        &actor,
+        &symbol_short!("inv1"),
+    );
 
     env.ledger().set_timestamp(200);
-    record(&client, &recorder, &symbol_short!("off_new"), &actor, &symbol_short!("off1"));
+    record(
+        &client,
+        &recorder,
+        &symbol_short!("off_new"),
+        &actor,
+        &symbol_short!("off1"),
+    );
 
     env.ledger().set_timestamp(300);
-    record(&client, &recorder, &symbol_short!("inv_reg"), &actor, &symbol_short!("inv2"));
+    record(
+        &client,
+        &recorder,
+        &symbol_short!("inv_reg"),
+        &actor,
+        &symbol_short!("inv2"),
+    );
 
     // Range [150, 250] should return only the event at timestamp 200
     let result = client.get_events_by_time(&150, &250, &0, &10);
@@ -353,11 +425,29 @@ fn test_get_events_by_time_pagination() {
     let actor = Address::generate(&env);
 
     env.ledger().set_timestamp(100);
-    record(&client, &recorder, &symbol_short!("inv_reg"), &actor, &symbol_short!("inv1"));
+    record(
+        &client,
+        &recorder,
+        &symbol_short!("inv_reg"),
+        &actor,
+        &symbol_short!("inv1"),
+    );
     env.ledger().set_timestamp(200);
-    record(&client, &recorder, &symbol_short!("inv_reg"), &actor, &symbol_short!("inv2"));
+    record(
+        &client,
+        &recorder,
+        &symbol_short!("inv_reg"),
+        &actor,
+        &symbol_short!("inv2"),
+    );
     env.ledger().set_timestamp(300);
-    record(&client, &recorder, &symbol_short!("inv_reg"), &actor, &symbol_short!("inv3"));
+    record(
+        &client,
+        &recorder,
+        &symbol_short!("inv_reg"),
+        &actor,
+        &symbol_short!("inv3"),
+    );
 
     let page1 = client.get_events_by_time(&100, &300, &0, &2);
     assert_eq!(page1.len(), 2);
@@ -391,9 +481,27 @@ fn test_get_events_by_actor_filters_correctly() {
     let actor_a = Address::generate(&env);
     let actor_b = Address::generate(&env);
 
-    record(&client, &recorder, &symbol_short!("inv_reg"), &actor_a, &symbol_short!("inv1"));
-    record(&client, &recorder, &symbol_short!("off_new"), &actor_a, &symbol_short!("off1"));
-    record(&client, &recorder, &symbol_short!("inv_reg"), &actor_b, &symbol_short!("inv2"));
+    record(
+        &client,
+        &recorder,
+        &symbol_short!("inv_reg"),
+        &actor_a,
+        &symbol_short!("inv1"),
+    );
+    record(
+        &client,
+        &recorder,
+        &symbol_short!("off_new"),
+        &actor_a,
+        &symbol_short!("off1"),
+    );
+    record(
+        &client,
+        &recorder,
+        &symbol_short!("inv_reg"),
+        &actor_b,
+        &symbol_short!("inv2"),
+    );
 
     let a_events = client.get_events_by_actor(&actor_a, &0, &10);
     assert_eq!(a_events.len(), 2);
@@ -429,9 +537,27 @@ fn test_get_events_by_actor_count() {
     let actor_a = Address::generate(&env);
     let actor_b = Address::generate(&env);
 
-    record(&client, &recorder, &symbol_short!("inv_reg"), &actor_a, &symbol_short!("inv1"));
-    record(&client, &recorder, &symbol_short!("off_new"), &actor_a, &symbol_short!("off1"));
-    record(&client, &recorder, &symbol_short!("inv_reg"), &actor_b, &symbol_short!("inv2"));
+    record(
+        &client,
+        &recorder,
+        &symbol_short!("inv_reg"),
+        &actor_a,
+        &symbol_short!("inv1"),
+    );
+    record(
+        &client,
+        &recorder,
+        &symbol_short!("off_new"),
+        &actor_a,
+        &symbol_short!("off1"),
+    );
+    record(
+        &client,
+        &recorder,
+        &symbol_short!("inv_reg"),
+        &actor_b,
+        &symbol_short!("inv2"),
+    );
 
     assert_eq!(client.get_events_by_actor_count(&actor_a), 2);
     assert_eq!(client.get_events_by_actor_count(&actor_b), 1);
@@ -446,13 +572,31 @@ fn test_prune_events_removes_old_records() {
     let actor = Address::generate(&env);
 
     env.ledger().set_timestamp(100);
-    record(&client, &recorder, &symbol_short!("inv_reg"), &actor, &symbol_short!("inv1"));
+    record(
+        &client,
+        &recorder,
+        &symbol_short!("inv_reg"),
+        &actor,
+        &symbol_short!("inv1"),
+    );
 
     env.ledger().set_timestamp(200);
-    record(&client, &recorder, &symbol_short!("off_new"), &actor, &symbol_short!("off1"));
+    record(
+        &client,
+        &recorder,
+        &symbol_short!("off_new"),
+        &actor,
+        &symbol_short!("off1"),
+    );
 
     env.ledger().set_timestamp(300);
-    record(&client, &recorder, &symbol_short!("inv_reg"), &actor, &symbol_short!("inv2"));
+    record(
+        &client,
+        &recorder,
+        &symbol_short!("inv_reg"),
+        &actor,
+        &symbol_short!("inv2"),
+    );
 
     assert_eq!(client.get_event_count(), 3);
 
@@ -477,10 +621,22 @@ fn test_prune_events_removes_from_type_index() {
     let actor = Address::generate(&env);
 
     env.ledger().set_timestamp(100);
-    record(&client, &recorder, &symbol_short!("inv_reg"), &actor, &symbol_short!("inv1"));
+    record(
+        &client,
+        &recorder,
+        &symbol_short!("inv_reg"),
+        &actor,
+        &symbol_short!("inv1"),
+    );
 
     env.ledger().set_timestamp(200);
-    record(&client, &recorder, &symbol_short!("inv_reg"), &actor, &symbol_short!("inv2"));
+    record(
+        &client,
+        &recorder,
+        &symbol_short!("inv_reg"),
+        &actor,
+        &symbol_short!("inv2"),
+    );
 
     // Prune the first event
     client.prune_events(&admin, &200);
@@ -501,10 +657,22 @@ fn test_prune_events_removes_from_actor_index() {
     let actor = Address::generate(&env);
 
     env.ledger().set_timestamp(100);
-    record(&client, &recorder, &symbol_short!("inv_reg"), &actor, &symbol_short!("inv1"));
+    record(
+        &client,
+        &recorder,
+        &symbol_short!("inv_reg"),
+        &actor,
+        &symbol_short!("inv1"),
+    );
 
     env.ledger().set_timestamp(200);
-    record(&client, &recorder, &symbol_short!("off_new"), &actor, &symbol_short!("off1"));
+    record(
+        &client,
+        &recorder,
+        &symbol_short!("off_new"),
+        &actor,
+        &symbol_short!("off1"),
+    );
 
     // Prune the first event
     client.prune_events(&admin, &200);
@@ -520,7 +688,13 @@ fn test_prune_events_no_op_when_nothing_to_prune() {
 
     let actor = Address::generate(&env);
     env.ledger().set_timestamp(1000);
-    record(&client, &recorder, &symbol_short!("inv_reg"), &actor, &symbol_short!("inv1"));
+    record(
+        &client,
+        &recorder,
+        &symbol_short!("inv_reg"),
+        &actor,
+        &symbol_short!("inv1"),
+    );
 
     // Prune events before timestamp 500 (nothing to prune)
     let pruned = client.prune_events(&admin, &500);
@@ -534,10 +708,22 @@ fn test_prune_events_removes_all() {
 
     let actor = Address::generate(&env);
     env.ledger().set_timestamp(100);
-    record(&client, &recorder, &symbol_short!("inv_reg"), &actor, &symbol_short!("inv1"));
+    record(
+        &client,
+        &recorder,
+        &symbol_short!("inv_reg"),
+        &actor,
+        &symbol_short!("inv1"),
+    );
 
     env.ledger().set_timestamp(200);
-    record(&client, &recorder, &symbol_short!("off_new"), &actor, &symbol_short!("off1"));
+    record(
+        &client,
+        &recorder,
+        &symbol_short!("off_new"),
+        &actor,
+        &symbol_short!("off1"),
+    );
 
     // Prune everything
     let pruned = client.prune_events(&admin, &300);
@@ -552,7 +738,13 @@ fn test_prune_events_emits_event() {
 
     let actor = Address::generate(&env);
     env.ledger().set_timestamp(100);
-    record(&client, &recorder, &symbol_short!("inv_reg"), &actor, &symbol_short!("inv1"));
+    record(
+        &client,
+        &recorder,
+        &symbol_short!("inv_reg"),
+        &actor,
+        &symbol_short!("inv1"),
+    );
 
     client.prune_events(&admin, &200);
 
@@ -588,19 +780,43 @@ fn test_complex_scenario_multiple_actors_types() {
 
     // Register invoice
     env.ledger().set_timestamp(100);
-    record(&client, &recorder, &symbol_short!("inv_reg"), &originator, &symbol_short!("inv001"));
+    record(
+        &client,
+        &recorder,
+        &symbol_short!("inv_reg"),
+        &originator,
+        &symbol_short!("inv001"),
+    );
 
     // Create offer
     env.ledger().set_timestamp(200);
-    record(&client, &recorder, &symbol_short!("off_new"), &lender, &symbol_short!("off001"));
+    record(
+        &client,
+        &recorder,
+        &symbol_short!("off_new"),
+        &lender,
+        &symbol_short!("off001"),
+    );
 
     // Accept offer
     env.ledger().set_timestamp(300);
-    record(&client, &recorder, &symbol_short!("off_acc"), &originator, &symbol_short!("off001"));
+    record(
+        &client,
+        &recorder,
+        &symbol_short!("off_acc"),
+        &originator,
+        &symbol_short!("off001"),
+    );
 
     // Repay
     env.ledger().set_timestamp(400);
-    record(&client, &recorder, &symbol_short!("inv_rep"), &originator, &symbol_short!("inv001"));
+    record(
+        &client,
+        &recorder,
+        &symbol_short!("inv_rep"),
+        &originator,
+        &symbol_short!("inv001"),
+    );
 
     assert_eq!(client.get_event_count(), 4);
 
