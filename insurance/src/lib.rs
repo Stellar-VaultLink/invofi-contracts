@@ -54,6 +54,15 @@ fn post_upgrade(_env: &Env) {}
 
 // ─── Constants ────────────────────────────────────────────────────────────────
 
+/// Minimum allowed stake (first deposit and top-up invariant), in settlement-
+/// token units: 0.1 XLM / 0.1 USDC. Purpose: keep dust positions (ledger
+/// entries whose value is out of proportion to their rent and payout-math
+/// noise) out of the pool. The floor applies to the first `stake` /
+/// `stake_tier` deposit of every position; top-ups are free-form but may
+/// never leave a position below the floor, and full exits (`unstake` /
+/// `unstake_tier` to zero) are exempt. See ADR-0013 and issue #101.
+pub const MIN_STAKE_AMOUNT: i128 = 1_000_000;
+
 /// Seconds in a 365-day year. Mirrors `MAX_OFFER_DURATION_SECS` in common.
 const SECONDS_PER_YEAR: u64 = 31_536_000;
 const BPS_DENOMINATOR: i128 = 10_000;
@@ -645,11 +654,21 @@ impl InsuranceContract {
     /// Deposit into a selected insurance tier. The existing `stake` entrypoint
     /// remains the legacy flat-pool API; new integrations must use this
     /// tier-aware entrypoint.
+    ///
+    /// Enforces the protocol's minimum stake floor of `MIN_STAKE_AMOUNT`
+    /// (issue #101). Top-ups are allowed at any amount once a tier position
+    /// exists, with the invariant “top-ups never leave a position below the
+    /// floor”; full exits remain exempt via `unstake_tier`.
     pub fn stake_tier(env: Env, staker: Address, tier: InsuranceTier, amount: i128) {
         assert_not_paused(&env);
         staker.require_auth();
         if amount <= 0 {
             env.panic_with_error(ContractError::InvalidInput);
+        }
+        let key = tier_key(&staker, tier);
+        let existing = load_tier_stakes(&env).get(key.clone()).unwrap_or(0);
+        if existing + amount < MIN_STAKE_AMOUNT {
+            env.panic_with_error(ContractError::InvalidInput); // below the minimum stake (issue #101)
         }
         let token_addr = load_token(&env);
         token::TokenClient::new(&env, &token_addr).transfer_from(
@@ -659,13 +678,11 @@ impl InsuranceContract {
             &amount,
         );
 
-        let key = tier_key(&staker, tier);
         let mut stakes = load_tier_stakes(&env);
         let mut timestamps = load_tier_timestamps(&env);
         let mut accruals = load_tier_accruals(&env);
         let mut pool = load_tier_pool(&env, tier);
         let now = env.ledger().timestamp();
-        let existing = stakes.get(key.clone()).unwrap_or(0);
         if existing > 0 {
             bank_tier_yield(&key, &pool, &stakes, &mut timestamps, &mut accruals, now);
         } else {
@@ -781,6 +798,11 @@ impl InsuranceContract {
     /// approve + transfer_from pattern accept_offer uses on the financing
     /// contract). Credits the staker's balance and the pool total.
     ///
+    /// Enforces the protocol's minimum stake floor of `MIN_STAKE_AMOUNT`
+    /// (issue #101). Top-ups are allowed at any amount once a stake exists,
+    /// with the invariant “top-ups never leave a position below the floor”;
+    /// full exits remain exempt via `unstake`.
+    ///
     /// If the staker already has an existing balance, the yield accrued since
     /// the last stake is banked at the current rate before the new principal
     /// is added, and the clock resets. This ensures top-ups do not
@@ -790,6 +812,10 @@ impl InsuranceContract {
         staker.require_auth();
         if amount <= 0 {
             env.panic_with_error(ContractError::InvalidInput);
+        }
+        let existing = load_stakes(&env).get(staker.clone()).unwrap_or(0);
+        if existing + amount < MIN_STAKE_AMOUNT {
+            env.panic_with_error(ContractError::InvalidInput); // below the minimum stake (issue #101)
         }
 
         let token_addr = load_token(&env);
@@ -810,7 +836,6 @@ impl InsuranceContract {
 
         // If staker already has a balance, bank their yield before top-up so
         // the new principal doesn't inflate historical accrual.
-        let existing = stakes.get(staker.clone()).unwrap_or(0);
         if existing > 0 {
             bank_accrued_yield(&env, &staker, &stakes, &mut timestamps, &mut accruals, now);
         } else {
