@@ -222,6 +222,7 @@ All contracts emit machine-readable `E_*` error codes (see [docs/error-codes.md]
 | `MAX_VERIFIERS` | 20 | Maximum size of the trusted verifier set |
 | `MAX_ATTESTATIONS_PER_INVOICE` | 60 | Cap on stored attestations per invoice |
 | `DECAY_HALF_LIFE_SECS` | 7,776,000 | Reputation score decay half-life (90 days, issue #139) |
+| `MIN_STAKE_AMOUNT` | 1,000,000 | Minimum insurance stake in stroops — first deposit in `stake` / `stake_tier` must be at least this (0.1 XLM / 0.1 USDC); top-ups must never leave a position below it; full exits are exempt (issue #101, [ADR-0013](./docs/adr/0013-insurance-minimum-stake.md)) |
 
 ---
 

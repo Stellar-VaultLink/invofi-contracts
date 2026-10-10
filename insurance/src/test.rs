@@ -122,12 +122,12 @@ fn test_stake_increases_existing_balance() {
     let (token_id, insurance_id, client) = setup(&env, &admin);
 
     let staker = Address::generate(&env);
-    mint_and_approve(&env, &token_id, &insurance_id, &staker, 1_000_000);
-    client.stake(&staker, &400_000);
-    client.stake(&staker, &600_000);
+    mint_and_approve(&env, &token_id, &insurance_id, &staker, 1_000_000_000);
+    client.stake(&staker, &400_000_000);
+    client.stake(&staker, &600_000_000);
 
-    assert_eq!(client.get_stake(&staker), 1_000_000);
-    assert_eq!(client.get_pool_total(), 1_000_000);
+    assert_eq!(client.get_stake(&staker), 1_000_000_000);
+    assert_eq!(client.get_pool_total(), 1_000_000_000);
     assert_eq!(client.get_stakers_count(), 1);
 }
 
@@ -143,10 +143,10 @@ fn test_unstake_exceeds_stake_panics() {
     let (token_id, insurance_id, client) = setup(&env, &admin);
 
     let staker = Address::generate(&env);
-    mint_and_approve(&env, &token_id, &insurance_id, &staker, 1_000_000);
-    client.stake(&staker, &500_000);
+    mint_and_approve(&env, &token_id, &insurance_id, &staker, 1_000_000_000);
+    client.stake(&staker, &500_000_000);
 
-    client.unstake(&staker, &600_000);
+    client.unstake(&staker, &600_000_000);
 }
 
 #[test]
@@ -160,6 +160,113 @@ fn test_unstake_without_stake_panics() {
 
     let stranger = Address::generate(&env);
     client.unstake(&stranger, &1_000);
+}
+
+// ─── Minimum stake floor (issue #101, ADR-0013) ─────────────────────────
+
+#[test]
+#[should_panic(expected = "Error(Contract, #6)")]
+fn test_stake_below_minimum_panics() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let admin = Address::generate(&env);
+    let (token_id, insurance_id, client) = setup(&env, &admin);
+
+    let staker = Address::generate(&env);
+    mint_and_approve(&env, &token_id, &insurance_id, &staker, 999_999);
+    client.stake(&staker, &999_999);
+}
+
+#[test]
+fn test_stake_at_minimum_succeeds() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let admin = Address::generate(&env);
+    let (token_id, insurance_id, client) = setup(&env, &admin);
+
+    let staker = Address::generate(&env);
+    mint_and_approve(&env, &token_id, &insurance_id, &staker, 1_000_000);
+    client.stake(&staker, &1_000_000);
+
+    assert_eq!(client.get_stake(&staker), 1_000_000);
+    assert_eq!(client.get_pool_total(), 1_000_000);
+}
+
+#[test]
+fn test_unstake_to_zero_always_allowed_despite_floor() {
+    // The floor governs entry and growth, not exit: a position may always
+    // be fully unwound to zero (ADR-0013).
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let admin = Address::generate(&env);
+    let (token_id, insurance_id, client) = setup(&env, &admin);
+
+    let staker = Address::generate(&env);
+    mint_and_approve(&env, &token_id, &insurance_id, &staker, 1_000_000);
+    client.stake(&staker, &1_000_000);
+    client.unstake(&staker, &1_000_000);
+
+    assert_eq!(client.get_stake(&staker), 0);
+    assert_eq!(client.get_pool_total(), 0);
+}
+
+#[test]
+fn test_topup_restores_floor_after_partial_exit_below_it() {
+    // A partial exit may leave a position under the floor; a subsequent
+    // top-up that brings it back up to `MIN_STAKE_AMOUNT` is allowed.
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let admin = Address::generate(&env);
+    let (token_id, insurance_id, client) = setup(&env, &admin);
+
+    let staker = Address::generate(&env);
+    // Approve once for the full path: first stake (1.5M) + the
+    // floor-restoring top-up (500k).
+    mint_and_approve(&env, &token_id, &insurance_id, &staker, 2_000_000);
+    client.stake(&staker, &1_500_000);
+    client.unstake(&staker, &1_000_000);
+    assert_eq!(client.get_stake(&staker), 500_000);
+
+    client.stake(&staker, &500_000);
+    assert_eq!(client.get_stake(&staker), 1_000_000);
+}
+
+#[test]
+#[should_panic(expected = "Error(Contract, #6)")]
+fn test_topup_leaving_position_below_minimum_panics() {
+    // Symmetric to the restore case: a top-up that does not bring a
+    // sub-floor position back up to the floor is rejected.
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let admin = Address::generate(&env);
+    let (token_id, insurance_id, client) = setup(&env, &admin);
+
+    let staker = Address::generate(&env);
+    mint_and_approve(&env, &token_id, &insurance_id, &staker, 2_000_000);
+    client.stake(&staker, &1_500_000);
+    client.unstake(&staker, &1_000_000);
+    assert_eq!(client.get_stake(&staker), 500_000);
+
+    client.stake(&staker, &200_000);
+}
+
+#[test]
+#[should_panic(expected = "Error(Contract, #6)")]
+fn test_stake_tier_below_minimum_panics() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let admin = Address::generate(&env);
+    let (token_id, insurance_id, client) = setup(&env, &admin);
+
+    let staker = Address::generate(&env);
+    mint_and_approve(&env, &token_id, &insurance_id, &staker, 999_999);
+    client.stake_tier(&staker, &InsuranceTier::Conservative, &999_999);
 }
 
 #[test]
@@ -432,25 +539,25 @@ fn test_payout_pool_depleted_pays_whats_left() {
     let (token_id, insurance_id, client) = setup(&env, &admin);
 
     let staker = Address::generate(&env);
-    mint_and_approve(&env, &token_id, &insurance_id, &staker, 100_000);
-    client.stake(&staker, &100_000);
+    mint_and_approve(&env, &token_id, &insurance_id, &staker, 1_000_000);
+    client.stake(&staker, &1_000_000);
     client.set_payout_caller(&one(&env, &admin), &payout_caller);
     let (_reg, invoice_id) = setup_with_defaulted_invoice(&env, &admin, &payout_caller, &client);
 
-    // Claim (1M) far exceeds the pool (100k) — lender gets everything left.
+    // Claim (10M) far exceeds the pool (1M) — lender gets everything left.
     // payout is capped at available reserves; it never exceeds pool_total.
-    let paid = client.pay_out(&invoice_id, &beneficiary, &1_000_000);
-    assert_eq!(paid, 100_000); // capped at available balance, not reverted
+    let paid = client.pay_out(&invoice_id, &beneficiary, &10_000_000);
+    assert_eq!(paid, 1_000_000); // capped at available balance, not reverted
 
     assert_eq!(client.get_pool_total(), 0);
     assert_eq!(client.get_stake(&staker), 0);
     assert_eq!(client.get_stakers_count(), 0);
     assert_eq!(client.get_contract_token_balance(), 0);
     let token_client = token::TokenClient::new(&env, &token_id);
-    assert_eq!(token_client.balance(&beneficiary), 100_000);
+    assert_eq!(token_client.balance(&beneficiary), 1_000_000);
 
     // Subsequent call against an already-empty pool returns 0.
-    assert_eq!(client.pay_out(&invoice_id, &beneficiary, &1_000_000), 0);
+    assert_eq!(client.pay_out(&invoice_id, &beneficiary, &10_000_000), 0);
 }
 
 #[test]
